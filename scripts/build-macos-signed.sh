@@ -207,6 +207,6 @@ fi
 echo "== 배포본 정리 + 자동업데이트 매니페스트 =="
 mkdir -p dist-mac
 cp "$DMG" "dist-mac/cys-${VERSION}-macos-${DIST_ARCH}.dmg"
-sh scripts/make-update-manifest.sh "$VERSION" idoforgod cys-terminal >/dev/null 2>&1 || true
+sh scripts/make-update-manifest.sh "$VERSION" greatson79 wave-terminal >/dev/null 2>&1 || true
 echo "✓ 공증 빌드 완료: dist-mac/cys-${VERSION}-macos-${DIST_ARCH}.dmg"
 echo "  → ad-hoc 재서명·xattr 우회 불필요. gh release 발행은 오너 승인 후."

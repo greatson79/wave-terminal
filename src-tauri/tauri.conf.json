@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "cys",
-  "version": "0.12.64",
-  "identifier": "com.cysjavis.terminal",
+  "productName": "Wave Terminal",
+  "version": "0.1.0",
+  "identifier": "com.waveainetworks.wave-terminal",
   "build": {
     "frontendDist": "../ui/dist",
     "beforeBuildCommand": "sh ../scripts/bundle-prep.sh"
@@ -11,7 +11,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "cys — CYSJavis Terminal",
+        "title": "Wave Terminal — CYSJavis Terminal",
         "width": 1280,
         "height": 820
       }
@@ -22,7 +22,7 @@
   },
   "bundle": {
     "active": true,
-    "createUpdaterArtifacts": true,
+    "createUpdaterArtifacts": false,
     "targets": [
       "app",
       "dmg"
@@ -46,9 +46,9 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM5RTYwQTcwMjk0OUQ2QzMKUldURDFra3BjQXJtT1dvZVBUdHk5VnlvKzBJeVNneE11UzdpWFQzVHFoMDFtUG4wZWpkdGlHZ0wK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXkgMDJCRTE3RUI2RUI4MDRBMQpSV1NoQkxodTZ4ZStBbnpkTGhPS1V1WHlaYjZGUGp1QlNXRzBzN1NQYWN5M3Y5bzRRdDhZOW1xSQo=",
       "endpoints": [
-        "https://github.com/idoforgod/cys-terminal/releases/latest/download/latest.json"
+        "https://github.com/greatson79/wave-terminal/releases/download/v0.1.0/latest.json"
       ]
     }
   }

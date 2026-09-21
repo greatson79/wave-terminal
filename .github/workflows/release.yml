@@ -19,7 +19,7 @@ permissions:
   contents: write          # 비공개 repo에 릴리스 생성·자산 업로드(+ relocate 단계 다운로드)에 필요
 
 env:
-  SRC_REPO: idoforgod/cys-terminal              # 공개 소스 repo = 공개 배포 원본 (updater 대상)
+  SRC_REPO: greatson79/wave-terminal           # Wave Terminal 공개 배포 원본
 
 jobs:
   build:

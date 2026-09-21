@@ -20,7 +20,7 @@ on:
       - "pack-v*"
 
 env:
-  SRC_REPO: idoforgod/cys-terminal
+  SRC_REPO: greatson79/wave-terminal
 
 jobs:
   pack-only:

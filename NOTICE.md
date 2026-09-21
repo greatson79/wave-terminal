@@ -1,6 +1,6 @@
 # NOTICE — Third-Party Attributions
 
-cys-terminal is licensed under the MIT License (see `LICENSE`).
+Wave Terminal is a derivative of `idoforgod/cys-terminal` and is licensed under the MIT License (see `LICENSE`).
 This file consolidates third-party attributions for discoverability.
 
 ## Vendored code

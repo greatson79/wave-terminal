@@ -1,6 +1,9 @@
-# cys-terminal
+# Wave Terminal
 
 **AI 에이전트 함대를 지휘하는 오케스트레이션 터미널.** macOS · Windows 크로스플랫폼.
+
+> Wave Terminal은 **CYSJavis(idoforgod)의 [cys-terminal](https://github.com/idoforgod/cys-terminal) (MIT)**을
+> 기반으로 Wave AI Networks가 빌드·배포하는 파생본입니다. 바이너리 이름 `cys`·`cysd`는 상류 호환성을 위해 유지합니다.
 
 터미널 멀티플렉서 + 로컬 데몬 + 관제 대시보드 + 멀티에이전트 운영체계(CYSJavis 팩)가
 한 몸입니다. Claude Code·Codex 같은 CLI 에이전트 여러 개를 역할(마스터·워커·CSO·리뷰어)로
@@ -59,13 +62,13 @@
 
 ## 설치
 
-[Releases](https://github.com/idoforgod/cys-terminal/releases/latest)에서 받으세요.
+[Wave Terminal v0.1.0 Release](https://github.com/greatson79/wave-terminal/releases/tag/v0.1.0)에서 받으세요.
 받는 사람은 **데몬을 따로 설치할 필요가 없습니다** — 앱이 자동 기동하고 팩도 자동 설치됩니다.
 
-- **macOS**: `cys_<버전>_aarch64.dmg` (Apple Silicon) — 동봉된 **"Install cys.app" 도우미**가
+- **macOS**: `wave-terminal-0.1.0-macos-arm64.dmg` (Apple Silicon) — 동봉된 **"Install cys.app" 도우미**가
   숨김 스테이징 후 단일 시스템콜(`renamex_np`)로 원자 교체해, Finder 드래그가 복사 도중
   반쪽 번들을 노출하던 경합을 제거합니다(덮어쓰기 대신 도우미 설치 권장).
-- **Windows**: `cys_<버전>_x64-setup.exe` — 데몬·CLI·런타임 동봉(자기완결 설치).
+- **Windows**: `wave-terminal-0.1.0-windows-x64-setup.exe` — 데몬·CLI·런타임 동봉(자기완결 설치).
   PE 버전리소스·매니페스트·아이콘 임베드로 SmartScreen/Defender 마찰을 낮췄으나
   **여전히 미서명이라 첫 실행 경고가 뜰 수 있습니다**.
   상세: [docs/INSTALL-Windows-KR.md](docs/INSTALL-Windows-KR.md)

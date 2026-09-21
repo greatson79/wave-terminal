@@ -1,8 +1,8 @@
 [package]
 name = "cys-app"
-version = "0.12.64"
+version = "0.1.0"
 edition = "2021"
-description = "cys UI shell (Tauri 2) — thin client over the cysd socket"
+description = "Wave Terminal UI shell (Tauri 2) — thin client over the cysd socket"
 license = "MIT"
 
 [build-dependencies]

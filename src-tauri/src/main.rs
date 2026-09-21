@@ -1924,7 +1924,7 @@ async fn check_update(app: AppHandle) -> Result<Option<Value>, String> {
 /// release 'latest' 자산에 동봉된다(release.yml이 함께 업로드, DESIGN §5 파일맵).
 fn default_pack_manifest_url() -> String {
     // Phase 2 릴리스 통합(2026-07-03): 배포 원본 = 공개 소스 repo. 구 repo는 전환기 미러.
-    "https://github.com/idoforgod/cys-terminal/releases/latest/download/pack-manifest.json"
+    "https://github.com/greatson79/wave-terminal/releases/download/v0.1.0/pack-manifest.json"
         .to_string()
 }
 

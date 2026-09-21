@@ -24,6 +24,7 @@ html, body {
   -webkit-user-select: none; user-select: none;
 }
 #brand { font-weight: 700; color: var(--accent); }
+#brand-attribution { color: var(--muted); font-size: 11px; margin-left: 6px; }
 #daemon-info { color: #8b949e; font-size: 11px; }
 /* P2 버전 스큐 배지 — lame-duck 데몬(세션 보존) 안내. 경고색이되 위협적이지 않게(불안 방지가 목적).
    클릭 = 데몬 교대(manualRotateSkewed — 메인+부서 순차). */

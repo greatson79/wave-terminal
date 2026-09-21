@@ -1,6 +1,10 @@
-# cys-terminal
+# Wave Terminal
 
 **An orchestration terminal for commanding fleets of AI agents.** Cross-platform: macOS & Windows.
+
+> Wave Terminal is a derivative built and distributed by Wave AI Networks based on
+> **CYSJavis (idoforgod)'s [cys-terminal](https://github.com/idoforgod/cys-terminal) (MIT)**.
+> The `cys` and `cysd` binary names remain for upstream compatibility.
 
 A terminal multiplexer, a local daemon, a mission-control dashboard, and a multi-agent
 operating system (the CYSJavis pack) in one body. Run several CLI agents (Claude Code,
@@ -70,15 +74,15 @@ releases back up gets written down.
 
 ## Install
 
-Grab the latest from [Releases](https://github.com/idoforgod/cys-terminal/releases/latest).
+Download [Wave Terminal v0.1.0](https://github.com/greatson79/wave-terminal/releases/tag/v0.1.0).
 Recipients **do not install a daemon separately** — the app boots it and installs the
 pack automatically.
 
-- **macOS**: `cys_<version>_aarch64.dmg` (Apple Silicon). A bundled **"Install cys.app"
+- **macOS**: `wave-terminal-0.1.0-macos-arm64.dmg` (Apple Silicon). A bundled **"Install cys.app"
   helper** stages the app hidden, then swaps it into place with a single system call
   (`renamex_np`), eliminating the race where a Finder drag exposed a half-copied bundle
   mid-copy. (Use the helper rather than overwriting by drag.)
-- **Windows**: `cys_<version>_x64-setup.exe` — daemon, CLI, and runtime bundled
+- **Windows**: `wave-terminal-0.1.0-windows-x64-setup.exe` — daemon, CLI, and runtime bundled
   (self-contained). PE version-resource, manifest, and icon embedding reduce
   SmartScreen/Defender friction, but the build **is still unsigned, so a first-run
   warning can appear**. See

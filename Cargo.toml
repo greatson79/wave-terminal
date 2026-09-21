@@ -5,9 +5,9 @@ exclude = ["vendor/portable-pty"]
 
 [package]
 name = "cys-terminal"
-version = "0.12.64"
+version = "0.1.0"
 edition = "2021"
-description = "cys — the CYSJavis terminal: bidirectional socket IPC, multi-agent OS (CYSJavis Pack), governance, heartbeat"
+description = "Wave Terminal — the CYSJavis terminal: bidirectional socket IPC, multi-agent OS, governance, heartbeat"
 license = "MIT"
 
 [lib]

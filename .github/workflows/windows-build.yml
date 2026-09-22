@@ -148,6 +148,23 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "동봉 python3 stdlib import 실패" }
           Write-Host "OK: 자기완결 런타임 설치·실행·경로일치 검증 통과"
 
+      - name: Cold startup timing regression (unchanged 4-second CLI budget)
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          ./scripts/windows-pty-diagnose.ps1 -InstallDirectory (Join-Path $env:LOCALAPPDATA 'Wave Terminal') -OutputDirectory "$pwd/startup-evidence" -RequireReady
+
+      - name: Upload startup timing evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-startup-timing
+          path: |
+            startup-evidence/*.json
+            startup-evidence/*.jsonl
+            startup-evidence/*.log
+          if-no-files-found: warn
+
       - name: PTY 스모크 (검은 pane 회귀 게이트 — ConPTY 셸 출력·실행 실측)
         shell: pwsh
         run: |

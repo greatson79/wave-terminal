@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory)][string]$InstallDirectory,
-  [Parameter(Mandatory)][string]$OutputDirectory
+  [Parameter(Mandatory)][string]$OutputDirectory,
+  [switch]$RequireReady
 )
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Force $OutputDirectory | Out-Null
@@ -51,7 +52,7 @@ function Observe-Startup([string]$label, [string]$exe, [string]$arguments) {
       Write-Host ($row | ConvertTo-Json -Compress -Depth 5)
       $lastSecond=$second; $lastPids=$ids
     }
-    if ($null -ne $firstPipe -and $clock.ElapsedMilliseconds -gt $firstPipe + 2000) { break }
+    if ($null -ne $firstPipe -and $clock.ElapsedMilliseconds -gt $firstPipe + 2000 -and ($label -ne 'cli-cold' -or $process.HasExited)) { break }
     if ($label -eq 'direct-cold' -and $process.HasExited) { break }
     Start-Sleep -Milliseconds 50
   }
@@ -63,11 +64,21 @@ function Observe-Startup([string]$label, [string]$exe, [string]$arguments) {
   $readErr.GetAwaiter().GetResult() | Set-Content $err
   Write-Host ($summary | ConvertTo-Json -Compress)
   Get-Content $err | Write-Host
+  return [pscustomobject]$summary
 }
-Observe-Startup 'cli-cold' $cys 'list'
+$cli = Observe-Startup 'cli-cold' $cys 'list'
 # Separate direct launch captures daemon stderr, which CLI autostart discards.
 # A fresh pack isolates cold initialization without deleting any installed user data.
 $env:CYS_PACK_DIR = Join-Path $OutputDirectory 'fresh-pack'
-Observe-Startup 'direct-cold' $daemon ''
+$direct = Observe-Startup 'direct-cold' $daemon ''
 Remove-Item Env:CYS_PACK_DIR
+if ($RequireReady) {
+  if ($null -eq $cli.first_pipe_ms -or $cli.first_pipe_ms -ge 4000 -or $cli.exit_code -ne 0) {
+    throw "Cold-start regression: pipe=$($cli.first_pipe_ms)ms CLI exit=$($cli.exit_code); required <4000ms and original CLI success"
+  }
+  if ($null -eq $direct.first_pipe_ms -or $direct.first_pipe_ms -ge 4000) {
+    throw "Direct-start regression: pipe=$($direct.first_pipe_ms)ms; required <4000ms"
+  }
+  Write-Host "PASS: cold CLI pipe=$($cli.first_pipe_ms)ms exit=0; direct pipe=$($direct.first_pipe_ms)ms; unchanged 4000ms CLI budget"
+}
 Write-Host 'Diagnostic observation complete; the CLI 4-second budget was not changed.'

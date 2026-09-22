@@ -9,12 +9,18 @@ on:
   push:
     branches: ['feat/windows-x64-dist']
   workflow_dispatch:
+    inputs:
+      diagnostic_only:
+        description: Measure startup timing using the existing draft installer
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   build:
+    if: ${{ !inputs.diagnostic_only }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -416,3 +422,35 @@ jobs:
           # ★Actions pwsh 래퍼는 스크립트 말미에 exit $LASTEXITCODE 를 붙인다 — 위 방어적 uninstall(스모크 finally 가
           #   이미 제거해 rc=1)이 그 값을 오염시켜 '스모크 성공인데 스텝 exit 1'(run 28738140283 실증). 판정은 $code 로 끝 — 명시 exit 0.
           exit 0
+
+  diagnose-existing-installer:
+    if: ${{ inputs.diagnostic_only }}
+    runs-on: windows-latest
+    timeout-minutes: 12
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: cys-windows-x64-nsis
+          run-id: 35711406845
+          github-token: ${{ github.token }}
+          path: diagnostic-installer
+      - name: Install exact failed specimen and measure startup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Get-ChildItem diagnostic-installer/*-setup.exe | Select-Object -First 1
+          if ((Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne '4f1bcd815997da09bb4b7ef9728cb3c5357007af418766cb3ea9cfb932a5373f') { throw 'Wrong specimen' }
+          Start-Process -FilePath $exe.FullName -ArgumentList '/S' -Wait
+          Start-Sleep -Seconds 6
+          Get-Process cys,cysd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          ./scripts/windows-pty-diagnose.ps1 -InstallDirectory (Join-Path $env:LOCALAPPDATA 'Wave Terminal') -OutputDirectory "$pwd/startup-evidence"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-startup-diagnostic
+          path: startup-evidence/
+          if-no-files-found: error

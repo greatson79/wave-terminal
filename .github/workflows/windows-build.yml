@@ -24,7 +24,18 @@ jobs:
       # 누출을 차단한다. 비0이면 워크플로우 실패. windows 러너라 Git Bash로 실행(shell: bash).
       - name: Secret/PII scan (pre-build hard-gate)
         shell: bash
-        run: bash scripts/secret-scan.sh --all
+        run: |
+          set -euo pipefail
+          # Draft installer only: retain the upstream MIT notice unchanged.
+          # Pin its bytes before excluding this known copyright-email false positive.
+          printf '%s  %s\n' '276354517b17be503caab60175d646b53490b3887923972df81a09eec3b069f4' 'LICENSES/cys-terminal-MIT.txt' | sha256sum -c -
+          cmp LICENSE LICENSES/cys-terminal-MIT.txt
+          scan_files=()
+          while IFS= read -r -d '' file; do scan_files+=("$file"); done < <(
+            git ls-files -z -- . ':(exclude)LICENSES/cys-terminal-MIT.txt'
+          )
+          test "${#scan_files[@]}" -gt 0
+          bash scripts/secret-scan.sh "${scan_files[@]}"
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2

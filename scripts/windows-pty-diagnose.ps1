@@ -34,9 +34,18 @@ function Observe-Startup([string]$label, [string]$exe, [string]$arguments) {
   $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
   $process = [Diagnostics.Process]::Start($info)
   $readOut = $process.StandardOutput.ReadToEndAsync()
-  $readErr = $process.StandardError.ReadToEndAsync()
+  $readErr = $process.StandardError.ReadLineAsync()
+  $stderrEnded = $false; $directReady = $false
+  Set-Content $err ''
   $firstPipe = $null; $exitMs = $null; $lastPids = ''; $lastSecond = -1
   while ($clock.ElapsedMilliseconds -lt 90000) {
+    while (-not $stderrEnded -and $readErr.IsCompleted) {
+      $line = $readErr.GetAwaiter().GetResult()
+      if ($null -eq $line) { $stderrEnded = $true; break }
+      Add-Content $err $line
+      if ($line -match 'stage=accept_loop_ready ') { $directReady = $true }
+      $readErr = $process.StandardError.ReadLineAsync()
+    }
     $visible = [StartupPipeProbe]::WaitNamedPipe($pipe, 1)
     $pipeError = if ($visible) { 0 } else { [Runtime.InteropServices.Marshal]::GetLastWin32Error() }
     $processes = @(Get-Process cysd -ErrorAction SilentlyContinue | ForEach-Object {
@@ -52,16 +61,22 @@ function Observe-Startup([string]$label, [string]$exe, [string]$arguments) {
       Write-Host ($row | ConvertTo-Json -Compress -Depth 5)
       $lastSecond=$second; $lastPids=$ids
     }
-    if ($null -ne $firstPipe -and $clock.ElapsedMilliseconds -gt $firstPipe + 2000 -and ($label -ne 'cli-cold' -or $process.HasExited)) { break }
+    $finished = if ($label -eq 'cli-cold') { $process.HasExited } else { -not $RequireReady -or $directReady }
+    if ($null -ne $firstPipe -and $clock.ElapsedMilliseconds -gt $firstPipe + 2000 -and $finished) { break }
     if ($label -eq 'direct-cold' -and $process.HasExited) { break }
     Start-Sleep -Milliseconds 50
   }
-  $summary = [ordered]@{ label=$label; start_utc=$started.ToString('o'); process_pid=$process.Id; first_pipe_ms=$firstPipe; pipe_lateness_after_4000_ms=$(if($null -ne $firstPipe){$firstPipe-4000}else{$null}); observed_ms=$clock.ElapsedMilliseconds; process_exit_ms=$exitMs; exit_code=$(if($process.HasExited){$process.ExitCode}else{$null}) }
+  $summary = [ordered]@{ label=$label; start_utc=$started.ToString('o'); process_pid=$process.Id; first_pipe_ms=$firstPipe; pipe_lateness_after_4000_ms=$(if($null -ne $firstPipe){$firstPipe-4000}else{$null}); observed_ms=$clock.ElapsedMilliseconds; process_exit_ms=$exitMs; exit_code=$(if($process.HasExited){$process.ExitCode}else{$null}); accept_loop_ready=$directReady }
   $summary | ConvertTo-Json | Set-Content (Join-Path $OutputDirectory "$label.summary.json")
   Get-Process cys,cysd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
   $process.WaitForExit(5000) | Out-Null
   $readOut.GetAwaiter().GetResult() | Set-Content $out
-  $readErr.GetAwaiter().GetResult() | Set-Content $err
+  while (-not $stderrEnded) {
+    $line = $readErr.GetAwaiter().GetResult()
+    if ($null -eq $line) { break }
+    Add-Content $err $line
+    $readErr = $process.StandardError.ReadLineAsync()
+  }
   Write-Host ($summary | ConvertTo-Json -Compress)
   Get-Content $err | Write-Host
   return [pscustomobject]$summary
@@ -76,8 +91,8 @@ if ($RequireReady) {
   if ($null -eq $cli.first_pipe_ms -or $cli.first_pipe_ms -ge 4000 -or $cli.exit_code -ne 0) {
     throw "Cold-start regression: pipe=$($cli.first_pipe_ms)ms CLI exit=$($cli.exit_code); required <4000ms and original CLI success"
   }
-  if ($null -eq $direct.first_pipe_ms -or $direct.first_pipe_ms -ge 4000) {
-    throw "Direct-start regression: pipe=$($direct.first_pipe_ms)ms; required <4000ms"
+  if ($null -eq $direct.first_pipe_ms -or $direct.first_pipe_ms -ge 4000 -or -not $direct.accept_loop_ready -or $null -ne $direct.exit_code) {
+    throw "Direct-start regression: pipe=$($direct.first_pipe_ms)ms ready=$($direct.accept_loop_ready) exit=$($direct.exit_code); required <4000ms, completed initialization, and living daemon"
   }
   Write-Host "PASS: cold CLI pipe=$($cli.first_pipe_ms)ms exit=0; direct pipe=$($direct.first_pipe_ms)ms; unchanged 4000ms CLI budget"
 }

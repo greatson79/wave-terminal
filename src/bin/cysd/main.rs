@@ -62,6 +62,28 @@ fn scrub_claude_session_env() {
 #[tokio::main]
 async fn main() {
     scrub_claude_session_env();
+    let socket_path = cys::socket_path();
+    #[cfg(windows)]
+    let startup = std::time::Instant::now();
+    // Claim the singleton before cold filesystem/pack initialization. The CLI's
+    // unchanged 4-second connection budget must not depend on that work, and a
+    // competing daemon must not mutate state before discovering the owner.
+    #[cfg(windows)]
+    let first_pipe = {
+        startup_mark(&startup, "starting", &socket_path);
+        let name = socket_path.to_string_lossy();
+        match create_pipe_instance(&name, true) {
+            Ok(pipe) => {
+                startup_mark(&startup, "pipe_created", &socket_path);
+                pipe
+            }
+            Err(error) => {
+                startup_mark(&startup, "pipe_create_failed", &socket_path);
+                eprintln!("create pipe {name} failed: {error}");
+                std::process::exit(1);
+            }
+        }
+    };
     // ★무중단 rename-swap 잔해 청소(nsis-hooks.nsh의 짝): 업데이트가 잠긴 파일을 죽이는 대신
     // <이름>.prev*(cysd/cys 고정 체인 + unlock-sweep의 <이름>.prev<rand> — msys-2.0.dll 등 세션이
     // 로드한 runtime 이미지)로 밀어두므로, 새 cysd 기동 시 설치 트리를 재귀 순회하며 이름에
@@ -94,6 +116,8 @@ async fn main() {
             sweep_prev(dir, 12);
         }
     }
+    #[cfg(windows)]
+    startup_mark(&startup, "cleanup_complete", &socket_path);
     // crash recovery(§7-⑤): 직전 pack-update가 apply 도중 죽어 남긴 orphan 저널을 install(false)
     // **이전에** 자가치유한다(미커밋=rollback / 커밋완료=정리). 순서가 중요 — install(false)가
     // 부분반영 트리 위에서 돌면 안 되므로 반드시 선행한다.
@@ -102,6 +126,8 @@ async fn main() {
         Ok(false) => {}
         Err(e) => eprintln!("[cysd] pack journal recovery skipped: {e}"),
     }
+    #[cfg(windows)]
+    startup_mark(&startup, "pack_recovery_complete", &socket_path);
     // 온보딩②: 팩이 이 바이너리 버전으로 미커밋일 때만 자동 설치 — 신규 머신·바이너리 업그레이드·
     // 팩 소실(.pack-version/매니페스트 부재 = 게이트 개방)이 실행 조건. launch-agent·디렉티브·acl이
     // "init-pack을 아는 사람"에게만 동작하는 것을 없앤다는 원목적은 유지된다(보존 모드·사용자 파일 불가침).
@@ -119,8 +145,11 @@ async fn main() {
             Err(e) => eprintln!("[cysd] pack auto-install skipped: {e}"),
         }
     }
-    let socket_path = cys::socket_path();
+    #[cfg(windows)]
+    startup_mark(&startup, "pack_install_complete", &socket_path);
     let daemon = Daemon::new(socket_path.clone());
+    #[cfg(windows)]
+    startup_mark(&startup, "state_ready", &socket_path);
 
     governance::spawn_watchdog(Arc::clone(&daemon));
     // ★B2-1(W3): built-in phoenix 잡을 부트 시 idempotent ensure — schedule.json 이 user-owned 로 전환돼
@@ -187,7 +216,27 @@ async fn main() {
         "cysd (CYSJavis terminal daemon) listening on {}",
         socket_path.display()
     );
+    #[cfg(unix)]
     accept_loop(daemon, &socket_path).await;
+    #[cfg(windows)]
+    {
+        startup_mark(&startup, "accept_loop_ready", &socket_path);
+        accept_loop(daemon, &socket_path, first_pipe).await;
+    }
+}
+
+/// Direct diagnostic launches capture these timestamps; CLI autostart keeps its
+/// existing detached stdio behavior. Pipe creation and RPC readiness are distinct.
+#[cfg(windows)]
+fn startup_mark(start: &std::time::Instant, stage: &str, socket: &std::path::Path) {
+    eprintln!(
+        "[cysd-startup] utc={} elapsed_ms={} pid={} stage={} pipe={}",
+        chrono::Utc::now().to_rfc3339(),
+        start.elapsed().as_millis(),
+        std::process::id(),
+        stage,
+        socket.display()
+    );
 }
 
 /// 종료 직전 회수: 원장의 scoped 그룹을 전부 죽이고, stopping 이벤트 발행 후
@@ -1221,11 +1270,13 @@ async fn pipe_listener(
 }
 
 #[cfg(windows)]
-async fn accept_loop(daemon: Arc<Daemon>, socket_path: &std::path::Path) {
+async fn accept_loop(
+    daemon: Arc<Daemon>,
+    socket_path: &std::path::Path,
+    first: tokio::net::windows::named_pipe::NamedPipeServer,
+) {
     let pipe_name = socket_path.to_string_lossy().into_owned();
-    // 첫 인스턴스: first_pipe_instance(true) = 데몬 싱글턴 가드(이름 선점 시 즉사) — 기존 의미 유지.
-    let first = create_pipe_instance(&pipe_name, true)
-        .unwrap_or_else(|e| panic!("create pipe {pipe_name} failed: {e}"));
+    // Keep the original early claim alive; never close/reopen the singleton pipe.
     // ★P0-7 최종 층위(D1/W5): 파이프 listening 직후 공통 부트 — unix accept_loop 와 **동일 함수**(prune +
     //   콜드부트 auto-restore). 과거 이 호출이 Windows 에만 빠져 auto-restore 가 발동조차 안 하고 phoenix-restore.log
     //   가 빈 파일이던 결함(CI 실경로 스모크 ⑧)을 봉인. state_dir 은 함수 내부 canonical 매핑(Windows 슬러그).

@@ -14,6 +14,7 @@
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -501,6 +502,27 @@ def discover_claude_settings():
     return found
 
 
+LIGHT_OPTIONAL_CHECKS = {
+    "C20.nlm-sot": "NotebookLM 및 Google 로그인은 요청 시 사용하는 선택 기능",
+    "C21.harness-creator": "외부 harness-creator 저장소는 요청 시 설치하는 선택 도구",
+    "C24.korean-law-mcp": "한국 법령 MCP는 요청 시 설치하는 선택 도구",
+}
+
+
+def installed_profile():
+    """The shipped manifest selects applicability; absent/unknown stays full."""
+    try:
+        with open(os.path.join(pack_dir(), "manifest.json"), encoding="utf-8-sig") as f:
+            manifest = json.load(f)
+        if (manifest.get("schema") == "wave-pack.manifest.v1"
+                and manifest.get("product") == "Wave Terminal"
+                and manifest.get("profile") == "wave-light"):
+            return "wave-light"
+    except (OSError, ValueError, AttributeError):
+        pass
+    return "full"
+
+
 class Preflight:
     def __init__(self, fix, skips, mode="report", allow_irreversible=False):
         # OPP-17: mode ∈ report(관찰만)|fix(집행)|dry(미리보기)|safe(무변경+갭만).
@@ -517,6 +539,7 @@ class Preflight:
         # planned: may_mutate() 가 기록하는 *비가역 외부설치* 계획 버퍼. 가역 로컬 변경(soul/hook/
         # settings/todo 등)은 self.fix=False 로 일괄 비집행되므로 이 버퍼에 기록되지 않는다(정직 범위).
         self.planned = []
+        self.profile = installed_profile()
         self.skips = set(skips)
         self.results = []
         self._init_pack_ran = None  # None=미시도, True/False=시도 결과
@@ -530,6 +553,9 @@ class Preflight:
         target.append({"id": cid, "status": status, "detail": detail})
 
     def skipped(self, cid):
+        if self.profile == "wave-light" and cid in LIGHT_OPTIONAL_CHECKS:
+            self.add(cid, SKIP, "wave-light 적용 범위 밖: " + LIGHT_OPTIONAL_CHECKS[cid])
+            return True
         if cid in self.skips:
             self.add(cid, SKIP, "skipped by --skip")
             return True
@@ -1362,6 +1388,25 @@ class Preflight:
         cys = shutil.which("cys")
         if not cys:
             self.add(cid, SKIP, "cys 부재로 PATH dir 판정 불가 (C11 먼저)")
+            return
+        if os.name == "nt":
+            link = os.path.join(os.path.dirname(cys), "cys-dept.cmd")
+            content = '@echo off\nbash "' + src.replace("\\", "/").replace("%", "%%") + '" %*\n'
+            try:
+                if os.path.isfile(link):
+                    with open(link, encoding="utf-8") as f:
+                        if f.read() == content:
+                            self.add(cid, PASS, link + " (Windows bash launcher)")
+                            return
+                    self.add(cid, WARN, link + " 기존 파일 내용 상이 — 사용자 파일 보존")
+                elif self.fix:
+                    with open(link, "x", encoding="utf-8", newline="\r\n") as f:
+                        f.write(content)
+                    self.add(cid, FIXED, link + " (Windows bash launcher; 심링크 권한 불요)")
+                else:
+                    self.add(cid, WARN, link + " 미설치 — --fix로 생성")
+            except OSError as e:
+                self.add(cid, WARN, "Windows launcher 생성/읽기 실패: %s" % e)
             return
         link = os.path.join(os.path.dirname(cys), "cys-dept")  # cys와 같은 PATH dir
         if self._symlink_ok(link, src):
@@ -2683,9 +2728,15 @@ class Preflight:
                                 os.unlink(link)
                             else:
                                 continue  # 실디렉(사용자 보유) — 덮지 않음
-                        os.symlink(target, link)
-                    linked_profiles += 1
-                    fixed.append("%s/skills ← 영상 스킬 심링크" % os.path.basename(prof))
+                        self._link_skill(target, link)
+                    unresolved = [name for name in need if not self._symlink_ok(
+                        os.path.join(sdir, name), os.path.join(pack_dir(), "skills", name))]
+                    if unresolved:
+                        warns.append("%s 사용자 스킬 보존·원천과 내용 상이: %s" %
+                                     (os.path.basename(prof), ", ".join(unresolved)))
+                    else:
+                        linked_profiles += 1
+                        fixed.append("%s/skills ← 영상 스킬 연결(Windows 복사)" % os.path.basename(prof))
                 except OSError as e:
                     warns.append("%s 심링크 실패: %s" % (os.path.basename(prof), e))
             else:
@@ -2716,8 +2767,33 @@ class Preflight:
             self.add(cid, FIXED if fixed else PASS, detail)
 
     @staticmethod
+    def _link_skill(target, link):
+        # Non-admin Windows cannot create symlinks without Developer Mode.
+        # copytree refuses existing destinations, preserving user-owned content.
+        if os.name == "nt":
+            shutil.copytree(target, link)
+        else:
+            os.symlink(target, link)
+
+    @staticmethod
     def _symlink_ok(link, target):
-        return os.path.islink(link) and os.path.realpath(link) == os.path.realpath(target)
+        if os.path.islink(link):
+            return os.path.realpath(link) == os.path.realpath(target)
+        if os.name != "nt" or not os.path.isdir(link) or not os.path.isdir(target):
+            return False
+        def tree_signature(root):
+            rows = []
+            for directory, dirs, files in os.walk(root):
+                rows.append((os.path.relpath(directory, root), tuple(sorted(dirs))))
+                for name in sorted(files):
+                    path = os.path.join(directory, name)
+                    with open(path, "rb") as f:
+                        rows.append((os.path.relpath(path, root), hashlib.sha256(f.read()).hexdigest()))
+            return sorted(rows)
+        try:
+            return tree_signature(link) == tree_signature(target)
+        except OSError:
+            return False
 
     @staticmethod
     def _node_major():
@@ -2869,9 +2945,15 @@ class Preflight:
                             os.unlink(link)
                         elif os.path.exists(link):
                             continue
-                        os.symlink(os.path.join(pack_dir(), "skills", s), link)
-                    linked += 1
-                    fixed.append("%s/skills ← appbuild 심링크" % os.path.basename(prof))
+                        self._link_skill(os.path.join(pack_dir(), "skills", s), link)
+                    unresolved = [name for name in need if not self._symlink_ok(
+                        os.path.join(sdir, name), os.path.join(pack_dir(), "skills", name))]
+                    if unresolved:
+                        warns.append("%s 사용자 스킬 보존·원천과 내용 상이: %s" %
+                                     (os.path.basename(prof), ", ".join(unresolved)))
+                    else:
+                        linked += 1
+                        fixed.append("%s/skills ← appbuild 연결(Windows 복사)" % os.path.basename(prof))
                 except OSError as e:
                     warns.append("%s 심링크 실패: %s" % (os.path.basename(prof), e))
             else:
@@ -2997,9 +3079,15 @@ class Preflight:
                             os.unlink(link)
                         elif os.path.exists(link):
                             continue  # 실디렉(사용자 보유) — 덮지 않음
-                        os.symlink(os.path.join(pack_dir(), "skills", s), link)
-                    linked += 1
-                    fixed.append("%s/skills ← 하네스 스킬 심링크" % os.path.basename(prof))
+                        self._link_skill(os.path.join(pack_dir(), "skills", s), link)
+                    unresolved = [name for name in need if not self._symlink_ok(
+                        os.path.join(sdir, name), os.path.join(pack_dir(), "skills", name))]
+                    if unresolved:
+                        warns.append("%s 사용자 스킬 보존·원천과 내용 상이: %s" %
+                                     (os.path.basename(prof), ", ".join(unresolved)))
+                    else:
+                        linked += 1
+                        fixed.append("%s/skills ← 하네스 스킬 연결(Windows 복사)" % os.path.basename(prof))
                 except OSError as e:
                     warns.append("%s 심링크 실패: %s" % (os.path.basename(prof), e))
             else:
@@ -3456,7 +3544,7 @@ class Preflight:
         acked_note = ""
         try:
             scan_tool = os.path.join(pack_dir(), "bin", "javis_skillscan.py")
-            r = subprocess.run([sys.executable, scan_tool, "all", "--json"],
+            r = subprocess.run([sys.executable, scan_tool, "all", "--roots", os.path.join(pack_dir(), "skills"), "--json"],
                                capture_output=True, text=True, timeout=120)
             data = json.loads(r.stdout or "{}")
             blocked = data.get("blocked") or []
@@ -3783,7 +3871,7 @@ def main():
     if args.json:
         print(json.dumps(
             {"ok": fails == 0, "fails": fails, "warns": warns,
-             "mode": mode, "planned": pf.planned,
+             "mode": mode, "profile": pf.profile, "planned": pf.planned,
              "pack_dir": pack_dir(), "checks": results},
             ensure_ascii=False, indent=2,
         ))

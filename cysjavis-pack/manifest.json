@@ -1,0 +1,6 @@
+{
+  "schema": "wave-pack.manifest.v1",
+  "product": "Wave Terminal",
+  "version": "0.2.4",
+  "profile": "wave-light"
+}

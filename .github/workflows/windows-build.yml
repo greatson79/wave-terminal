@@ -7,7 +7,7 @@ name: windows-build (feasibility)
 
 on:
   push:
-    branches: ['feat/windows-x64-dist']
+    branches: ['feat/windows-x64-dist', 'fix/v024-first-boot']
   workflow_dispatch:
 
 permissions:
@@ -18,6 +18,14 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Light profile and Windows idempotency regressions
+        shell: pwsh
+        run: |
+          python -B scripts/test-light-preflight.py
+          if ($LASTEXITCODE -ne 0) { throw 'Light profile regressions failed' }
+          python -B cysjavis-pack/bin/javis_idempotency.py --self-test
+          if ($LASTEXITCODE -ne 0) { throw 'Idempotency regressions failed' }
 
       # ★시크릿/개인정보 발행 hard-gate (빌드·임베드 전 최우선 — fail-fast). git-추적 전 트리를
       # fail-closed로 스캔해 개인 홈경로·개인 프로필 디렉토리·개인 계정 핸들·이메일·키토큰

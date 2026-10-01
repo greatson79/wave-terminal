@@ -17,6 +17,7 @@ Run:  python3 javis_idempotency.py --self-test     # 결정론 배터리(preflig
 from __future__ import annotations
 
 import ast
+import ntpath
 import os
 import subprocess
 import sys
@@ -71,12 +72,14 @@ def _extract_verb(argv):
     """argv 리스트에서 cys 서브커맨드(verb)를 추출. cys 바이너리/옵션을 건너뛴다.
 
     예: ['/opt/homebrew/bin/cys', 'status', '--json'] → 'status'
+        ['C:/Program Files/CYS/cys.exe', 'status'] → 'status'
         ['cys', '--socket', '/x', 'send', ...]          → 'send'
     cys 호출이 아니면(예: yt-dlp·python) None."""
     if not argv:
         return None
-    first = os.path.basename(str(argv[0]))
-    if first != "cys":
+    # ntpath는 호스트 OS와 무관하게 Windows/POSIX 경로 구분자를 모두 처리한다.
+    first = ntpath.basename(str(argv[0])).lower()
+    if first not in ("cys", "cys.exe"):
         return None
     i = 1
     while i < len(argv):
@@ -143,7 +146,7 @@ class _SubprocessSpy:
         return _P()
 
 
-def _spy_cmd_check():
+def _spy_cmd_check(cys_executable="cys"):
     """orchestra.cmd_check 를 spy 로 감싸 calls ∩ MUTATE == ∅ 박제(회귀 잠금).
 
     누군가 cmd_check 에 launch-agent/boot/send/set-status 를 끼우면 즉시 RED."""
@@ -155,7 +158,9 @@ def _spy_cmd_check():
         pass
     import contextlib
     import io
-    with mock.patch.object(orch.subprocess, "run", side_effect=spy.run), \
+    with mock.patch.object(orch.shutil, "which", side_effect=lambda name:
+                           cys_executable if name == "cys" else None), \
+            mock.patch.object(orch.subprocess, "run", side_effect=spy.run), \
             contextlib.redirect_stdout(io.StringIO()):   # cmd_check 진단 출력 흡수
         orch.cmd_check(_Args())
     ok, violations = assert_observe_phase(spy.calls)
@@ -175,6 +180,23 @@ def _spy_negative_assertion_self_attack():
     ok, violations = assert_observe_phase(poisoned)
     assert not ok, "주입된 launch-agent 를 negative assertion 이 못 잡음(spy 무력)"
     assert violations[0]["verb"] == "launch-agent", "위반 evidence verb 부정확"
+
+
+def _windows_argv_self_test():
+    """Windows 실행파일도 실제 cmd_check spy와 mutate/unknown 거부를 통과해야 한다."""
+    for executable in ("cys.exe", r"C:\Program Files\CYS\cys.exe",
+                       "C:/Program Files/CYS/cys.exe", r"C:\CYS\CYS.EXE"):
+        _spy_cmd_check(executable)
+        prefix = [executable, "--socket", r"C:\Temp\cys.sock"]
+        assert is_observe_only(prefix + ["status", "--json"]), executable
+        for verb, kind in (("launch-agent", "mutate"),
+                           ("totally-unknown-verb", "unknown")):
+            argv = prefix + [verb]
+            assert not is_observe_only(argv), argv
+            ok, violations = assert_observe_phase([argv])
+            assert not ok, "Windows cys 호출이 관찰 검사를 우회함: %s" % argv
+            assert violations == [{"verb": verb, "kind": kind, "argv": argv}], violations
+    assert _extract_verb([r"C:\Tools\python.exe", "status"]) is None
 
 
 def _spy_preflight_daemon_observe_phase():
@@ -383,12 +405,13 @@ def self_test():
     _invariants_msg = _invariants()
     _spy_cmd_check()
     _spy_negative_assertion_self_attack()
+    _windows_argv_self_test()
     _spy_preflight_daemon_observe_phase()
     _ast_self_attack()
     _ast_msg = _ast_coverage_battery()
     print("javis_idempotency self-test OK "
           "(불변식·표면커버리지[%s] · cmd_check 관찰멱등 negative assertion · "
-          "자기공격 변이검증 RED · C12.daemon fix=False Popen 0 · "
+          "Windows argv 관찰/거부 · 자기공격 변이검증 RED · C12.daemon fix=False Popen 0 · "
           "coverage_battery AST 관찰전용[%s])" % (_invariants_msg, _ast_msg))
     return 0
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Isolated profile applicability and Windows no-symlink regression tests."""
+"""Full-pack preflight and Windows no-symlink regression tests."""
 import importlib.util
 import json
 import os
@@ -9,12 +9,12 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location('light_pf', ROOT / 'cysjavis-pack/bin/javis_preflight.py')
+spec = importlib.util.spec_from_file_location('full_pf', ROOT / 'cysjavis-pack/bin/javis_preflight.py')
 pf = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pf)
 
 
-class LightPreflightTests(unittest.TestCase):
+class FullPreflightTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -28,29 +28,34 @@ class LightPreflightTests(unittest.TestCase):
             'schema': 'wave-pack.manifest.v1', 'product': 'Wave Terminal', 'profile': value
         }))
 
-    def test_light_external_checks_never_install_or_require_login(self):
+    def test_stale_light_manifest_does_not_disable_full_pack_checks(self):
         self.profile()
-        check = pf.Preflight(True, [])
-        with mock.patch.object(pf.subprocess, 'run', side_effect=AssertionError('external call')):
-            check.c20_nlm_sot()
-            check.c21_harness_creator()
-            check.c24_korean_law_mcp()
-        self.assertEqual({r['id'] for r in check.results}, set(pf.LIGHT_OPTIONAL_CHECKS))
-        self.assertTrue(all(r['status'] == pf.SKIP for r in check.results))
-        self.assertEqual(check.planned, [])
+        check = pf.Preflight(False, [])
+        for cid in ('C20.nlm-sot', 'C21.harness-creator', 'C24.korean-law-mcp'):
+            with self.subTest(cid=cid):
+                self.assertFalse(check.skipped(cid))
+        self.assertEqual(check.results, [])
+
+    def test_explicit_skip_still_requires_the_requested_check_id(self):
+        self.profile()
+        check = pf.Preflight(False, ['C20.nlm-sot'])
+        self.assertTrue(check.skipped('C20.nlm-sot'))
+        self.assertFalse(check.skipped('C21.harness-creator'))
+        self.assertEqual(check.results, [{
+            'id': 'C20.nlm-sot', 'status': pf.SKIP, 'detail': 'skipped by --skip'
+        }])
 
     def test_missing_unknown_and_malformed_manifest_keep_full_checks(self):
-        self.assertEqual(pf.Preflight(False, []).profile, 'full')
-        self.profile('unknown')
-        self.assertFalse(pf.Preflight(False, []).skipped('C21.harness-creator'))
-        (self.root / 'manifest.json').write_text('[')
-        self.assertEqual(pf.Preflight(False, []).profile, 'full')
+        for content in (None, '{"profile":"unknown"}', '['):
+            with self.subTest(content=content):
+                if content is not None:
+                    (self.root / 'manifest.json').write_text(content)
+                check = pf.Preflight(False, [])
+                self.assertFalse(check.skipped('C21.harness-creator'))
 
-    def test_bundled_light_directives_are_usable_and_bounded(self):
+    def test_bundled_full_directives_keep_content_pins_and_worker_rules(self):
         # Verify real packaged directives, not only isolated fixture strings.
         bundle = ROOT / 'cysjavis-pack/directives'
-        master = bundle / 'MASTER_DIRECTIVE.md'
-        self.assertLessEqual(master.stat().st_size, 12 * 1024)
         import sys
         sys.path.insert(0, str(ROOT / 'cysjavis-pack/bin'))
         import javis_orchestra as orchestra
@@ -67,7 +72,7 @@ class LightPreflightTests(unittest.TestCase):
         with mock.patch.object(orchestra, 'pack_dir', return_value=str(ROOT / 'cysjavis-pack')):
             self.assertIsNotNone(orchestra.extract_constraints())
 
-    def test_light_keeps_directive_pin_failure(self):
+    def test_stale_light_manifest_keeps_directive_pin_failure(self):
         self.profile()
         directory = self.root / 'directives'
         directory.mkdir()

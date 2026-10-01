@@ -502,27 +502,6 @@ def discover_claude_settings():
     return found
 
 
-LIGHT_OPTIONAL_CHECKS = {
-    "C20.nlm-sot": "NotebookLM 및 Google 로그인은 요청 시 사용하는 선택 기능",
-    "C21.harness-creator": "외부 harness-creator 저장소는 요청 시 설치하는 선택 도구",
-    "C24.korean-law-mcp": "한국 법령 MCP는 요청 시 설치하는 선택 도구",
-}
-
-
-def installed_profile():
-    """The shipped manifest selects applicability; absent/unknown stays full."""
-    try:
-        with open(os.path.join(pack_dir(), "manifest.json"), encoding="utf-8-sig") as f:
-            manifest = json.load(f)
-        if (manifest.get("schema") == "wave-pack.manifest.v1"
-                and manifest.get("product") == "Wave Terminal"
-                and manifest.get("profile") == "wave-light"):
-            return "wave-light"
-    except (OSError, ValueError, AttributeError):
-        pass
-    return "full"
-
-
 class Preflight:
     def __init__(self, fix, skips, mode="report", allow_irreversible=False):
         # OPP-17: mode ∈ report(관찰만)|fix(집행)|dry(미리보기)|safe(무변경+갭만).
@@ -539,7 +518,6 @@ class Preflight:
         # planned: may_mutate() 가 기록하는 *비가역 외부설치* 계획 버퍼. 가역 로컬 변경(soul/hook/
         # settings/todo 등)은 self.fix=False 로 일괄 비집행되므로 이 버퍼에 기록되지 않는다(정직 범위).
         self.planned = []
-        self.profile = installed_profile()
         self.skips = set(skips)
         self.results = []
         self._init_pack_ran = None  # None=미시도, True/False=시도 결과
@@ -553,9 +531,6 @@ class Preflight:
         target.append({"id": cid, "status": status, "detail": detail})
 
     def skipped(self, cid):
-        if self.profile == "wave-light" and cid in LIGHT_OPTIONAL_CHECKS:
-            self.add(cid, SKIP, "wave-light 적용 범위 밖: " + LIGHT_OPTIONAL_CHECKS[cid])
-            return True
         if cid in self.skips:
             self.add(cid, SKIP, "skipped by --skip")
             return True
@@ -3871,7 +3846,7 @@ def main():
     if args.json:
         print(json.dumps(
             {"ok": fails == 0, "fails": fails, "warns": warns,
-             "mode": mode, "profile": pf.profile, "planned": pf.planned,
+             "mode": mode, "planned": pf.planned,
              "pack_dir": pack_dir(), "checks": results},
             ensure_ascii=False, indent=2,
         ))

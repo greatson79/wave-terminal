@@ -19,14 +19,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Light profile and Windows idempotency regressions
+      - name: Full pack and Windows idempotency regressions
         shell: pwsh
         env:
           PYTHONUTF8: '1'
           PYTHONIOENCODING: 'utf-8'
         run: |
-          python -B scripts/test-light-preflight.py
-          if ($LASTEXITCODE -ne 0) { throw 'Light profile regressions failed' }
+          python -B scripts/test-full-preflight.py
+          if ($LASTEXITCODE -ne 0) { throw 'Full pack regressions failed' }
           python -B cysjavis-pack/bin/javis_idempotency.py --self-test
           if ($LASTEXITCODE -ne 0) { throw 'Idempotency regressions failed' }
 

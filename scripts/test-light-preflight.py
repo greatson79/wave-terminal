@@ -46,6 +46,27 @@ class LightPreflightTests(unittest.TestCase):
         (self.root / 'manifest.json').write_text('[')
         self.assertEqual(pf.Preflight(False, []).profile, 'full')
 
+    def test_bundled_light_directives_are_usable_and_bounded(self):
+        # Verify real packaged directives, not only isolated fixture strings.
+        bundle = ROOT / 'cysjavis-pack/directives'
+        master = bundle / 'MASTER_DIRECTIVE.md'
+        self.assertLessEqual(master.stat().st_size, 12 * 1024)
+        import sys
+        sys.path.insert(0, str(ROOT / 'cysjavis-pack/bin'))
+        import javis_orchestra as orchestra
+        with mock.patch.object(pf, 'pack_dir', return_value=str(ROOT / 'cysjavis-pack')):
+            with mock.patch.object(pf, 'is_dept_pack', return_value=False):
+                check = pf.Preflight(False, [])
+                check.c03_content_pins()
+        pinned = {r['id']: r['status'] for r in check.results}
+        self.assertEqual(pinned['C03.pin.master'], pf.PASS, check.results)
+        self.assertEqual(pinned['C03.pin.worker'], pf.PASS, check.results)
+        self.assertEqual(pinned['C03.pin.reviewer'], pf.PASS, check.results)
+        worker_text = (bundle / 'WORKER_DIRECTIVE.md').read_text(encoding='utf-8')
+        self.assertIsNotNone(orchestra.extract_rules_from_text(worker_text))
+        with mock.patch.object(orchestra, 'pack_dir', return_value=str(ROOT / 'cysjavis-pack')):
+            self.assertIsNotNone(orchestra.extract_constraints())
+
     def test_light_keeps_directive_pin_failure(self):
         self.profile()
         directory = self.root / 'directives'

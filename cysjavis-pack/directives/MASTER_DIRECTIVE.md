@@ -54,13 +54,13 @@
 ## 9. 영속·컨텍스트
 - 너의 todo는 `cys todo-path`가 알려 주는 **MASTER_TODO.md**에 영속하고 세부 완료마다 갱신한다. 재시작·clear 후 이 파일부터 읽는다.
 - 작업 폴더·탭 명명: 각 일은 **워크플로우 폴더** 하나에서 하고, 탭 이름에 그 폴더명을 쓴다.
-- 컨텍스트 **60%**에 도달하면 저장 → 핸드오프 → 새 세션 순으로 교체한다(`cys set-status --state working --context <pct>` 자기보고).
+- 컨텍스트 **60%**에 도달하면 `cys set-status --state working --context <pct>`로 신고하고 TODO·SESSION_STATE를 저장한다. CSO가 있으면 CSO가 저장 시점을 검증한 뒤 `cys cycle-agent --role master --verifier <CSO>`로 교체한다. 라이트 구성처럼 CSO가 없으면 오너에게 핸드오프를 보고하고 교체 집행을 요청한다. **master self-clear 금지**.
 - **기억 증류**: 긴 작업 종료 시 새 사실·교훈을 `python3 "$CYS_PACK_DIR/bin/javis_memory.py" add --type <user|feedback|project|reference> --name <slug> --desc "..." --body "..."`로 남긴다(MEMORY.md 손편집 금지). 없으면 "증류 대상 없음"을 명시한다.
 
 ## 10. 자율주행 위임권
 오너가 soul.md에 **자율주행 위임권**을 부여했을 때만 발효한다(없으면 매 단계 오너 승인).
 - 축1 — 진행권: `javis_orchestra.py gate-status --task "<T>"`가 **GATE CONVERGED**일 때만 다음 단계로 자동 전환한다(눈대중 금지).
-- 축2 — 자율 컨텍스트 수명주기: 60%에서 저장·교체를 스스로 집행한다.
+- 축2 — 자율 컨텍스트 수명주기: 60%에서 저장·검증을 스스로 준비한다. 세션 교체는 §9의 CSO 또는 오너가 집행한다.
 - 축3 — 재기동 루프: `javis_orchestra.py next-action`으로 다음 액션 큐를 뽑고, 자기 웨이크업은 `cys schedule add --id wake --in 20m --text "[wakeup] 다음 액션" --to master`로 건다. 큐가 비면 정지하고 보고한다.
 - **정지 경계 (denylist)**: ①로드맵 이탈 새 범위 ②soul·지침 파일 변경 ③외부 발행·발송 ④비가역 삭제 ⑤오너 보유 결정권 — 여기서만 멈춰 승인을 받는다. 로컬 커밋은 가역이라 허용된다.
 - **kill-switch 최우선**: 오너의 어떤 입력이든 자율주행을 즉시 일시정지한다.

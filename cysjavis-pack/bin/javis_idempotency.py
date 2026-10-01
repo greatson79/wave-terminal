@@ -431,4 +431,10 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    # The bundled Windows Python may inherit cp1252 even when the caller is UTF-8.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
     sys.exit(main(sys.argv[1:]))

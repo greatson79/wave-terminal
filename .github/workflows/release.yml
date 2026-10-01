@@ -183,6 +183,9 @@ jobs:
           bun x @tauri-apps/cli@2 build --bundles app --target "$TRIPLE"
           # ② git-core dedup (역참조 되돌리기 · build-macos-signed.sh와 동일 공유 스크립트) → runtime/git 608→~144MB
           bash scripts/dedup-git-core.sh "$APP"
+          # ②b dedup 이 Tauri 봉인을 깨므로 마지막에 ad-hoc 재봉인 → verify 실패 시 빌드 중단(set -e)
+          codesign --force --deep -s - "$APP"
+          codesign --verify --deep --strict "$APP"
           # ③ 업데이터 tar.gz 재생성(dedup 반영·심볼릭링크 보존) + 재서명 → tauri-action이 이 .sig로 latest.json 작성
           ( cd "$BUNDLE/macos" && tar czf cys.app.tar.gz cys.app )
           bun x @tauri-apps/cli@2 signer sign --private-key "$TAURI_SIGNING_PRIVATE_KEY" --password "" "$BUNDLE/macos/cys.app.tar.gz"

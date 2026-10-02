@@ -135,6 +135,17 @@ ROLES = ["master", "worker", "cso", "reviewer"]
 # → ~/Desktop/CYSjavis/cys-harness-creator(로컬 원본).
 HARNESS_REPO = ""  # 비활성 — 런타임 클론·설치 안내 금지(제품 규칙)
 C21_OPTIONAL_DETAIL = "선택 기능 — 지금 필요 없음 · 필요할 때 운영팀이 안내"
+
+# 제품 승인 WARN 목록(CEO 조건 ③) — 새 설치에서 이 WARN들이 첫 master 응답을 설치·승인 질문으로
+# 만들지 않도록 텍스트 출력에서 한 줄로 접는다. 판정·JSON(--json)의 상세는 그대로 둔다.
+# FAIL은 접지 않는다(정상 보고).
+PRODUCT_OPTIONAL_WARNS = frozenset(("C13", "C20", "C21", "C24", "C26", "C44", "C48",
+                                    "C61", "C62", "C64"))
+OPTIONAL_WARN_LINE = "선택 기능 %d개 — 지금 필요 없음"
+
+
+def is_optional_warn(row):
+    return row["status"] == WARN and row["id"].split(".")[0] in PRODUCT_OPTIONAL_WARNS
 HARNESS_KEY_FILES = ("emit_orchestrator.py", "validate_harness.py", "warrant.py",
                      "genome/soul.md")
 
@@ -3857,8 +3868,16 @@ def main():
             ensure_ascii=False, indent=2,
         ))
     else:
+        optional = []
         for r in results:
+            if is_optional_warn(r):
+                cid = r["id"].split(".")[0]
+                if cid not in optional:
+                    optional.append(cid)
+                continue
             print("[%s] %s — %s" % (r["status"], r["id"], r["detail"]))
+        if optional:
+            print("[%s] %s (%s)" % (WARN, OPTIONAL_WARN_LINE % len(optional), "·".join(sorted(optional))))
         print("─" * 60)
         if mode in ("dry", "safe"):
             tag = "DRY-RUN(미리보기)" if mode == "dry" else "SAFE(무변경 진단)"

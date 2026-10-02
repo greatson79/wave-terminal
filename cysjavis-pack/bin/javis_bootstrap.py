@@ -44,6 +44,8 @@ BOOT_LAST = os.path.join(STATE_DIR, "boot-last.json")
 # ⑤ bounded retry — 무한 대기 금지(자원 거버넌스). env 오버라이드는 테스트 하네스 전용.
 CHECK_RETRIES = max(1, int(os.environ.get("CYS_BOOT_CHECK_RETRIES", "10")))
 CHECK_INTERVAL_S = float(os.environ.get("CYS_BOOT_CHECK_INTERVAL_S", "3"))  # 총 상한 ≈ 30초
+# preflight 텍스트 출력의 「선택 기능 N개 — 지금 필요 없음」 줄 식별자(javis_preflight.OPTIONAL_WARN_LINE).
+OPTIONAL_MARK = "— 지금 필요 없음"
 
 
 def _atomic_write_json(path, obj):
@@ -161,10 +163,14 @@ def cmd_run():
 
     # ① preflight --fix — 진단 실패는 숨기지 않고 기록하되 부트를 막지 않는다.
     preflight = os.path.join(PACK, "bin", "javis_preflight.py")
+    optional = None
     if os.path.isfile(preflight):
         _progress("① preflight --fix 실행 중(최대 300s)…")
         code, out = _run([py, preflight, "--fix"], timeout=300)
         log.step("①preflight", code, out)
+        # 제품 승인 WARN은 preflight가 한 줄로 접는다 — 요약에는 그 한 줄만 싣는다(설치·승인 질문 금지).
+        optional = next((ln.split("] ", 1)[-1].strip() for ln in out.splitlines()
+                         if OPTIONAL_MARK in ln), None)
         if code != 0:
             warnings.append({"step": "①preflight", "exit": code})
             log.data["warnings"] = warnings
@@ -251,6 +257,8 @@ def cmd_run():
     summary = {"ok": True, "marker": marker_note,
                "steps": [(s["step"], s["exit"]) for s in log.data["steps"]],
                "boot_last": BOOT_LAST, "warnings": warnings}
+    if optional:
+        summary["optional"] = optional
     log.data["result"] = {"ok": True, "warnings": warnings}
     _atomic_write_json(BOOT_LAST, log.data)
     print(json.dumps(summary, ensure_ascii=False))

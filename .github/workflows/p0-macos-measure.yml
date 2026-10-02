@@ -1,0 +1,37 @@
+name: P0 macOS measurement
+on:
+  workflow_dispatch:
+  push:
+    branches: [measure/p0-macos-20261003]
+permissions:
+  contents: read
+jobs:
+  measure:
+    runs-on: macos-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download reviewed v0.1.1 DMG
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir downloads
+          gh release download v0.1.1 -R greatson79/wave-terminal -p '*arm64.dmg' -p SHA256SUMS -D downloads
+          cd downloads
+          shasum -a 256 wave-terminal-0.1.1-macos-arm64.dmg
+          echo 'c46aac889c1dfb84827a580f83cb2098eceba30c85b98c961dd74cff6fc0cadc  wave-terminal-0.1.1-macos-arm64.dmg' | shasum -a 256 -c -
+      - name: Install into runner temporary directory and measure
+        run: |
+          hdiutil attach -readonly -nobrowse -mountpoint "$RUNNER_TEMP/p0-mount" downloads/*arm64.dmg
+          ditto "$RUNNER_TEMP/p0-mount/Wave Terminal.app" "$RUNNER_TEMP/Wave Terminal.app"
+          hdiutil detach "$RUNNER_TEMP/p0-mount"
+          python3 scripts/measure-p0-macos.py --app "$RUNNER_TEMP/Wave Terminal.app" --out "$RUNNER_TEMP/p0-evidence"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: p0-macos-v011-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/p0-evidence/*.json
+            ${{ runner.temp }}/p0-evidence/*.stdout
+            ${{ runner.temp }}/p0-evidence/*.stderr
+            ${{ runner.temp }}/p0-evidence/*.txt

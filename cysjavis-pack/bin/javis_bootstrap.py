@@ -4,8 +4,8 @@
 "너는 마스터다" 이후의 기계적 절차 전부를 단일 exit-code 체인으로 수행한다.
 LLM(master)의 역할은 이 스크립트 실행·출력 인용·이후 지휘뿐이다 — 산문 단계 수행 금지.
 
-단계 체인 (실패 시 즉시 중단·단계명+원인을 stderr와 boot-last.json에 기록):
-  ① preflight --fix READY        ② cys ping                ③ cys claim-role master
+단계 체인 (preflight 실패는 경고·계속, 필수 단계 실패는 즉시 중단):
+  ① preflight --fix (진단)        ② cys ping                ③ cys claim-role master
   ④ cys boot                     ⑤ orchestra check (bounded retry 3s×10 — 노드 스폰은
   비동기·check는 무대기 스냅샷이므로 레이스 봉쇄)          ⑥ 완료 마커 write
   ⑦ cys-dept promote-if-pending --request-only (비대기 — 부트와 승격 동의의 분리)
@@ -16,7 +16,7 @@ LLM(master)의 역할은 이 스크립트 실행·출력 인용·이후 지휘�
   - ★소켓 격리: CYS_SOCKET이 base가 아니면(부서 pane 부트) write하지 않는다 — 부서장 부트가
     base 마커를 오염시키면 CEO 승격 게이트(cys-dept)가 오개방된다.
 
-exit: 0=부트 완료 / 2=preflight / 3=ping / 7=claim 거부(이 surface는 master 아님 — 지휘 중단·인계)
+exit: 0=부트 완료(preflight 경고 가능) / 3=ping / 7=claim 거부(이 surface는 master 아님 — 지휘 중단·인계)
       4=boot / 6=check 최종 실패 / 5=assert-ready 게이트 실패(하위 게이트 전용)
 안전밸브: CYS_BOOT_GATE=warn(assert-ready 실패를 경고로 강등)|off(게이트 무력).
 """
@@ -145,6 +145,7 @@ class _Log:
 
 def cmd_run():
     log = _Log()
+    warnings = []
     py = sys.executable or "python3"
 
     # ★TCC 보조 경고(오너 2026-07-15): macOS 폴더 권한 리셋(서명 변경 업그레이드) 시 pane 자식이
@@ -158,14 +159,17 @@ def cmd_run():
         except OSError:
             pass
 
-    # ① preflight --fix — READY 판정은 preflight exit code가 사실(자연어 재추론 금지)
+    # ① preflight --fix — 진단 실패는 숨기지 않고 기록하되 부트를 막지 않는다.
     preflight = os.path.join(PACK, "bin", "javis_preflight.py")
     if os.path.isfile(preflight):
         _progress("① preflight --fix 실행 중(최대 300s)…")
         code, out = _run([py, preflight, "--fix"], timeout=300)
         log.step("①preflight", code, out)
         if code != 0:
-            return log.fail("①preflight", code, out, 2)
+            warnings.append({"step": "①preflight", "exit": code})
+            log.data["warnings"] = warnings
+            _atomic_write_json(BOOT_LAST, log.data)
+            _progress("경고: preflight 실패(exit %d), 부트 계속.\n%s" % (code, out.strip()))
     else:
         log.step("①preflight", 0, "preflight 부재 — 생략(팩 불완전 가능·계속)")
 
@@ -242,8 +246,8 @@ def cmd_run():
     # ⑧ 기계 요약 — master는 이 JSON을 인용해 '기동 완료'를 보고한다(다른 근거 인용 금지)
     summary = {"ok": True, "marker": marker_note,
                "steps": [(s["step"], s["exit"]) for s in log.data["steps"]],
-               "boot_last": BOOT_LAST}
-    log.data["result"] = {"ok": True}
+               "boot_last": BOOT_LAST, "warnings": warnings}
+    log.data["result"] = {"ok": True, "warnings": warnings}
     _atomic_write_json(BOOT_LAST, log.data)
     print(json.dumps(summary, ensure_ascii=False))
     return 0

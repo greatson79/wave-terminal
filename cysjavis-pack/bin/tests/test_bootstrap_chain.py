@@ -175,9 +175,28 @@ check("5c 거부 후 boot 미호출", "cys boot" not in calls(tmp))
 check("5d 인계 지시 출력", "인계" in err)
 shutil.rmtree(tmp)
 
-# ── 6. 선행 단계 실패 exit 매핑: preflight=2 · ping=3 · boot=4 ──
-for name, kw, want in (("preflight", {"preflight_exit": 1}, 2),
-                       ("ping", {"ping_exit": 1}, 3),
+# ── 6. preflight FAIL은 기록·경고하고 다음 단계로 진행 ──
+tmp = tempfile.mkdtemp(prefix="boot-preflight-warning-")
+env, home = make_env(tmp, preflight_exit=1)
+code, out, err = run(env)
+check("6p preflight 실패 후 부트 계속", code == 0 and "cys boot" in calls(tmp))
+summary = json.loads(out) if out.strip() else {}
+check("6p 최종 JSON에 실패 경고", summary.get("warnings") == [{"step": "①preflight", "exit": 1}])
+check("6p stderr 경고", "preflight" in err and "경고" in err)
+with open(os.path.join(home, ".cys", "state", "boot-last.json"), encoding="utf-8") as f:
+    history = json.load(f)
+check("6p 원래 실패 코드 보존", history["steps"][0]["exit"] == 1)
+shutil.rmtree(tmp)
+
+# preflight 경고는 후속 치명 실패를 덮지 않는다.
+tmp = tempfile.mkdtemp(prefix="boot-preflight-check-fail-")
+env, home = make_env(tmp, preflight_exit=1, check_final=1)
+code, out, err = run(env)
+check("6p 노드 미기동이면 실패 유지", code == 6 and not os.path.exists(marker_path(home)))
+shutil.rmtree(tmp)
+
+# ── 선행 필수 단계 실패 exit 매핑: ping=3 · boot=4 ──
+for name, kw, want in (("ping", {"ping_exit": 1}, 3),
                        ("boot", {"boot_exit": 1}, 4)):
     tmp = tempfile.mkdtemp(prefix="boot-t6-")
     env, home = make_env(tmp, **kw)

@@ -473,7 +473,7 @@ events. The exhaustive lists and the environment-variable table are in
 ## Source build (for contributors)
 
 ```bash
-git clone https://github.com/idoforgod/cys-terminal
+git clone https://github.com/greatson79/wave-terminal
 cargo build --release
 ./target/release/cysd &                       # daemon (duplicate boot auto-refused)
 

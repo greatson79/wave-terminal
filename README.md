@@ -486,7 +486,7 @@ NDJSON(한 줄 = JSON 하나), RPC 수십 종 + `channel.*` 13종, 이벤트 수
 ## 소스 빌드 (기여 시)
 
 ```bash
-git clone https://github.com/idoforgod/cys-terminal
+git clone https://github.com/greatson79/wave-terminal
 cargo build --release
 ./target/release/cysd &                      # 데몬 (중복 기동 자동 거부)
 

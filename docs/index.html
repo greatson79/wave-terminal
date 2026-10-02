@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>cys — CYSJavis Terminal 다운로드</title>
-<meta name="description" content="cys(CYSJavis Terminal) 공식 다운로드 — AI 에이전트 오케스트레이션 전용 터미널. macOS(Apple 공증)·Windows 설치파일.">
+<title>Wave Terminal 다운로드</title>
+<meta name="description" content="Wave Terminal 다운로드 — AI 에이전트 오케스트레이션 전용 터미널. macOS·Windows 명령 한 줄 설치와 최신 릴리스.">
 <style>
   :root { --bg:#0d1117; --bar:#161b22; --border:#30363d; --accent:#2f81f7; --text:#c9d1d9; --ok:#3fb950; }
   * { box-sizing:border-box; margin:0; }
@@ -27,58 +27,59 @@
   a.btn.dim { background:#21262d; border:1px solid var(--border); color:var(--text); font-weight:600; }
   .foot { margin-top:44px; font-size:13px; color:#6e7681; text-align:center; }
   .foot a { color:#8b949e; }
+  pre.cmd { background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:10px 12px;
+            font:12px/1.5 ui-monospace,Menlo,Consolas,monospace; white-space:pre-wrap; word-break:break-all; margin-top:auto; }
+  .credits { margin-top:28px; max-width:640px; font-size:13px; color:#8b949e; text-align:center; }
+  .credits h3 { font-size:14px; color:var(--text); margin-bottom:6px; }
+  .credits a { color:#8b949e; }
   .note { margin-top:14px; font-size:12.5px; color:#6e7681; max-width:640px; text-align:center; }
 </style>
 </head>
 <body>
-  <div class="brand">cys</div>
-  <div class="tagline">CYSJavis Terminal — AI 에이전트 오케스트레이션 전용 터미널<br>멀티 부서 데몬 · 메타버스 오피스 HUD · 세션 영속</div>
-  <div class="ver">최신 버전 <b id="ver">v0.12.50</b> <span id="pub"></span></div>
+  <div class="brand">Wave Terminal</div>
+  <div class="tagline">Wave AI Networks — AI 에이전트 오케스트레이션 전용 터미널<br>멀티 부서 데몬 · 메타버스 오피스 HUD · 세션 영속</div>
+  <div class="ver">최신 버전 <b id="ver">릴리스 페이지에서 확인</b> <span id="pub"></span></div>
 
   <div class="cards">
     <div class="card">
-      <h2>macOS <span style="color:#8b949e;font-size:13px">Apple Silicon</span><span class="badge">Apple 공증</span></h2>
-      <div class="meta">M1/M2/M3/M4 · Developer ID 서명 + Apple notarization + staple — 경고 없이 열립니다.</div>
-      <a class="btn" id="dl-mac-arm" href="https://github.com/idoforgod/cys-terminal/releases/download/v0.12.50/cys_0.12.50_aarch64.dmg">DMG 다운로드</a>
+      <h2>macOS <span style="color:#8b949e;font-size:13px">명령 한 줄 설치</span></h2>
+      <div class="meta">터미널에 붙여넣고 Return. 설치기가 설치팩을 받아 고정 SHA256으로 확인한 뒤 진행합니다.</div>
+      <pre class="cmd"><code>curl -fsSL https://github.com/greatson79/wave-install/releases/download/v0.2.4/bootstrap.sh -o "$HOME/install-wave.sh" && bash "$HOME/install-wave.sh"</code></pre>
     </div>
     <div class="card">
-      <h2>macOS <span style="color:#8b949e;font-size:13px">Intel</span><span class="badge">Apple 공증</span></h2>
-      <div class="meta">Intel Mac(x86_64) · 동일하게 공증·staple된 DMG.</div>
-      <a class="btn" id="dl-mac-x64" href="https://github.com/idoforgod/cys-terminal/releases/download/v0.12.50/cys_0.12.50_x64.dmg">DMG 다운로드</a>
+      <h2>Windows <span style="color:#8b949e;font-size:13px">명령 한 줄 설치</span></h2>
+      <div class="meta">PowerShell에 붙여넣고 Enter(관리자 권한 불필요). SmartScreen 경고 시 "추가 정보 → 실행".</div>
+      <pre class="cmd"><code>powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/greatson79/wave-install/releases/download/v0.2.4/bootstrap.ps1 -OutFile ([Environment]::GetFolderPath('UserProfile')+'\install-wave.ps1'); powershell -NoProfile -ExecutionPolicy Bypass -File ([Environment]::GetFolderPath('UserProfile')+'\install-wave.ps1')"</code></pre>
     </div>
     <div class="card">
-      <h2>Windows <span style="color:#8b949e;font-size:13px">x64 · 크롬 등</span></h2>
-      <div class="meta">NSIS 자기완결 설치본(PortableGit·Python 동봉). 크롬·엣지 등 일반 브라우저용. SmartScreen 경고 시 "추가 정보 → 실행".</div>
-      <a class="btn" id="dl-win" href="https://github.com/idoforgod/cys-terminal/releases/download/v0.12.50/cys_0.12.50_x64-setup.exe">설치파일(.exe) 다운로드</a>
-    </div>
-    <div class="card">
-      <h2>Windows <span style="color:#8b949e;font-size:13px">x64 · ZIP</span></h2>
-      <div class="meta">동일 설치본의 ZIP 포장 — 인터넷 익스플로러·exe 직다운이 차단되는 환경용. 압축 해제 후 setup.exe 실행.</div>
-      <a class="btn dim" id="dl-win-zip" href="https://github.com/idoforgod/cys-terminal/releases/download/v0.12.50/cys_0.12.50_x64-setup.zip">ZIP 다운로드</a>
+      <h2>직접 받기 <span style="color:#8b949e;font-size:13px">DMG · setup.exe</span></h2>
+      <div class="meta">최신 릴리스 페이지에서 운영체제에 맞는 파일과 SHA256SUMS를 받습니다.</div>
+      <a class="btn" id="dl-latest" href="https://github.com/greatson79/wave-terminal/releases/latest">최신 릴리스 받기</a>
     </div>
   </div>
 
   <div class="note">설치 후 앱 내 자동 업데이트(Update 배지)로 이후 버전을 받습니다. 전체 버전 목록·변경 내역은 릴리스 페이지에서.</div>
   <div class="foot">
-    <a href="https://github.com/idoforgod/cys-terminal/releases">전체 릴리스</a> ·
-    <a href="https://github.com/idoforgod/cys-terminal">GitHub 저장소</a>
+    <a href="https://github.com/greatson79/wave-terminal/releases/latest">최신 릴리스</a> ·
+    <a href="https://github.com/greatson79/wave-terminal">GitHub 저장소</a>
   </div>
 
+  <section class="credits" id="credits">
+    <h3>만든 사람</h3>
+    <p>Wave Terminal은 원개발자 CYSJavis(idoforgod)의
+      <a href="https://github.com/idoforgod/cys-terminal">cys-terminal</a>을 기반으로
+      Wave AI Networks가 빌드·배포하는 파생본입니다.
+      원본 저작권과 <a href="https://github.com/greatson79/wave-terminal/blob/main/LICENSE">MIT 라이선스</a> 고지를 그대로 따릅니다.</p>
+  </section>
+
 <script>
-// 최신 릴리스를 동적 반영(rot 방지) — 실패 시 위 정적 v0.12.50 링크가 폴백.
-fetch("https://api.github.com/repos/idoforgod/cys-terminal/releases/latest")
+// 최신 릴리스 버전 표시(rot 방지) — 실패 시 정적 안내와 releases/latest 링크가 폴백.
+fetch("https://api.github.com/repos/greatson79/wave-terminal/releases/latest")
   .then(r => r.ok ? r.json() : null)
   .then(rel => {
     if (!rel || !rel.tag_name) return;
-    const v = rel.tag_name;                       // 예: v0.12.50
-    const asset = re => (rel.assets || []).find(a => re.test(a.name));
-    const set = (id, a) => { const el = document.getElementById(id); if (a && el) el.href = a.browser_download_url; };
-    document.getElementById("ver").textContent = v;
+    document.getElementById("ver").textContent = rel.tag_name;
     if (rel.published_at) document.getElementById("pub").textContent = "· " + rel.published_at.slice(0,10);
-    set("dl-mac-arm", asset(/_aarch64\.dmg$/));
-    set("dl-mac-x64", asset(/_x64\.dmg$/));
-    set("dl-win",     asset(/_x64-setup\.exe$/));
-    set("dl-win-zip", asset(/_x64-setup\.zip$/));
   })
   .catch(() => {});
 </script>

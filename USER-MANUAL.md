@@ -46,18 +46,30 @@
 
 ## 2. 설치
 
-[Releases](https://github.com/idoforgod/cys-terminal/releases/latest)에서 받습니다.
+가장 쉬운 방법은 명령 한 줄 설치입니다. 설치기가 설치팩을 받아 고정 SHA256으로 확인한 뒤 진행합니다.
+
+macOS(터미널):
+```bash
+curl -fsSL https://github.com/greatson79/wave-install/releases/download/v0.2.4/bootstrap.sh -o "$HOME/install-wave.sh" && bash "$HOME/install-wave.sh"
+```
+
+Windows(PowerShell, 관리자 권한 불필요):
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/greatson79/wave-install/releases/download/v0.2.4/bootstrap.ps1 -OutFile ([Environment]::GetFolderPath('UserProfile')+'\install-wave.ps1'); powershell -NoProfile -ExecutionPolicy Bypass -File ([Environment]::GetFolderPath('UserProfile')+'\install-wave.ps1')"
+```
+
+설치 파일을 직접 받으려면 [최신 릴리스](https://github.com/greatson79/wave-terminal/releases/latest)에서 받습니다.
 **데몬을 따로 설치할 필요가 없습니다** — 앱이 자동 기동하고 팩도 자동 설치됩니다.
 
 ### 2.1 macOS (Apple Silicon)
 
-1. `cys_<버전>_aarch64.dmg`를 열고 `cys.app`을 Applications로 드래그.
+1. `wave-terminal-<버전>-macos-arm64.dmg`(Intel Mac은 `-macos-x64.dmg`)를 열고 `cys.app`을 Applications로 드래그.
 2. 첫 실행에서 Gatekeeper 경고가 뜨면: 공증된 빌드는 그대로 열리고, 아니면 우클릭 → "열기".
 3. 앱이 데몬(cysd)을 자동 기동하고 launchd에 등록합니다(재부팅 후에도 유지).
 
 ### 2.2 Windows (x64)
 
-1. `cys_<버전>_x64-setup.exe`(NSIS) 실행 — **자기완결 설치**: 데몬·CLI·런타임(Git Bash·
+1. `wave-terminal-<버전>-windows-x64-setup.exe`(NSIS) 실행 — **자기완결 설치**: 데몬·CLI·런타임(Git Bash·
    Python)이 동봉되어 별도 준비물이 없습니다.
 2. 앱을 1회 실행하면 온보딩이 자동으로 팩 설치·훅 등록·데몬 자동 기동(작업 스케줄러
    ONLOGON)을 마칩니다.
@@ -672,3 +684,9 @@ todo.updated   approval.request   approval.stalled   master.deadman   osc.notify
 - 비밀 스캐너는 정적 패턴 매칭 — 난독화·신종 토큰은 못 잡습니다(1차 방어선일 뿐).
 
 취약점 신고는 [SECURITY.md](SECURITY.md)를 따라 주세요.
+
+## 만든 사람
+
+Wave Terminal은 원개발자 CYSJavis(idoforgod)의 [cys-terminal](https://github.com/idoforgod/cys-terminal)을
+기반으로 Wave AI Networks가 빌드·배포하는 파생본입니다. 원본 저작권과
+[MIT 라이선스](LICENSE) 고지를 그대로 따릅니다(자세한 고지는 [NOTICE.md](NOTICE.md)).

@@ -561,7 +561,11 @@ class Preflight:
                 raise ValueError("승인 범위 밖 검사 또는 한 줄 사유 누락")
             self._product_warnings = warnings
         except FileNotFoundError:
-            pass  # Deleting the profile restores the original verdicts.
+            # Absent profile = original verdicts. To revert in a live install, replace the
+            # file with one whose `warnings` object is empty (same schema_version/decision,
+            # "warnings": {}). Deleting it is not a revert: the seed-once pack install
+            # re-seeds a deleted profile on the next install.
+            pass
         except (OSError, ValueError) as exc:
             self.add("C00.product-profile", WARN,
                      "제품 프로필 미적용(원판정 유지): %s — %s"

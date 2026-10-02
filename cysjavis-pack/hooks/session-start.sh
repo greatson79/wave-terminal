@@ -62,6 +62,15 @@ esac
 case "$CYS_ROLE" in
   master|cso)
     if command -v cys >/dev/null 2>&1; then
+      # Opt-in diagnostics only: never use these self-reported PIDs for authorization.
+      if [ -n "${CYS_HOOK_IDENTITY_TRACE:-}" ]; then
+        {
+          printf 'shell_pid=%s\nparent_pid=%s\n' "$$" "$PPID" > "$CYS_HOOK_IDENTITY_TRACE.pid"
+          ps -W > "$CYS_HOOK_IDENTITY_TRACE.ps.stdout" 2> "$CYS_HOOK_IDENTITY_TRACE.ps.stderr"
+          TRACE_PS_RC=$?
+          printf '%s\n' "$TRACE_PS_RC" > "$CYS_HOOK_IDENTITY_TRACE.ps.exit"
+        } 2>/dev/null || :
+      fi
       if command -v timeout >/dev/null 2>&1; then
         CLAIM_OUT=$(timeout 2 cys claim-role "$CYS_ROLE" 2>&1); CLAIM_RC=$?
       else

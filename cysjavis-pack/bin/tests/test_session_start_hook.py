@@ -140,5 +140,29 @@ check("7c 신원 미확정이면 권한 주입 중단", "DIRECTIVE-BODY-MASTER" 
 check("7d 재확인 실패 안내", "신원 재확인 실패" in out)
 shutil.rmtree(tmp)
 
+# Opt-in tracing preserves claim behavior and keeps diagnostics out of hook output.
+for mode in ("ok", "identity"):
+    tmp = tempfile.mkdtemp(prefix="hook-trace-")
+    env = setup(tmp, mode)
+    env.pop("CYS_HOOK_IDENTITY_TRACE", None)
+    baseline = run_hook(env, role="master")
+    trace = os.path.join(tmp, "trace with spaces")
+    ps = os.path.join(tmp, "stubbin", "ps")
+    with open(ps, "w", newline="\n") as f:
+        f.write("#!/bin/sh\necho snapshot-out\necho snapshot-err >&2\nexit 9\n")
+    os.chmod(ps, 0o755)
+    env["CYS_HOOK_IDENTITY_TRACE"] = trace
+    traced = run_hook(env, role="master")
+    check("8 trace output invariant " + mode, baseline == traced)
+    with open(trace + ".pid") as f:
+        values = dict(line.strip().split("=", 1) for line in f)
+    check("8 shell identities " + mode, all(values[k].isdigit() for k in ("shell_pid", "parent_pid")))
+    check("8 ps stdout " + mode, open(trace + ".ps.stdout").read() == "snapshot-out\n")
+    check("8 ps stderr " + mode, open(trace + ".ps.stderr").read() == "snapshot-err\n")
+    check("8 ps failure recorded " + mode, open(trace + ".ps.exit").read().strip() == "9")
+    env["CYS_HOOK_IDENTITY_TRACE"] = os.path.join(tmp, "missing", "trace")
+    check("8 trace write failure keeps claim " + mode, run_hook(env, role="master") == baseline)
+    shutil.rmtree(tmp)
+
 print("\n%d FAIL" % len(fails) if fails else "\nALL PASS")
 sys.exit(1 if fails else 0)

@@ -169,6 +169,15 @@ pub fn glob_match(pattern: &str, value: &str) -> bool {
 /// T1-3 발신자 소속 surface 해석: peer pid의 조상 체인에서 surface 루트 pid를 찾는다.
 /// (cys CLI 프로세스는 pane 셸의 자손이므로 조상 추적으로 소속 pane이 확정된다)
 fn resolve_caller_surface(daemon: &Daemon, caller_pid: u32) -> Option<u64> {
+    resolve_caller_surface_with_trace(daemon, caller_pid, None)
+}
+
+// Trace only the cache decision or process snapshot used below; never re-sample after denial.
+fn resolve_caller_surface_with_trace(
+    daemon: &Daemon,
+    caller_pid: u32,
+    mut trace: Option<&mut Value>,
+) -> Option<u64> {
     {
         let cache = daemon.caller_cache.lock().unwrap();
         if let Some((sid, ts, cached_start)) = cache.get(&caller_pid) {
@@ -180,11 +189,23 @@ fn resolve_caller_surface(daemon: &Daemon, caller_pid: u32) -> Option<u64> {
                 match cached_start {
                     Some(cs) => {
                         if crate::state::peer_start_time(caller_pid).is_none_or(|now| now == *cs) {
+                            if let Some(ref mut detail) = trace {
+                                **detail = json!({"source": "caller_cache", "caller_pid": caller_pid,
+                                    "caller_surface": sid, "cached_start_time": cached_start,
+                                    "chain": [], "stop_reason": "cache_hit", "ancestry_observed": false});
+                            }
                             return *sid;
                         }
                         // start_time 불일치 → pid 재사용 → 아래로 떨어져 재해석
                     }
-                    None => return *sid,
+                    None => {
+                        if let Some(ref mut detail) = trace {
+                            **detail = json!({"source": "caller_cache", "caller_pid": caller_pid,
+                                "caller_surface": sid, "cached_start_time": null,
+                                "chain": [], "stop_reason": "cache_hit", "ancestry_observed": false});
+                        }
+                        return *sid;
+                    }
                 }
             }
         }
@@ -203,20 +224,43 @@ fn resolve_caller_surface(daemon: &Daemon, caller_pid: u32) -> Option<u64> {
         .map(|p| p.start_time());
     let mut cur = caller_pid;
     let mut found = None;
+    let mut chain = Vec::new();
+    let mut stop_reason = "depth_limit";
     for _ in 0..32 {
+        let process = sys.process(sysinfo::Pid::from_u32(cur));
+        if trace.is_some() {
+            chain.push(json!({"pid": cur, "exists": process.is_some(),
+                "exe": process.and_then(|p| p.exe()).map(|p| p.to_string_lossy().into_owned()),
+                "name": process.map(|p| p.name().to_string_lossy().into_owned()),
+                "parent_pid": process.and_then(|p| p.parent()).map(|p| p.as_u32()),
+                "registered_surface": pid_to_sid.get(&cur)}));
+        }
         if let Some(sid) = pid_to_sid.get(&cur) {
             found = Some(*sid);
+            stop_reason = "surface_pid_match";
             break;
         }
-        match sys
-            .process(sysinfo::Pid::from_u32(cur))
-            .and_then(|p| p.parent())
-        {
+        match process.and_then(|p| p.parent()) {
             Some(parent) if parent.as_u32() != cur && parent.as_u32() > 1 => {
                 cur = parent.as_u32();
             }
-            _ => break,
+            _ => {
+                stop_reason = match process {
+                    None => "process_missing",
+                    Some(p) => match p.parent() {
+                        None => "parent_missing",
+                        Some(parent) if parent.as_u32() == cur => "self_parent",
+                        _ => "parent_at_or_below_one",
+                    },
+                };
+                break;
+            }
         }
+    }
+    if let Some(detail) = trace {
+        *detail = json!({"source": "decision_process_snapshot", "caller_pid": caller_pid,
+            "caller_surface": found, "caller_start_time": caller_start, "chain": chain,
+            "stop_reason": stop_reason, "max_depth": 32, "ancestry_observed": true});
     }
     // 무한 성장 차단: cys CLI는 매 호출이 단명 프로세스라 동일 pid가 사실상 재등장하지
     // 않는다 → 캐시 히트 경로의 60초 TTL 검사가 영영 발동하지 않아 stale 항목이 데몬 수명
@@ -1324,7 +1368,10 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
             // 같은 특권 역할을 자기 surface로 재지정해 roles 매핑·거버넌스 감시 대상을 탈취할
             // 수 있다. 발신 신원 해석 실패(외부/추적 불가)도 거부 — 익명 claim 금지.
             // resolve_caller_surface는 내부에서 surfaces 락을 잡으므로 아래 임계영역 진입 전에 호출.
-            let caller_sid = caller_pid.and_then(|p| resolve_caller_surface(daemon, p));
+            let mut caller_resolution = json!({"source": "peer_identity", "caller_pid": null,
+                "chain": [], "stop_reason": "caller_pid_unavailable", "ancestry_observed": false});
+            let caller_sid = caller_pid.and_then(|p|
+                resolve_caller_surface_with_trace(daemon, p, Some(&mut caller_resolution)));
             match caller_sid {
                 Some(cs) if cs == sid => {}
                 _ => {
@@ -1333,15 +1380,18 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                         "system",
                         Some(sid),
                         json!({"role": role, "requested_surface": sid,
-                               "caller_surface": caller_sid, "caller_pid": caller_pid}),
+                               "caller_surface": caller_sid, "caller_pid": caller_pid,
+                               "caller_resolution": caller_resolution}),
                     );
-                    return Reply::Single(err_response(
+                    let mut response = err_response(
                         &id,
                         "claim_denied",
                         &format!(
                             "claim_role denied: caller (surface {caller_sid:?}) may only claim its own surface, not {sid}"
                         ),
-                    ));
+                    );
+                    response["error"]["detail"] = caller_resolution;
+                    return Reply::Single(response);
                 }
             }
             // 멤버십 확인 + 역할 전이를 surfaces 락 아래 한 임계영역에서 수행 —
@@ -1383,15 +1433,18 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                                 "system",
                                 Some(sid),
                                 json!({"role": role, "requested_surface": sid,
-                                       "current_holder": holder, "reason": "privileged role held by live surface"}),
+                                       "current_holder": holder, "reason": "privileged role held by live surface",
+                                       "caller_pid": caller_pid, "caller_resolution": caller_resolution}),
                             );
-                            return Reply::Single(err_response(
+                            let mut response = err_response(
                                 &id,
                                 "claim_denied",
                                 &format!(
                                     "claim_role denied: privileged role '{role}' is held by live surface {holder}"
                                 ),
-                            ));
+                            );
+                            response["error"]["detail"] = caller_resolution;
+                            return Reply::Single(response);
                         }
                     }
                 }
@@ -4259,6 +4312,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn claim_role_trace_records_missing_process_from_decision_snapshot() {
+        let daemon = claim_daemon();
+        let mut detail = Value::Null;
+        let found = resolve_caller_surface_with_trace(&daemon, u32::MAX, Some(&mut detail));
+        assert_eq!(found, None);
+        assert_eq!(detail["source"], "decision_process_snapshot");
+        assert_eq!(detail["stop_reason"], "process_missing");
+        assert_eq!(detail["chain"][0]["pid"], u32::MAX);
+        assert_eq!(detail["chain"][0]["exists"], false);
+        assert_eq!(detail["chain"][0]["exe"], Value::Null);
+        // The next decision uses the existing negative cache, not a new ancestry snapshot.
+        let again = resolve_caller_surface_with_trace(&daemon, u32::MAX, Some(&mut detail));
+        assert_eq!(again, found);
+        assert_eq!(detail["source"], "caller_cache");
+        assert_eq!(detail["stop_reason"], "cache_hit");
+        assert_eq!(detail["ancestry_observed"], false);
+        assert_eq!(detail["chain"], json!([]));
+    }
+
+    #[test]
+    fn claim_role_trace_distinguishes_absent_peer_pid_without_allowing_claim() {
+        let daemon = claim_daemon();
+        let sid = make_surface(&daemon, None);
+        let resp = claim(&daemon, "worker", sid, None);
+        assert_eq!(resp["error"]["code"], "claim_denied");
+        assert_eq!(resp["error"]["detail"]["stop_reason"], "caller_pid_unavailable");
+        assert_eq!(resp["error"]["detail"]["ancestry_observed"], false);
+        assert!(daemon.roles.lock().unwrap().get("worker").is_none());
+    }
+
     /// 발견(신원·소유 검증 부재): claim_role이 caller_pid를 전혀 쓰지 않아, 워커 pane이
     /// 자기 소유가 아닌 임의 surface에 역할을 박을 수 있었다 (handlers.rs:654 무조건 insert).
     /// 발신 pane은 자기 surface에만 역할을 등록할 수 있어야 한다 — 이 게이트를 박제한다.
@@ -4277,6 +4361,9 @@ mod tests {
             "타 surface에 대한 claim이 통과했다 (응답: {resp})"
         );
         assert_eq!(resp["error"]["code"], json!("claim_denied"));
+        assert_eq!(resp["error"]["detail"]["source"], "caller_cache");
+        assert_eq!(resp["error"]["detail"]["caller_surface"], attacker);
+        assert_eq!(resp["error"]["detail"]["chain"], json!([]));
         // victim surface의 role이 오염되지 않았는지 확인 (insert가 일어나지 않아야 함).
         assert!(
             daemon.surfaces.lock().unwrap()[&victim].role.lock().unwrap().is_none(),

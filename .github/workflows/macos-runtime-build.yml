@@ -1,0 +1,77 @@
+name: macOS runtime build and DMG measurement
+
+# Build-only: no tag, GitHub Release, signing secret or latest.json publication.
+on:
+  workflow_dispatch:
+  push:
+    branches: ['fix/w3-boot']
+    paths:
+      - '.github/workflows/macos-runtime-build.yml'
+      - 'scripts/**'
+      - 'src/**'
+      - 'src-tauri/**'
+      - 'cysjavis-pack/**'
+      - 'Cargo.*'
+      - 'ui/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build-measure:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      CYS_TARGET: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify native arm64 runner and record source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/w3-macos-evidence"
+          uname -m | tee "$RUNNER_TEMP/w3-macos-evidence/host.txt"
+          test "$(uname -m)" = arm64
+          git rev-parse HEAD > "$RUNNER_TEMP/w3-macos-evidence/source-sha.txt"
+          bash scripts/secret-scan.sh --all
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: swatinem/rust-cache@v2
+        with:
+          key: w3-macos-runtime
+      - name: Measurement and runtime regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/tests/test_mac_runtime.py 2>&1 | tee "$RUNNER_TEMP/w3-macos-evidence/runtime-tests.log"
+          python3 scripts/tests/test_measure_macos_runtime_dmg.py 2>&1 | tee "$RUNNER_TEMP/w3-macos-evidence/measurement-tests.log"
+      - name: Build arm64 app and DMG without updater artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun x @tauri-apps/cli@2 build --target "$CYS_TARGET" --bundles app,dmg --config '{"bundle":{"createUpdaterArtifacts":false}}' 2>&1 | tee "$RUNNER_TEMP/w3-macos-evidence/build.log"
+      - name: Mount DMG read-only and verify packaged runtimes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, pathlib, subprocess, sys
+          images = list(pathlib.Path('target/aarch64-apple-darwin/release/bundle/dmg').glob('*.dmg'))
+          if len(images) != 1:
+              raise SystemExit(f'Expected one built DMG, found {len(images)}')
+          subprocess.run([sys.executable, 'scripts/measure-macos-runtime-dmg.py', '--dmg', str(images[0]),
+                          '--out', os.path.join(os.environ['RUNNER_TEMP'], 'w3-macos-evidence', 'dmg'),
+                          '--target', os.environ['CYS_TARGET']], check=True)
+          PY
+      - name: Upload build and measurement evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w3-macos-arm64-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/w3-macos-evidence/
+            target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 7

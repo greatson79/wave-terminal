@@ -242,21 +242,19 @@ mod tests {
     }
 
     fn with_pack_dir<T>(write_json: Option<(&str, &str)>, role: &str, f: impl FnOnce() -> T) -> T {
-        // pack.rs 테스트와 동일 락 공유 — 같은 lib 바이너리에서 ENV_PACK_DIR 전역 경합 차단.
-        let _g = crate::pack::PACK_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let td = std::env::temp_dir().join(format!("cys-ov-{}-{}", std::process::id(), role));
+        // 호출마다 고유 dir — 락 없이 병렬 실행되므로 같은 role 테스트끼리 dir을 공유하면 안 된다.
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let td = std::env::temp_dir().join(format!("cys-ov-{}-{}-{n}", std::process::id(), role));
         let _ = std::fs::remove_dir_all(&td);
         std::fs::create_dir_all(td.join("overrides")).unwrap();
         if let Some((name, body)) = write_json {
             std::fs::write(td.join("overrides").join(name), body).unwrap();
         }
-        let saved = std::env::var(crate::pack::ENV_PACK_DIR).ok();
-        std::env::set_var(crate::pack::ENV_PACK_DIR, &td);
+        // 스레드 국소 dir 주입 — 전역 ENV_PACK_DIR 무변경(병렬 테스트 경합 0).
+        let dirs = crate::pack::override_dirs_for_thread(&td, td.join("cfg"));
         let out = f();
-        match saved {
-            Some(v) => std::env::set_var(crate::pack::ENV_PACK_DIR, v),
-            None => std::env::remove_var(crate::pack::ENV_PACK_DIR),
-        }
+        drop(dirs);
         let _ = std::fs::remove_dir_all(&td);
         out
     }

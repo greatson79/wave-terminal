@@ -7334,10 +7334,9 @@ mod tests {
         assert_eq!(sanitize_launch_cwd("C:\\work".into()), "C:\\work");
     }
 
-    // pack-update·compose 통합테스트는 동일 전역 env(ENV_PACK_DIR/ENV_CONFIG_DIR/ENV_SOCKET)를
-    // set/remove하므로 단일 뮤텍스로 직렬화한다. 옛 PACK_UPDATE_ENV_LOCK·COMPOSE_ENV_LOCK가 별개라
-    // 두 그룹이 병렬 교차하면 None 복원 시 remove_var가 실행 중 테스트를 실 ~/.cys/pack으로
-    // 폴백시켜 삭제하던 레이스를 차단한다(HIGH 감사).
+    // pack_dir/config_dir 은 이제 스레드 국소 주입(cys::pack::override_dirs_for_thread)으로 격리한다 —
+    // 전역 ENV_PACK_DIR/ENV_CONFIG_DIR 을 set/remove 하던 구판은 None 복원 시 실행 중 테스트를 실
+    // ~/.cys/pack 으로 폴백시켰다(2026-10-03 실사고). 락은 ENV_SOCKET 등 남은 전역 env 직렬화용.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn sha256_of(bytes: &[u8]) -> String {
@@ -7805,14 +7804,11 @@ mod tests {
         assert!(!url.contains("idoforgod"), "업스트림(idoforgod)을 가리킴");
 
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let saved = std::env::var(cys::pack::ENV_PACK_DIR).ok();
-        let saved_cfg = std::env::var(cys::pack::ENV_CONFIG_DIR).ok();
         let td = std::env::temp_dir().join(format!("cys-pu-latest-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&td);
         let pack_dir = td.join("pack");
         std::fs::create_dir_all(&pack_dir).unwrap();
-        std::env::set_var(cys::pack::ENV_PACK_DIR, &pack_dir);
-        std::env::set_var(cys::pack::ENV_CONFIG_DIR, td.join("cysclaude"));
+        let _dirs = cys::pack::override_dirs_for_thread(&pack_dir, td.join("cysclaude"));
         std::fs::write(pack_dir.join(".pack-version"), "1.0.0").unwrap();
 
         // github.com 루트를 로컬 미러로 치환 — 요청 경로(…/releases/latest/download/…)는 그대로.
@@ -7839,14 +7835,6 @@ mod tests {
             pack_update_from_dir(&dl, &staging, &lock, &td.join(".acc2"), 5000, "0.4.1", &kr, false)
         });
 
-        match &saved {
-            Some(v) => std::env::set_var(cys::pack::ENV_PACK_DIR, v),
-            None => std::env::remove_var(cys::pack::ENV_PACK_DIR),
-        }
-        match &saved_cfg {
-            Some(v) => std::env::set_var(cys::pack::ENV_CONFIG_DIR, v),
-            None => std::env::remove_var(cys::pack::ENV_CONFIG_DIR),
-        }
         let _ = std::fs::remove_dir_all(&td);
 
         let o = ok.expect("latest 경로의 정상 서명 팩이 거부됨");
@@ -7859,14 +7847,11 @@ mod tests {
     #[test]
     fn pack_update_from_dir_applies_signed_pack() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let saved = std::env::var(cys::pack::ENV_PACK_DIR).ok();
-        let saved_cfg = std::env::var(cys::pack::ENV_CONFIG_DIR).ok();
         let td = std::env::temp_dir().join(format!("cys-pu-apply-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&td);
         let pack_dir = td.join("pack");
         std::fs::create_dir_all(&pack_dir).unwrap();
-        std::env::set_var(cys::pack::ENV_PACK_DIR, &pack_dir);
-        std::env::set_var(cys::pack::ENV_CONFIG_DIR, td.join("cysclaude"));
+        let _dirs = cys::pack::override_dirs_for_thread(&pack_dir, td.join("cysclaude"));
         // 이미 설치된 팩(구버전) 시뮬 — .pack-version 선존.
         std::fs::write(pack_dir.join(".pack-version"), "0.0.1").unwrap();
 
@@ -7887,21 +7872,9 @@ mod tests {
             &from_dir, &staging, &lock, &accepted, 5000, "0.4.1", &kr, true,
         );
 
-        // env 복원(assert 전).
-        let restore = || {
-            match &saved {
-                Some(v) => std::env::set_var(cys::pack::ENV_PACK_DIR, v),
-                None => std::env::remove_var(cys::pack::ENV_PACK_DIR),
-            }
-            match &saved_cfg {
-                Some(v) => std::env::set_var(cys::pack::ENV_CONFIG_DIR, v),
-                None => std::env::remove_var(cys::pack::ENV_CONFIG_DIR),
-            }
-        };
         let outcome = match res {
             Ok(o) => o,
             Err(e) => {
-                restore();
                 let _ = std::fs::remove_dir_all(&td);
                 panic!("적용 실패: {e}");
             }
@@ -7910,7 +7883,6 @@ mod tests {
         let soul = std::fs::read_to_string(pack_dir.join("soul.md")).unwrap();
         let acc_exists = accepted.is_file();
         let acc = std::fs::read_to_string(&accepted).unwrap_or_default();
-        restore();
         let _ = std::fs::remove_dir_all(&td);
 
         assert_eq!(outcome.gate, VersionGate::Apply);
@@ -7925,14 +7897,11 @@ mod tests {
     #[test]
     fn pack_update_from_dir_rejects_invalid() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let saved = std::env::var(cys::pack::ENV_PACK_DIR).ok();
-        let saved_cfg = std::env::var(cys::pack::ENV_CONFIG_DIR).ok();
         let td = std::env::temp_dir().join(format!("cys-pu-reject-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&td);
         let pack_dir = td.join("pack");
         std::fs::create_dir_all(&pack_dir).unwrap();
-        std::env::set_var(cys::pack::ENV_PACK_DIR, &pack_dir);
-        std::env::set_var(cys::pack::ENV_CONFIG_DIR, td.join("cysclaude"));
+        let _dirs = cys::pack::override_dirs_for_thread(&pack_dir, td.join("cysclaude"));
         std::fs::write(pack_dir.join(".pack-version"), "1.0.0").unwrap();
 
         let (pk, sign) = gen_signer();
@@ -7970,18 +7939,7 @@ mod tests {
         let acc4 = td.join(".acc4.json");
         let r4 = pack_update_from_dir(&d4, &staging, &lock, &acc4, 5000, "0.4.1", &kr, true);
 
-        let restore = || {
-            match &saved {
-                Some(v) => std::env::set_var(cys::pack::ENV_PACK_DIR, v),
-                None => std::env::remove_var(cys::pack::ENV_PACK_DIR),
-            }
-            match &saved_cfg {
-                Some(v) => std::env::set_var(cys::pack::ENV_CONFIG_DIR, v),
-                None => std::env::remove_var(cys::pack::ENV_CONFIG_DIR),
-            }
-        };
         let disk_after = std::fs::read_to_string(pack_dir.join(".pack-version")).unwrap_or_default();
-        restore();
         let _ = std::fs::remove_dir_all(&td);
 
         assert!(r1.is_err(), "위조 서명 통과");
@@ -7997,14 +7955,11 @@ mod tests {
     #[test]
     fn pack_update_pro_channel_e2e() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let saved = std::env::var(cys::pack::ENV_PACK_DIR).ok();
-        let saved_cfg = std::env::var(cys::pack::ENV_CONFIG_DIR).ok();
         let td = std::env::temp_dir().join(format!("cys-pu-pro-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&td);
         let pack_dir = td.join("pack");
         std::fs::create_dir_all(&pack_dir).unwrap();
-        std::env::set_var(cys::pack::ENV_PACK_DIR, &pack_dir);
-        std::env::set_var(cys::pack::ENV_CONFIG_DIR, td.join("cysclaude"));
+        let _dirs = cys::pack::override_dirs_for_thread(&pack_dir, td.join("cysclaude"));
         std::fs::write(pack_dir.join(".pack-version"), "1.0.0").unwrap();
 
         let (pk, sign) = gen_signer();
@@ -8040,20 +7995,9 @@ mod tests {
         build_signed_pack_pro(&d4, &files1, "TESTKEY", "1.0.0", 1, "0.4.1", 5000, 9_000_000_000, &sign);
         let r4 = pack_update_from_dir(&d4, &staging, &lock, &accepted, 5000, "0.4.1", &kr, true);
 
-        let restore = || {
-            match &saved {
-                Some(v) => std::env::set_var(cys::pack::ENV_PACK_DIR, v),
-                None => std::env::remove_var(cys::pack::ENV_PACK_DIR),
-            }
-            match &saved_cfg {
-                Some(v) => std::env::set_var(cys::pack::ENV_CONFIG_DIR, v),
-                None => std::env::remove_var(cys::pack::ENV_CONFIG_DIR),
-            }
-        };
         let pro_content = std::fs::read_to_string(pack_dir.join("pro-only/skill.md")).unwrap_or_default();
         let state = cys::pack::read_pack_state(&pack_dir);
         let acc_ev = cys::packsig::read_accepted_evidence(&accepted);
-        restore();
         let _ = std::fs::remove_dir_all(&td);
 
         let o1 = r1.expect("① free→pro.1 실패");
@@ -8083,14 +8027,11 @@ mod tests {
     #[test]
     fn pack_update_from_dir_rejects_extra_unlisted_file() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let saved = std::env::var(cys::pack::ENV_PACK_DIR).ok();
-        let saved_cfg = std::env::var(cys::pack::ENV_CONFIG_DIR).ok();
         let td = std::env::temp_dir().join(format!("cys-pu-extra-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&td);
         let pack_dir = td.join("pack");
         std::fs::create_dir_all(&pack_dir).unwrap();
-        std::env::set_var(cys::pack::ENV_PACK_DIR, &pack_dir);
-        std::env::set_var(cys::pack::ENV_CONFIG_DIR, td.join("cysclaude"));
+        let _dirs = cys::pack::override_dirs_for_thread(&pack_dir, td.join("cysclaude"));
         std::fs::write(pack_dir.join(".pack-version"), "1.0.0").unwrap();
 
         let (pk, sign) = gen_signer();
@@ -8125,21 +8066,10 @@ mod tests {
         let res =
             pack_update_from_dir(&from_dir, &staging, &lock, &accepted, 5000, "0.4.1", &kr, true);
 
-        let restore = || {
-            match &saved {
-                Some(v) => std::env::set_var(cys::pack::ENV_PACK_DIR, v),
-                None => std::env::remove_var(cys::pack::ENV_PACK_DIR),
-            }
-            match &saved_cfg {
-                Some(v) => std::env::set_var(cys::pack::ENV_CONFIG_DIR, v),
-                None => std::env::remove_var(cys::pack::ENV_CONFIG_DIR),
-            }
-        };
         let disk_after = std::fs::read_to_string(pack_dir.join(".pack-version")).unwrap_or_default();
         let evil_installed = pack_dir.join("bin/evil.py").exists();
         let soul_installed = pack_dir.join("soul.md").exists();
         let acc_exists = accepted.is_file();
-        restore();
         let _ = std::fs::remove_dir_all(&td);
 
         assert!(res.is_err(), "미등재 파일 포함 팩이 통과(서명/무결성 우회)");
@@ -8282,8 +8212,7 @@ mod tests {
         assert_eq!(extract_bin("KEY=\"a b\" claude", "fallback"), "b\"");
     }
 
-    // compose_directive 테스트들은 전역 ENV_PACK_DIR를 변경하므로 상단 ENV_LOCK으로 직렬화한다
-    // (pack-update 테스트와 동일 전역 env 공유 — 별개 락 병렬 교차 레이스 차단, HIGH 감사).
+    // compose_directive 테스트들은 pack_dir 을 스레드 국소 주입으로 격리한다(전역 env 무변경).
 
     /// ★불변식 박제: compose_directive는 디렉티브 → soul.md → 장기메모리 색인 → 스킬 색인
     /// 순서로 조립한다. 메모리 색인 누락은 "리뷰어·워커 장기기억 0" 결함의 재발이므로
@@ -8307,13 +8236,8 @@ mod tests {
         )
         .unwrap();
 
-        let saved = std::env::var(cys::pack::ENV_PACK_DIR).ok();
-        std::env::set_var(cys::pack::ENV_PACK_DIR, &td);
+        let _dirs = cys::pack::override_dirs_for_thread(&td, td.join("cysclaude"));
         let out = compose_directive("worker").expect("compose 실패");
-        match saved {
-            Some(v) => std::env::set_var(cys::pack::ENV_PACK_DIR, v),
-            None => std::env::remove_var(cys::pack::ENV_PACK_DIR),
-        }
         let _ = std::fs::remove_dir_all(&td);
 
         let pos = |needle: &str| out.find(needle).unwrap_or_else(|| panic!("누락: {needle}"));
@@ -8353,17 +8277,12 @@ mod tests {
         )
         .unwrap();
 
-        let saved = std::env::var(cys::pack::ENV_PACK_DIR).ok();
-        std::env::set_var(cys::pack::ENV_PACK_DIR, &td);
+        let _dirs = cys::pack::override_dirs_for_thread(&td, td.join("cysclaude"));
         let master = compose_directive("master").expect("master compose");
         let worker = compose_directive("worker").expect("worker compose");
         let worker2 = compose_directive("worker-2").expect("worker-2 compose");
         let cso = compose_directive("cso").expect("cso compose");
         let reviewer = compose_directive("reviewer-gemini").expect("reviewer compose");
-        match saved {
-            Some(v) => std::env::set_var(cys::pack::ENV_PACK_DIR, v),
-            None => std::env::remove_var(cys::pack::ENV_PACK_DIR),
-        }
         let _ = std::fs::remove_dir_all(&td);
 
         assert!(master.contains("RSI-BODY-MARKER"), "master에 RSI 미주입");
@@ -8877,13 +8796,8 @@ mod tests {
         )
         .unwrap();
 
-        let saved = std::env::var(cys::pack::ENV_PACK_DIR).ok();
-        std::env::set_var(cys::pack::ENV_PACK_DIR, &td);
+        let _dirs = cys::pack::override_dirs_for_thread(&td, td.join("cysclaude"));
         let out = compose_directive("master").expect("compose 실패");
-        match saved {
-            Some(v) => std::env::set_var(cys::pack::ENV_PACK_DIR, v),
-            None => std::env::remove_var(cys::pack::ENV_PACK_DIR),
-        }
         let _ = std::fs::remove_dir_all(&td);
 
         let persona = out.find("무조건 내 말만").expect("persona 미동봉");
@@ -8904,13 +8818,8 @@ mod tests {
         std::fs::write(td.join("directives/MASTER_DIRECTIVE.md"), "# MASTER 절대지침\n").unwrap();
         std::fs::write(td.join("directives/RSI_LEARNING_DIRECTIVE.md"), "# RSI 학습\n").unwrap();
 
-        let saved = std::env::var(cys::pack::ENV_PACK_DIR).ok();
-        std::env::set_var(cys::pack::ENV_PACK_DIR, &td);
+        let _dirs = cys::pack::override_dirs_for_thread(&td, td.join("cysclaude"));
         let out = compose_directive("master").expect("compose 실패");
-        match saved {
-            Some(v) => std::env::set_var(cys::pack::ENV_PACK_DIR, v),
-            None => std::env::remove_var(cys::pack::ENV_PACK_DIR),
-        }
         let _ = std::fs::remove_dir_all(&td);
         assert!(out.find("■ 사용자 오버라이드").is_none(), "오버라이드 없는데 블록 등장");
         assert!(out.find("■ 안전핵 재확인").is_none(), "오버라이드 없으면 안전핵 재선언도 생략");
@@ -8922,8 +8831,7 @@ mod tests {
         let td = std::env::temp_dir().join(format!("cys-persona-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&td);
         std::fs::create_dir_all(&td).unwrap();
-        let saved = std::env::var(cys::pack::ENV_PACK_DIR).ok();
-        std::env::set_var(cys::pack::ENV_PACK_DIR, &td);
+        let _dirs = cys::pack::override_dirs_for_thread(&td, td.join("cysclaude"));
 
         let rc = run_persona(PersonaAction::Set {
             role: "master".into(),
@@ -8946,10 +8854,6 @@ mod tests {
         assert_eq!(rc_reset, 0);
         assert!(!path.exists(), "reset 후 파일 잔존");
 
-        match saved {
-            Some(v) => std::env::set_var(cys::pack::ENV_PACK_DIR, v),
-            None => std::env::remove_var(cys::pack::ENV_PACK_DIR),
-        }
         let _ = std::fs::remove_dir_all(&td);
     }
 
@@ -8963,8 +8867,7 @@ mod tests {
         std::fs::create_dir_all(td.join("overrides")).unwrap();
         // params가 정수(손상)인 override 파일을 미리 심는다.
         std::fs::write(td.join("overrides/master.json"), r#"{"params":42}"#).unwrap();
-        let saved = std::env::var(cys::pack::ENV_PACK_DIR).ok();
-        std::env::set_var(cys::pack::ENV_PACK_DIR, &td);
+        let _dirs = cys::pack::override_dirs_for_thread(&td, td.join("cysclaude"));
 
         // 패닉 없이 정상 저장돼야 한다(손상 params는 객체로 정규화).
         let rc = run_persona(PersonaAction::Set {
@@ -8977,10 +8880,6 @@ mod tests {
         let doc: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(doc["params"]["review_rounds"], 4, "정규화 후 노브 미기록");
 
-        match saved {
-            Some(v) => std::env::set_var(cys::pack::ENV_PACK_DIR, v),
-            None => std::env::remove_var(cys::pack::ENV_PACK_DIR),
-        }
         let _ = std::fs::remove_dir_all(&td);
     }
 
@@ -9381,14 +9280,11 @@ mod tests {
     #[test]
     fn pack_update_from_dir_rejects_digest_mismatch() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let saved = std::env::var(cys::pack::ENV_PACK_DIR).ok();
-        let saved_cfg = std::env::var(cys::pack::ENV_CONFIG_DIR).ok();
         let td = std::env::temp_dir().join(format!("cys-pu-digest-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&td);
         let pack_dir = td.join("pack");
         std::fs::create_dir_all(&pack_dir).unwrap();
-        std::env::set_var(cys::pack::ENV_PACK_DIR, &pack_dir);
-        std::env::set_var(cys::pack::ENV_CONFIG_DIR, td.join("cysclaude"));
+        let _dirs = cys::pack::override_dirs_for_thread(&pack_dir, td.join("cysclaude"));
         std::fs::write(pack_dir.join(".pack-version"), "1.0.0").unwrap();
 
         let (pk, sign) = gen_signer();
@@ -9427,14 +9323,6 @@ mod tests {
         let accepted = td.join(".pack-accepted.json");
         let r =
             pack_update_from_dir(&from_dir, &staging, &lock, &accepted, 5000, "0.4.1", &kr, false);
-        match saved {
-            Some(v) => std::env::set_var(cys::pack::ENV_PACK_DIR, v),
-            None => std::env::remove_var(cys::pack::ENV_PACK_DIR),
-        }
-        match saved_cfg {
-            Some(v) => std::env::set_var(cys::pack::ENV_CONFIG_DIR, v),
-            None => std::env::remove_var(cys::pack::ENV_CONFIG_DIR),
-        }
         let e = r.expect_err("digest 불일치인데 통과");
         assert!(e.contains("digest 불일치"), "digest 거부 사유 아님: {e}");
         assert!(!staging.join("soul.md").exists(), "digest 거부인데 전개됨(전개 前 거부 위반)");

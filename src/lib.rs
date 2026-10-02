@@ -22,11 +22,16 @@ pub const ENV_ROLE: &str = "CYS_ROLE";
 
 /// 이행기 호환: CYS_* 우선 → 구 JAVIS_* → 구 AITERM_* 순 폴백.
 pub fn env_compat(primary: &str) -> Option<String> {
+    env_compat_with(primary, |k| std::env::var(k).ok())
+}
+
+/// env_compat 의 순수 코어 — env 조회를 주입받는다(테스트가 프로세스 전역 env를 건드리지 않게).
+pub fn env_compat_with(primary: &str, var: impl Fn(&str) -> Option<String>) -> Option<String> {
     let javis = primary.replacen("CYS_", "JAVIS_", 1);
     let aiterm = primary.replacen("CYS_", "AITERM_", 1);
     [primary, javis.as_str(), aiterm.as_str()]
         .iter()
-        .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
+        .find_map(|k| var(k).filter(|v| !v.is_empty()))
 }
 
 /// Wire protocol: one JSON object per line (NDJSON), request/response with id echo.
@@ -422,8 +427,12 @@ pub fn home_dir() -> PathBuf {
 /// 실제 전개 주체인 **데몬 프로세스에서 호출**하는 것이 권위다(state.rs의 CYS_ACCOUNT_DIR 전파와 정합).
 /// discover 스캔(usage.rs)이 ~/.cys/claude를 원리적으로 못 보므로, config_dir 권위는 이 결정론 해소뿐이다.
 pub fn resolve_claude_config_dir() -> String {
-    std::env::var("CYS_ACCOUNT_DIR")
-        .ok()
+    resolve_claude_config_dir_with(std::env::var("CYS_ACCOUNT_DIR").ok())
+}
+
+/// resolve_claude_config_dir 의 순수 코어 — CYS_ACCOUNT_DIR 값을 주입받는다(테스트 env 무변경).
+fn resolve_claude_config_dir_with(account_dir: Option<String>) -> String {
+    account_dir
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| home_dir().join(".cys").join("claude").to_string_lossy().into_owned())
 }
@@ -924,53 +933,43 @@ mod tests {
         );
     }
 
+    /// 테스트용 가짜 env 조회기(프로세스 전역 env 무변경 — 병렬 테스트 경합 0).
+    fn fake_env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let m: std::collections::HashMap<String, String> =
+            pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        move |k| m.get(k).cloned()
+    }
+
     #[test]
     fn env_compat_fallback_priority() {
-        // 고유 키로 격리 (다른 테스트·환경과 충돌 방지)
         let p = "CYS_ZZUNIQUETEST";
-        let j = "JAVIS_ZZUNIQUETEST";
-        let a = "AITERM_ZZUNIQUETEST";
-        for k in [p, j, a] {
-            std::env::remove_var(k);
-        }
         // 셋 다 없으면 None
-        assert_eq!(env_compat(p), None);
+        assert_eq!(env_compat_with(p, fake_env(&[])), None);
         // AITERM_만 있으면 폴백
-        std::env::set_var(a, "aiterm_val");
-        assert_eq!(env_compat(p), Some("aiterm_val".to_string()));
+        let a = [("AITERM_ZZUNIQUETEST", "aiterm_val")];
+        assert_eq!(env_compat_with(p, fake_env(&a)), Some("aiterm_val".to_string()));
         // JAVIS_가 AITERM_보다 우선
-        std::env::set_var(j, "javis_val");
-        assert_eq!(env_compat(p), Some("javis_val".to_string()));
+        let aj = [a[0], ("JAVIS_ZZUNIQUETEST", "javis_val")];
+        assert_eq!(env_compat_with(p, fake_env(&aj)), Some("javis_val".to_string()));
         // CYS_(primary)가 최우선
-        std::env::set_var(p, "cys_val");
-        assert_eq!(env_compat(p), Some("cys_val".to_string()));
+        let ajp = [aj[0], aj[1], (p, "cys_val")];
+        assert_eq!(env_compat_with(p, fake_env(&ajp)), Some("cys_val".to_string()));
         // 빈 문자열은 미설정으로 간주 → 다음 폴백
-        std::env::set_var(p, "");
-        assert_eq!(env_compat(p), Some("javis_val".to_string()));
-        for k in [p, j, a] {
-            std::env::remove_var(k);
-        }
+        let aje = [aj[0], aj[1], (p, "")];
+        assert_eq!(env_compat_with(p, fake_env(&aje)), Some("javis_val".to_string()));
     }
 
     #[test]
     fn env_compat_only_first_cys_token_is_rewritten() {
         // replacen(..,1)이 'CYS_'를 첫 1회만 치환 — primary에 CYS_가 없으면
         // 세 후보 키가 모두 primary와 동일(폴백 무의미)임을 박제.
-        let only = "CYS_ZZONLYPRIMARY";
-        let javis = "JAVIS_ZZONLYPRIMARY";
-        std::env::remove_var(only);
-        std::env::remove_var(javis);
-        // primary에 CYS_가 없는 키: 폴백 키가 자기 자신과 같아져 primary만 본다
         let nocys = "PLAINKEY_ZZ";
-        std::env::remove_var(nocys);
-        assert_eq!(env_compat(nocys), None);
-        std::env::set_var(nocys, "plain");
-        assert_eq!(env_compat(nocys), Some("plain".to_string()));
-        std::env::remove_var(nocys);
-        // 첫 CYS_만 치환 — 'CYS_'가 값 중간에 또 나와도 1회만
-        std::env::set_var(javis, "via_javis");
-        assert_eq!(env_compat(only), Some("via_javis".to_string()));
-        std::env::remove_var(javis);
+        assert_eq!(env_compat_with(nocys, fake_env(&[])), None);
+        assert_eq!(env_compat_with(nocys, fake_env(&[(nocys, "plain")])), Some("plain".to_string()));
+        // 첫 CYS_만 치환
+        let only = "CYS_ZZONLYPRIMARY";
+        let j = [("JAVIS_ZZONLYPRIMARY", "via_javis")];
+        assert_eq!(env_compat_with(only, fake_env(&j)), Some("via_javis".to_string()));
     }
 
     #[test]
@@ -987,25 +986,20 @@ mod tests {
     fn resolve_claude_config_dir_is_deterministic_env_not_scan() {
         // (W1-2 핵심) config_dir 권위는 결정론 env 해소뿐 — discover 스캔(~/.claude*)을 원리적으로
         // 참조하지 않는다. CYS_ACCOUNT_DIR 설정 시 그 값 그대로, 미설정 시 $HOME/.cys/claude.
-        let prev = std::env::var("CYS_ACCOUNT_DIR").ok();
         // (a) 명시 계정 dir → 그 절대경로 그대로 (foreign ~/.claude-* 존재 여부와 무관 = 스캔 안 함)
-        std::env::set_var("CYS_ACCOUNT_DIR", "/tmp/zz-acct/.cys/claude");
-        assert_eq!(resolve_claude_config_dir(), "/tmp/zz-acct/.cys/claude");
+        // 값은 주입(resolve_claude_config_dir_with) — 프로세스 전역 env 무변경.
+        assert_eq!(
+            resolve_claude_config_dir_with(Some("/tmp/zz-acct/.cys/claude".into())),
+            "/tmp/zz-acct/.cys/claude"
+        );
         // (b) 빈 문자열 = 미설정 취급 → 기본 $HOME/.cys/claude
-        std::env::set_var("CYS_ACCOUNT_DIR", "");
-        let def = resolve_claude_config_dir();
+        let def = resolve_claude_config_dir_with(Some(String::new()));
         assert!(def.ends_with("/.cys/claude"), "기본 해소: {def}");
         assert!(
             def.starts_with(&home_dir().to_string_lossy().into_owned()),
             "HOME 기반: {def}"
         );
         // (c) 미설정도 동일 기본
-        std::env::remove_var("CYS_ACCOUNT_DIR");
-        assert_eq!(resolve_claude_config_dir(), def);
-        // 원복
-        match prev {
-            Some(v) => std::env::set_var("CYS_ACCOUNT_DIR", v),
-            None => std::env::remove_var("CYS_ACCOUNT_DIR"),
-        }
+        assert_eq!(resolve_claude_config_dir_with(None), def);
     }
 }

@@ -3695,13 +3695,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // CYS_PACK_DIR는 프로세스 전역 env라 set/사용 윈도를 직렬화해야 cargo 병렬 러너에서
-    // 다른 ACL 테스트와 충돌하지 않는다 (pack.rs PACK_ENV_LOCK과 동일 패턴).
+    // pack_dir 은 스레드 국소 주입(override_dirs_for_thread)으로 격리한다 — 전역 CYS_PACK_DIR 무변경.
+    // 락은 아래 HOME 스왑 테스트(approval_sign_allowed_when_master_stable)와의 직렬화용으로 유지.
     static ACL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// 격리된 임시 디렉터리에 acl.json을 깔고 그 안에 소켓 경로를 둔 Daemon을 만든다.
-    /// 반환된 _guard가 살아있는 동안 CYS_PACK_DIR가 이 디렉터리를 가리킨다.
-    fn daemon_with_acl(tag: &str, acl_json: &str) -> (Arc<Daemon>, std::path::PathBuf) {
+    /// 반환된 guard가 살아있는 동안 (이 스레드에서) pack_dir()이 이 디렉터리를 가리킨다.
+    fn daemon_with_acl(
+        tag: &str,
+        acl_json: &str,
+    ) -> (Arc<Daemon>, std::path::PathBuf, cys::pack::DirsOverrideGuard) {
         let dir = std::env::temp_dir().join(format!(
             "cys-acl-{}-{}-{}",
             tag,
@@ -3710,9 +3713,9 @@ mod tests {
         ));
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(dir.join("acl.json"), acl_json).unwrap();
-        std::env::set_var(cys::pack::ENV_PACK_DIR, &dir);
+        let guard = cys::pack::override_dirs_for_thread(&dir, dir.join("cfg"));
         let daemon = Daemon::new(dir.join("cysd.sock"));
-        (daemon, dir)
+        (daemon, dir, guard)
     }
 
     /// T1-3 회귀: send_text의 `human:true`는 ACL을 우회하지 못한다.
@@ -3728,7 +3731,7 @@ mod tests {
                 { "from": "reviewer-*", "to": "worker*", "allow": false }
             ]
         }"#;
-        let (daemon, dir) = daemon_with_acl("human-bypass", acl);
+        let (daemon, dir, _dirs) = daemon_with_acl("human-bypass", acl);
 
         // 대상: worker 역할 surface (reviewer가 주입하려는 stdin)
         let worker = daemon
@@ -3791,7 +3794,6 @@ mod tests {
         };
         assert_eq!(resp2["error"]["code"], json!("acl_denied"));
 
-        std::env::remove_var(cys::pack::ENV_PACK_DIR);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3812,7 +3814,7 @@ mod tests {
                 { "from": "reviewer-*", "to": "worker*", "allow": false }
             ]
         }"#;
-        let (daemon, dir) = daemon_with_acl("denied-guard", acl);
+        let (daemon, dir, _dirs) = daemon_with_acl("denied-guard", acl);
 
         // 대상: worker pane (타이핑 가드가 오염될 피해자)
         let worker = daemon
@@ -3865,7 +3867,6 @@ mod tests {
             "ACL 거부된 human:true 발신이 worker의 last_human_input을 갱신했다 (타이핑 가드 오염)"
         );
 
-        std::env::remove_var(cys::pack::ENV_PACK_DIR);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3877,7 +3878,7 @@ mod tests {
     fn authoritative_send_bypasses_typing_guard() {
         let _g = ACL_ENV_LOCK.lock().unwrap();
         let acl = r#"{ "default": "allow", "rules": [] }"#;
-        let (daemon, dir) = daemon_with_acl("auth-guard", acl);
+        let (daemon, dir, _dirs) = daemon_with_acl("auth-guard", acl);
 
         let worker = daemon
             .create_surface(None, Some("sleep 30".into()), None, Some("worker-1".into()), 24, 80)
@@ -3983,7 +3984,6 @@ mod tests {
             "미해소 외부 caller(None)의 authoritative가 가드를 우회했다 (codex R2 신원 구멍): {respe}"
         );
 
-        std::env::remove_var(cys::pack::ENV_PACK_DIR);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3999,7 +3999,7 @@ mod tests {
                 { "from": "reviewer-*", "to": "master", "allow": true }
             ]
         }"#;
-        let (daemon, dir) = daemon_with_acl("allow-path", acl);
+        let (daemon, dir, _dirs) = daemon_with_acl("allow-path", acl);
 
         let master = daemon
             .create_surface(None, Some("sleep 30".into()), None, Some("master".into()), 24, 80)
@@ -4037,7 +4037,6 @@ mod tests {
             "허용된 reviewer→master 발신이 막혔다 (응답: {resp})"
         );
 
-        std::env::remove_var(cys::pack::ENV_PACK_DIR);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4089,7 +4088,7 @@ mod tests {
     #[test]
     fn send_text_clear_first_requires_agent_pane() {
         let _g = ACL_ENV_LOCK.lock().unwrap();
-        let (daemon, dir) =
+        let (daemon, dir, _dirs) =
             daemon_with_acl("clearfirst-gate", r#"{"default":"allow","rules":[]}"#);
         let s = daemon
             .create_surface(None, Some("sleep 30".into()), None, None, 24, 80)
@@ -4130,7 +4129,6 @@ mod tests {
             "agent 등록 pane의 clear_first는 통과해야 한다 (응답: {resp})"
         );
 
-        std::env::remove_var(cys::pack::ENV_PACK_DIR);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4139,7 +4137,7 @@ mod tests {
     #[test]
     fn send_text_clear_first_rejects_queued_combo() {
         let _g = ACL_ENV_LOCK.lock().unwrap();
-        let (daemon, dir) =
+        let (daemon, dir, _dirs) =
             daemon_with_acl("clearfirst-combo", r#"{"default":"allow","rules":[]}"#);
         let s = daemon
             .create_surface(None, Some("sleep 30".into()), None, None, 24, 80)
@@ -4165,7 +4163,6 @@ mod tests {
             "clear_first + queued 결합은 거부돼야 한다 (응답: {resp})"
         );
 
-        std::env::remove_var(cys::pack::ENV_PACK_DIR);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5722,7 +5719,7 @@ mod tests {
     #[test]
     fn approval_sign_denied_when_master_just_claimed() {
         let _g = ACL_ENV_LOCK.lock().unwrap();
-        let (daemon, dir) =
+        let (daemon, dir, _dirs) =
             daemon_with_acl("vec9-just-claimed", r#"{"default":"allow","rules":[]}"#);
         let caller = 992_001_u32;
         let _sid = setup_master(&daemon, caller);
@@ -5738,7 +5735,6 @@ mod tests {
             "쿨다운 거부가 아닌 다른 경로 (응답: {resp})"
         );
 
-        std::env::remove_var(cys::pack::ENV_PACK_DIR);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5748,7 +5744,7 @@ mod tests {
     #[test]
     fn approval_sign_allowed_when_master_stable() {
         let _g = ACL_ENV_LOCK.lock().unwrap();
-        let (daemon, dir) =
+        let (daemon, dir, _dirs) =
             daemon_with_acl("vec9-stable", r#"{"default":"allow","rules":[]}"#);
         // 서명 부작용(secret·approvals.json)을 임시 HOME으로 격리 — 실제 ~/.cys 오염 방지.
         let prev_home = std::env::var("HOME").ok();
@@ -5774,7 +5770,6 @@ mod tests {
             Some(h) => std::env::set_var("HOME", h),
             None => std::env::remove_var("HOME"),
         }
-        std::env::remove_var(cys::pack::ENV_PACK_DIR);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5783,7 +5778,7 @@ mod tests {
     #[test]
     fn approval_sign_denied_when_no_master() {
         let _g = ACL_ENV_LOCK.lock().unwrap();
-        let (daemon, dir) =
+        let (daemon, dir, _dirs) =
             daemon_with_acl("vec9-no-master", r#"{"default":"allow","rules":[]}"#);
         let caller = 992_003_u32;
         // caller=master 검증은 통과시키되(roles["master"]=sid) master_claimed_at만 None으로 둔다 —
@@ -5800,7 +5795,6 @@ mod tests {
             "deadman 동결이 아닌 다른 경로 (응답: {resp})"
         );
 
-        std::env::remove_var(cys::pack::ENV_PACK_DIR);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5809,7 +5803,7 @@ mod tests {
     #[test]
     fn approval_sign_denied_when_caller_not_master() {
         let _g = ACL_ENV_LOCK.lock().unwrap();
-        let (daemon, dir) =
+        let (daemon, dir, _dirs) =
             daemon_with_acl("vec9-not-master", r#"{"default":"allow","rules":[]}"#);
         // worker 역할 surface가 발신 — master가 아니므로 forbidden(쿨다운 검사 이전 단계).
         let s = daemon
@@ -5831,7 +5825,6 @@ mod tests {
             "기존 caller=master 검증이 손상됨 (응답: {resp})"
         );
 
-        std::env::remove_var(cys::pack::ENV_PACK_DIR);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -6252,7 +6245,7 @@ mod tests {
     #[test]
     fn authoritative_restore_root_descendant_bypasses_both_send_paths() {
         let _g = ACL_ENV_LOCK.lock().unwrap();
-        let (daemon, dir) =
+        let (daemon, dir, _dirs) =
             daemon_with_acl("restore-root-p1", r#"{"default":"allow","rules":[]}"#);
 
         let target = make_surface(&daemon, Some("worker-1"));
@@ -6300,7 +6293,6 @@ mod tests {
             "restore-root 자손의 send_key authoritative 가 막혔다 (P1b): {resp_k}"
         );
 
-        std::env::remove_var(cys::pack::ENV_PACK_DIR);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -6317,7 +6309,7 @@ mod tests {
     #[test]
     fn authoritative_non_restore_root_denied_during_active_restore() {
         let _g = ACL_ENV_LOCK.lock().unwrap();
-        let (daemon, dir) =
+        let (daemon, dir, _dirs) =
             daemon_with_acl("restore-root-a3", r#"{"default":"allow","rules":[]}"#);
 
         let target = make_surface(&daemon, Some("worker-1"));
@@ -6354,7 +6346,6 @@ mod tests {
             "restore-root subtree 밖 발신자의 authoritative 가 복원 중 우회했다 (A3 누수): {resp}"
         );
 
-        std::env::remove_var(cys::pack::ENV_PACK_DIR);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

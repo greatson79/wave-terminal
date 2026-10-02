@@ -502,8 +502,9 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("cys-license-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).expect("tmp 생성 실패");
-        // CYS_PACK_DIR 오버라이드로 license_paths()의 base를 tmp로 격리.
-        std::env::set_var("CYS_PACK_DIR", tmp.join("pack").display().to_string());
+        // 스레드 국소 dir 주입으로 license_paths()의 base를 tmp로 격리(전역 CYS_PACK_DIR 무변경 —
+        // 구판은 끝에 remove_var 로 외부 격리 env까지 지워 병렬 테스트를 실 홈으로 새게 했다).
+        let _dirs = crate::pack::override_dirs_for_thread(tmp.join("pack"), tmp.join("cfg"));
 
         let (pk, sign) = gen_key_and_signer();
         // 테스트 키링을 쓸 수 없는 install()(embed 키링 고정) 대신 evaluate_bytes 경로는 위에서
@@ -522,7 +523,6 @@ mod tests {
         assert!(err.contains("설치 거부"), "거부 사유 명시: {err}");
         assert!(!lic_dst.exists(), "실패 설치가 파일을 남기면 안 됨(무손상)");
 
-        std::env::remove_var("CYS_PACK_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

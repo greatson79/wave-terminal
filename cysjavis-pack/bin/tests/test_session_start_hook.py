@@ -37,6 +37,7 @@ def setup(tmp, claim_mode):
             f.write("DIRECTIVE-BODY-%s\n" % d)
     body = {"ok": "exit 0",
             "denied": "echo 'claim_denied: privileged role held by live surface' >&2; exit 1",
+            "identity": "echo 'claim_denied: claim_role denied: caller (surface None) may only claim its own surface, not 3' >&2; exit 1",
             "dead": "echo 'connect error' >&2; exit 1",
             "silent": "sleep 10"}[claim_mode]
     with open(os.path.join(bindir, "cys"), "w", encoding="utf-8", newline="\n") as f:
@@ -127,6 +128,16 @@ calls = ""
 if os.path.exists(os.path.join(tmp, "calls.log")):
     calls = open(os.path.join(tmp, "calls.log"), encoding="utf-8").read()
 check("6b worker claim 왕복 0", "claim-role" not in calls)
+shutil.rmtree(tmp)
+
+# caller 식별 거부는 역할 이동의 증거가 아니다. 원문을 남기고 권한 주입은 중단.
+tmp = tempfile.mkdtemp(prefix="hook-identity-")
+env = setup(tmp, "identity")
+code, out, err = run_hook(env, role="master")
+check("7a 신원 거부는 역할 이동으로 단정 금지", "역할 주소 상실" not in out)
+check("7b 신원 거부 원문 보존", "caller (surface None)" in err)
+check("7c 신원 미확정이면 권한 주입 중단", "DIRECTIVE-BODY-MASTER" not in out)
+check("7d 재확인 실패 안내", "신원 재확인 실패" in out)
 shutil.rmtree(tmp)
 
 print("\n%d FAIL" % len(fails) if fails else "\nALL PASS")

@@ -67,7 +67,17 @@ case "$CYS_ROLE" in
       else
         CLAIM_OUT=$(cys claim-role "$CYS_ROLE" 2>&1); CLAIM_RC=$?
       fi
+      # claim_denied는 역할 점유 충돌뿐 아니라 caller 신원 해소 실패에도 사용된다.
+      # 원문을 보존해 caller 신원 해소 실패와 역할 점유 충돌을 구별한다.
+      if [ "$CLAIM_RC" -ne 0 ]; then
+        printf '[session-start] claim-role %s exit %s: %s\n' "$CYS_ROLE" "$CLAIM_RC" "$CLAIM_OUT" >&2
+      fi
       if [ "$CLAIM_RC" -ne 0 ] && printf '%s' "$CLAIM_OUT" | grep -qi 'claim_denied\|privileged role held'; then
+        if printf '%s' "$CLAIM_OUT" | grep -qi 'may only claim its own surface'; then
+          echo "■ 역할 신원 재확인 실패 (CYS_ROLE=$CYS_ROLE — caller와 요청 surface를 검증하지 못함)"
+          echo "역할 지침 주입을 중단했다. stderr의 claim-role 원문을 보고하고 신원 경로를 점검하라."
+          exit 0
+        fi
         echo "■ 역할 주소 상실 (CYS_ROLE=$CYS_ROLE — 레지스트리의 살아있는 보유자가 우위)"
         echo "이 surface는 더 이상 $CYS_ROLE 역할이 아니다. 역할 지휘·역할 행동을 중단하고,"
         echo "레지스트리의 $CYS_ROLE 노드에 인계하라(\`cys send --to $CYS_ROLE\`). 이 세션은 일반 세션으로 동작한다."

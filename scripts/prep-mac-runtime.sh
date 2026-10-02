@@ -51,6 +51,8 @@ tar xzf "$TMP/uv.tgz" -C "$RT/uv" --strip-components=1   # uv-<triple>/{uv,uvx} 
 # ── node + npm/npx (공식 tarball · Developer ID 서명본) ──
 curl -fL -o "$TMP/node.txz" "https://nodejs.org/dist/v${NODE_VER}/node-v${NODE_VER}-darwin-${NODE_ARCH}.tar.xz"
 tar xJf "$TMP/node.txz" -C "$RT/node" --strip-components=1   # bin/{node,npm,npx}·lib
+# npm/npx/corepack must survive Tauri resource copying without symlink semantics.
+bash scripts/wrap-mac-node-tools.sh "$RT/node"
 # ── 무손실 트림 (성능>속도 Pareto: 기능·정보 불변, '불필요 입증분'만 제거 — 의심분은 보존) ──
 # node/include(≈53MB) = C 애드온 컴파일용 헤더(node_api·v8·gyp). 제거 근거 3중: ①런타임에 로드되지
 #   않음(순수 빌드타임 헤더) ②node-gyp는 헤더를 nodejs.org/~/.cache/node-gyp 에서 받지 이 디렉토리를

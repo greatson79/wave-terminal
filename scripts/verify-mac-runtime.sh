@@ -8,9 +8,17 @@ case "$TARGET" in
   x86_64-apple-darwin) ARCH=x86_64 ;;
   *) echo "unsupported mac target: $TARGET" >&2; exit 1 ;;
 esac
-for rel in python/bin/python3 git/bin/git uv/uv uv/uvx node/bin/node node/bin/npm node/bin/npx; do
+for rel in python/bin/python3 git/bin/git uv/uv uv/uvx node/bin/node node/bin/npm node/bin/npx node/bin/corepack; do
   if [ ! -x "$RT/$rel" ]; then
     echo "missing executable runtime: $RT/$rel" >&2; exit 1
+  fi
+done
+# Old staging links execute successfully but break when Tauri dereferences them.
+# Reject them before bundle-prep decides the existing staging runtime is reusable.
+for tool in npm npx corepack; do
+  entry="$RT/node/bin/$tool"
+  if [ -L "$entry" ] || [ ! -f "$entry" ] || [ "$(head -n 1 "$entry")" != '#!/bin/sh' ]; then
+    echo "node CLI must be a regular shell wrapper: $entry" >&2; exit 1
   fi
 done
 for rel in python/bin/python3 git/bin/git uv/uv uv/uvx node/bin/node; do
@@ -30,6 +38,7 @@ if [ "$(uname -m)" = "$ARCH" ]; then
   "$RT/node/bin/node" --version
   "$RT/node/bin/npm" --version
   "$RT/node/bin/npx" --version
+  "$RT/node/bin/corepack" --version
 else
   echo "Cross target: native execution pending ($TARGET)"
 fi

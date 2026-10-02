@@ -3117,6 +3117,9 @@ struct DoctorCtx {
     daemon_state_dir: std::path::PathBuf,
     settings_paths: Vec<String>,
     binary_version: String,
+    /// L5 진행중 staging 보호 임계(초). 실경로는 staging_protect_secs()(env)에서 1회 읽고,
+    /// 테스트는 직접 주입한다 — 전역 env를 병렬 테스트끼리 덮어쓰던 레이스 제거.
+    staging_protect_secs: u64,
 }
 
 /// settings.json 루트에 우리 SessionStart hook 명령이 등록돼 있는가.
@@ -3490,7 +3493,7 @@ fn diag_staging_residue(ctx: &DoctorCtx, fix: bool) -> DiagItem {
         for p in &residue {
             // L5: 진행중(최근 N초 내 수정) staging은 삭제하지 않는다 — 무중단 배포/init 도중
             // 스테이징을 파괴해 배포를 깨는 것을 방지(mtime 미상=보수적으로 삭제 진행).
-            let protect = staging_protect_secs();
+            let protect = ctx.staging_protect_secs;
             if protect > 0 && staging_idle_secs(p).map(|s| s < protect).unwrap_or(false) {
                 skipped += 1;
                 continue;
@@ -3668,6 +3671,7 @@ fn run_doctor(fix: bool, json_out: bool) -> i32 {
         daemon_state_dir,
         settings_paths,
         binary_version: env!("CARGO_PKG_VERSION").to_string(),
+        staging_protect_secs: staging_protect_secs(),
     };
     let items = run_doctor_diagnostics(&ctx, fix);
     let fails = items.iter().filter(|i| i.status == DiagStatus::Fail).count();
@@ -9012,6 +9016,8 @@ mod tests {
             daemon_state_dir: base.to_path_buf(),
             settings_paths: vec![base.join("settings.json").to_string_lossy().into_owned()],
             binary_version: env!("CARGO_PKG_VERSION").to_string(),
+            // 테스트 기본 = 보호 off(방금 만든 staging도 정리 검증 가능). 보호 검증은 개별 주입.
+            staging_protect_secs: 0,
         }
     }
 
@@ -9067,8 +9073,7 @@ mod tests {
 
     #[test]
     fn doctor_staging_residue_fix_keeps_prev() {
-        // L5 보호 해제(방금 만든 staging이 <60s라 보호에 걸리지 않게) — 이 테스트는 삭제 동작 검증.
-        std::env::set_var("CYS_DOCTOR_STAGING_MIN_IDLE_SECS", "0");
+        // L5 보호 off(doctor_ctx_at 기본 0) — 이 테스트는 삭제 동작 검증. 전역 env 미사용(병렬 안전).
         let base = std::env::temp_dir().join(format!("cys-doc-stg-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
@@ -9085,17 +9090,16 @@ mod tests {
         assert!(!base.join(".pack-staging").exists());
         assert!(base.join("pack.prev").exists(), ".prev 롤백 세대 보존(삭제 금지)");
         let _ = std::fs::remove_dir_all(&base);
-        std::env::remove_var("CYS_DOCTOR_STAGING_MIN_IDLE_SECS");
     }
 
     // L5: 진행중(최근 수정) staging은 doctor --fix가 삭제하지 않고 보호한다.
     #[test]
     fn doctor_staging_residue_protects_in_progress() {
-        std::env::set_var("CYS_DOCTOR_STAGING_MIN_IDLE_SECS", "3600"); // 1시간 보호창
         let base = std::env::temp_dir().join(format!("cys-doc-stg-prot-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
-        let ctx = doctor_ctx_at(&base);
+        let mut ctx = doctor_ctx_at(&base);
+        ctx.staging_protect_secs = 3600; // 1시간 보호창(ctx 주입 — 전역 env 미사용)
         std::fs::create_dir_all(base.join(".pack-staging")).unwrap();
         std::fs::write(base.join(".pack-staging/f"), "in-progress").unwrap();
         // 방금 수정 → 보호창 내라 --fix가 skip → 잔재 유지(WARN·삭제 안 됨).
@@ -9104,7 +9108,6 @@ mod tests {
         assert!(base.join(".pack-staging").exists(), "진행중 staging은 삭제되지 않는다");
         assert!(d.action.contains("진행중 보호"), "보호 사유 보고: {}", d.action);
         let _ = std::fs::remove_dir_all(&base);
-        std::env::remove_var("CYS_DOCTOR_STAGING_MIN_IDLE_SECS");
     }
 
     #[test]
@@ -9151,8 +9154,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn doctor_fix_then_rediag_ok() {
-        // L5 보호 해제 — 방금 만든 staging(<60s)이 진행중 보호에 걸려 정리 안 되는 것을 방지(정리 검증).
-        std::env::set_var("CYS_DOCTOR_STAGING_MIN_IDLE_SECS", "0");
+        // L5 보호 off(doctor_ctx_at 기본 0) — 방금 만든 staging도 정리되는지 검증. 전역 env 미사용.
         let base = std::env::temp_dir().join(format!("cys-doc-fix-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
@@ -9173,7 +9175,6 @@ mod tests {
         assert_eq!(by("staging-residue"), DiagStatus::Ok, "잔재 정리됨");
         assert_eq!(by("hook"), DiagStatus::Ok, "hook 재등록됨");
         let _ = std::fs::remove_dir_all(&base);
-        std::env::remove_var("CYS_DOCTOR_STAGING_MIN_IDLE_SECS");
     }
 
     // ───────────────────────── W1: 계정 dir 영속 + resume 재현 ─────────────────────────

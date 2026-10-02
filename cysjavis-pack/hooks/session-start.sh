@@ -71,10 +71,26 @@ case "$CYS_ROLE" in
           printf '%s\n' "$TRACE_PS_RC" > "$CYS_HOOK_IDENTITY_TRACE.ps.exit"
         } 2>/dev/null || :
       fi
-      if command -v timeout >/dev/null 2>&1; then
-        CLAIM_OUT=$(timeout 2 cys claim-role "$CYS_ROLE" 2>&1); CLAIM_RC=$?
+      # MSYS timeout breaks the native caller ancestry. Keep cys under this live shell.
+      if CLAIM_TMP=$(mktemp); then
+        cys claim-role "$CYS_ROLE" >"$CLAIM_TMP" 2>&1 &
+        CLAIM_PID=$!
+        (
+          CLAIM_SLEEP=''
+          trap '[ -z "$CLAIM_SLEEP" ] || { kill "$CLAIM_SLEEP" 2>/dev/null; wait "$CLAIM_SLEEP" 2>/dev/null; }; exit 0' TERM INT
+          sleep 2 & CLAIM_SLEEP=$!
+          wait "$CLAIM_SLEEP"
+          kill -KILL "$CLAIM_PID" 2>/dev/null
+        ) </dev/null >/dev/null 2>&1 &
+        CLAIM_WATCH=$!
+        wait "$CLAIM_PID" 2>/dev/null; CLAIM_RC=$?
+        kill "$CLAIM_WATCH" 2>/dev/null
+        wait "$CLAIM_WATCH" 2>/dev/null
+        CLAIM_OUT=$(cat "$CLAIM_TMP")
+        rm -f "$CLAIM_TMP"
       else
-        CLAIM_OUT=$(cys claim-role "$CYS_ROLE" 2>&1); CLAIM_RC=$?
+        CLAIM_RC=1
+        CLAIM_OUT="claim temporary file unavailable"
       fi
       # claim_denied는 역할 점유 충돌뿐 아니라 caller 신원 해소 실패에도 사용된다.
       # 원문을 보존해 caller 신원 해소 실패와 역할 점유 충돌을 구별한다.

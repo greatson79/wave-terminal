@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 SELF = os.path.dirname(os.path.abspath(__file__))
 HOOK = os.path.join(SELF, "..", "..", "hooks", "session-start.sh")
@@ -39,7 +40,7 @@ def setup(tmp, claim_mode):
             "denied": "echo 'claim_denied: privileged role held by live surface' >&2; exit 1",
             "identity": "echo 'claim_denied: claim_role denied: caller (surface None) may only claim its own surface, not 3' >&2; exit 1",
             "dead": "echo 'connect error' >&2; exit 1",
-            "silent": "sleep 10"}[claim_mode]
+            "silent": "trap '' TERM; exec sleep 10"}[claim_mode]
     with open(os.path.join(bindir, "cys"), "w", encoding="utf-8", newline="\n") as f:
         f.write("#!/bin/sh\necho \"cys $@\" >> \"%s/calls.log\"\n"
                 "case \"$1\" in claim-role) %s;; esac\nexit 0\n" % (tmp, body))
@@ -162,6 +163,28 @@ for mode in ("ok", "identity"):
     check("8 ps failure recorded " + mode, open(trace + ".ps.exit").read().strip() == "9")
     env["CYS_HOOK_IDENTITY_TRACE"] = os.path.join(tmp, "missing", "trace")
     check("8 trace write failure keeps claim " + mode, run_hook(env, role="master") == baseline)
+    shutil.rmtree(tmp)
+
+# A hostile timeout on PATH must never be called; preserve the two-second bound.
+for mode in ("ok", "identity", "silent"):
+    tmp = tempfile.mkdtemp(prefix="hook-watchdog-")
+    env = setup(tmp, mode)
+    timeout_bin = os.path.join(tmp, "stubbin", "timeout")
+    with open(timeout_bin, "w", newline="\n") as f:
+        f.write('#!/bin/sh\necho called > "' + tmp + '/timeout-called"\nexit 99\n')
+    os.chmod(timeout_bin, 0o755)
+    started = time.monotonic()
+    code, out, err = run_hook(env, role="master")
+    elapsed = time.monotonic() - started
+    check("9 timeout binary unused " + mode, not os.path.exists(os.path.join(tmp, "timeout-called")))
+    check("9 bounded completion " + mode, elapsed < 5, str(elapsed))
+    if mode == "silent":
+        check("9 two-second deadline", 1.5 <= elapsed < 5, str(elapsed))
+        check("9 deadline fail-open", "DIRECTIVE-BODY-MASTER" in out and "재확인 불가" in out)
+    if mode == "identity":
+        check("9 denial preserved", "caller (surface None)" in err and "DIRECTIVE-BODY-MASTER" not in out)
+    if mode == "ok":
+        check("9 success preserved", code == 0 and "DIRECTIVE-BODY-MASTER" in out)
     shutil.rmtree(tmp)
 
 print("\n%d FAIL" % len(fails) if fails else "\nALL PASS")

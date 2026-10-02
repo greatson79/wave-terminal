@@ -83,9 +83,9 @@ bun x @tauri-apps/cli build
 # 배포본으로 정리 (아키텍처 접미사 표준화)
 cp target/release/bundle/dmg/cys_0.2.0_aarch64.dmg dist-mac/cys-0.2.0-macos-arm64.dmg
 
-# 업데이트 manifest(latest.json) + 자산 생성
-sh scripts/make-update-manifest.sh 0.2.0 <OWNER> cys-terminal
-#  → dist-update/latest.json, dist-update/cys-0.2.0-macos-aarch64.app.tar.gz
+# 업데이트 manifest(latest.json) + 자산 생성 (발행 이름 = 공백 없는 wave-terminal-<ver>-macos-<arm64|x64>.app.tar.gz)
+sh scripts/make-update-manifest.sh 0.2.0 greatson79 wave-terminal aarch64 "target/release/bundle/macos/Wave Terminal.app.tar.gz.sig"
+#  → dist-update/latest.json, dist-update/wave-terminal-0.2.0-macos-arm64.app.tar.gz(.sig)
 ```
 
 `beforeBuildCommand`(scripts/bundle-prep.sh)가 UI 번들 + cys/cysd 릴리스 빌드 + `externalBin` 배치를
@@ -216,7 +216,7 @@ git tag -a v0.2.0 -m "cys 0.2.0 — 자비스 네이티브 기능 19건 + zero-s
 # gh CLI 릴리스 (드래프트로 먼저 검토 권장)
 gh release create v0.2.0 --draft --title "cys 0.2.0" --notes-file docs/RELEASE_NOTES_0.2.0.md \
   dist-update/latest.json \
-  dist-update/cys-0.2.0-macos-aarch64.app.tar.gz \
+  dist-update/wave-terminal-0.2.0-macos-arm64.app.tar.gz \
   dist-mac/cys-0.2.0-macos-arm64.dmg \
   dist-win/cys-0.2.0-windows-x64.msi \
   dist-win/cys-0.2.0-windows-arm64.msi \
@@ -244,3 +244,4 @@ gh release create v0.2.0 --draft --title "cys 0.2.0" --notes-file docs/RELEASE_N
 - [ ] DMG에서 설치 → 앱 실행 → `cys status` 동작
 - [ ] 버전 문자열 4곳(+wxs 2곳) 일치
 - [ ] 릴리스 노트(RELEASE_NOTES_0.2.0.md) 작성
+- [ ] 발행 전 `latest.json`의 모든 url이 실제 업로드된 자산 이름과 정확히 같은지 대조 — `sh scripts/check-update-manifest.sh dist-update/latest.json greatson79/wave-terminal vX.Y.Z` (0=일치, 1=불일치 목록 출력)

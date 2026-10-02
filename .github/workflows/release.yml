@@ -187,15 +187,21 @@ jobs:
           # ② git-core dedup (역참조 되돌리기 · build-macos-signed.sh와 동일 공유 스크립트) → runtime/git 608→~144MB
           bash scripts/dedup-git-core.sh "$APP"
           bash scripts/verify-mac-runtime.sh "$APP/Contents/Resources/runtime" "$TRIPLE"
-          # ③ 업데이터 tar.gz 재생성(dedup 반영·심볼릭링크 보존) + 재서명 → tauri-action이 이 .sig로 latest.json 작성
+          # ③ 업데이터 tar.gz 재생성(dedup 반영·심볼릭링크 보존) + 재서명 → 공백 없는 발행 이름으로 dist-update/에 배치
+          #   (wave-terminal-<ver>-macos-<arch>.app.tar.gz[.sig] — 이름 SOT=make-update-manifest.sh). 공백 이름
+          #   원본은 지워 tauri-action이 "Wave Terminal_*.app.tar.gz"로 올리지 않게 한다 → 업로드는 아래
+          #   "업데이터 자산 업로드" 스텝, latest.json 의 darwin-* 항목은 updater-manifest 잡이 정확한 이름으로 쓴다.
           ( cd "$BUNDLE/macos" && tar czf "$PRODUCT.app.tar.gz" "$PRODUCT.app" )
           bun x @tauri-apps/cli@2 signer sign --private-key "$TAURI_SIGNING_PRIVATE_KEY" --password "" "$BUNDLE/macos/$PRODUCT.app.tar.gz"
+          UPDATE_OUT=dist-update sh scripts/make-update-manifest.sh "$VERSION" "${GITHUB_REPOSITORY%/*}" "${GITHUB_REPOSITORY#*/}" \
+            "$TRIPLE" "$BUNDLE/macos/$PRODUCT.app.tar.gz.sig"
+          rm -f "$BUNDLE/macos/$PRODUCT.app.tar.gz" "$BUNDLE/macos/$PRODUCT.app.tar.gz.sig"
           # ④ dedup된 .app으로 UDZO DMG(hdiutil · Tauri 기본 포맷 동일). 파일명 cys_<ver>_<arch>.dmg = tauri-action 표준 수집명.
           STAGE="$(mktemp -d)"; ditto "$APP" "$STAGE/$PRODUCT.app"; ln -s /Applications "$STAGE/Applications"
           mkdir -p "$BUNDLE/dmg"
           hdiutil create -volname "cys" -srcfolder "$STAGE" -ov -format UDZO "$BUNDLE/dmg/cys_${VERSION}_${ARCH}.dmg"
           rm -rf "$STAGE"
-          echo "✓ macOS slim 산출물 준비: $BUNDLE/dmg/cys_${VERSION}_${ARCH}.dmg + $BUNDLE/macos/$PRODUCT.app.tar.gz(.sig)"
+          echo "✓ macOS slim 산출물 준비: $BUNDLE/dmg/cys_${VERSION}_${ARCH}.dmg + dist-update/$(sh scripts/make-update-manifest.sh --asset-name "$VERSION" "$TRIPLE")(.sig)"
 
       # tauri build → beforeBuildCommand(bundle-prep.sh)가 UI 번들 + cys/cysd 릴리스 빌드 + externalBin
       # 배치 → 번들(dmg/app) → createUpdaterArtifacts(.app.tar.gz + .sig + latest.json) → 비공개 repo 릴리스 업로드.
@@ -225,6 +231,42 @@ jobs:
           releaseDraft: false     # 실태그 자동 발행 — updater가 releases/latest를 즉시 인식
           prerelease: false
           args: --target ${{ matrix.target }}
+
+      # macOS 업데이터 자산을 공백 없는 이름 그대로 릴리스에 올린다(위 ③ 산출물). latest.json 병합은
+      # 모든 레그가 끝난 뒤 updater-manifest 잡이 1회 수행(레그 간 latest.json 동시 갱신 경합 회피).
+      - name: 업데이터 자산 업로드 (macOS 전용 · 공백 없는 이름)
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.ref_name }}" dist-update/*.app.tar.gz dist-update/*.app.tar.gz.sig --clobber --repo "$GITHUB_REPOSITORY"
+
+  # ── latest.json 의 darwin-* 항목을 실제 업로드 자산 이름으로 기록 + 발행 전 대조(전 레그 완료 후 1회) ──
+  # Windows 항목은 tauri-action 이 실제 자산 URL(browser_download_url)로 이미 기록 — 그대로 보존·병합한다.
+  updater-manifest:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: latest.json macOS 항목 병합 + 자산 이름 대조
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="$(grep -m1 '"version"' src-tauri/tauri.conf.json | sed -E 's/.*"([0-9][0-9.]*)".*/\1/')"
+          mkdir -p rel dist-update
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir rel -p latest.json -p 'wave-terminal-*-macos-*.app.tar.gz.sig' || true
+          BASE=""; [ -f rel/latest.json ] && BASE=rel/latest.json
+          for sig in rel/wave-terminal-*-macos-*.app.tar.gz.sig; do
+            [ -f "$sig" ] || { echo "macOS 업데이터 서명 없음 — 병합 생략"; exit 1; }
+            arch="$(basename "$sig" | sed -E 's/.*-macos-([a-z0-9]+)\.app\.tar\.gz\.sig/\1/')"
+            UPDATE_OUT=dist-update sh scripts/make-update-manifest.sh "$VERSION" "${GITHUB_REPOSITORY%/*}" "${GITHUB_REPOSITORY#*/}" "$arch" "$sig" $BASE
+            BASE=dist-update/latest.json
+          done
+          sh scripts/check-update-manifest.sh dist-update/latest.json "$GITHUB_REPOSITORY" "$TAG"
+          gh release upload "$TAG" dist-update/latest.json --clobber --repo "$GITHUB_REPOSITORY"
 
   # ── 무중단 팩 채널 아티팩트 (DESIGN-noshutdown-pack-update §2-①/§5/§7) ──
   # 기존 build/서명/updater 잡과 독립·가산. cys 바이너리를 네이티브로 빌드(팩 콘텐츠는 플랫폼 무관)해

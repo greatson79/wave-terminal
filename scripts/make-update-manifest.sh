@@ -1,60 +1,68 @@
 #!/bin/sh
-# 자동 업데이트 manifest(latest.json) 생성 — tauri build가 만든 서명(.sig)을 모아
-# Tauri updater가 읽는 표준 포맷으로 묶는다.
+# 자동 업데이트 manifest(latest.json) 생성 — 업데이터 서명(.sig)을 Tauri updater 표준 포맷으로 묶는다.
+# ★업로드 자산 이름의 단일 출처: wave-terminal-<version>-macos-<arm64|x64>.app.tar.gz(+.sig)
+#   (릴리스 DMG 명명 wave-terminal-<ver>-macos-<arch>.dmg 와 같은 규칙 · 공백 없음).
+#   latest.json 의 url 은 정확히 이 이름을 가리킨다 — 발행 전 scripts/check-update-manifest.sh 로 대조.
 #
-# 전제: `bun x @tauri-apps/cli build`를 TAURI_SIGNING_PRIVATE_KEY(+PASSWORD)로 실행해
-#       createUpdaterArtifacts 산출물(.app.tar.gz + .app.tar.gz.sig)이 생성돼 있어야 한다.
-#
-# 사용:  sh scripts/make-update-manifest.sh <version> <github_owner> [repo]
-# 예:    sh scripts/make-update-manifest.sh 0.2.0 cysfuturist cys-terminal
-set -e
-cd "$(dirname "$0")/.."
+# 사용:  sh scripts/make-update-manifest.sh --asset-name <version> <arch>      # 자산 이름만 출력
+#        sh scripts/make-update-manifest.sh <version> <owner> <repo> <arch> <tarball.sig> [기존 latest.json]
+#   arch: aarch64|arm64|aarch64-apple-darwin  /  x86_64|x64|x86_64-apple-darwin
+#   <tarball.sig> 옆에 서명 대상 tar.gz(이름 무관 — 예: "Wave Terminal.app.tar.gz")가 있으면 둘 다
+#   $UPDATE_OUT(기본 dist-update)/<자산 이름>[.sig] 로 복사한다. 기존 latest.json 을 주면 그 platforms 에
+#   이 아키텍처 항목을 병합한다(다른 플랫폼 항목 보존).
+# 예:    sh scripts/make-update-manifest.sh 0.1.2 greatson79 wave-terminal aarch64 \
+#          "target/release/bundle/macos/Wave Terminal.app.tar.gz.sig"
+set -eu
 
-VERSION="${1:?usage: make-update-manifest.sh <version> <owner> [repo]}"
-OWNER="${2:?owner required}"
-REPO="${3:-cys-terminal}"
-NOTES="${UPDATE_NOTES:-cys $VERSION}"
+arch_of() {
+  case "$1" in
+    aarch64|arm64|aarch64-apple-darwin) DIST_ARCH=arm64; PLATFORM=darwin-aarch64 ;;
+    x86_64|x64|x86_64-apple-darwin)     DIST_ARCH=x64;   PLATFORM=darwin-x86_64 ;;
+    *) echo "error: 알 수 없는 arch: $1" >&2; exit 2 ;;
+  esac
+}
+asset_name() { arch_of "$2"; echo "wave-terminal-$1-macos-${DIST_ARCH}.app.tar.gz"; }
 
-BUNDLE="target/release/bundle/macos"
-SIG_FILE="$BUNDLE/cys.app.tar.gz.sig"
-TARBALL="$BUNDLE/cys.app.tar.gz"
-
-if [ ! -f "$SIG_FILE" ]; then
-  echo "error: $SIG_FILE 없음 — 먼저 서명 키로 tauri build를 실행하라:" >&2
-  echo "  TAURI_SIGNING_PRIVATE_KEY=\$(cat ~/.tauri/cys-updater.key) bun x @tauri-apps/cli build" >&2
-  exit 1
+if [ "${1:-}" = "--asset-name" ]; then
+  asset_name "${2:?version}" "${3:?arch}"
+  exit 0
 fi
 
-SIGNATURE="$(cat "$SIG_FILE")"
-# 업로드 자산 이름(릴리스에 올릴 표준 이름) — latest.json의 url과 일치해야 한다
-ASSET="cys-${VERSION}-macos-aarch64.app.tar.gz"
+VERSION="${1:?usage: make-update-manifest.sh <version> <owner> <repo> <arch> <tarball.sig> [latest.json]}"
+OWNER="${2:?owner required}"
+REPO="${3:?repo required}"
+ARCH="${4:?arch required}"
+SIG_FILE="${5:?tarball .sig required}"
+BASE_JSON="${6:-}"
+OUT="${UPDATE_OUT:-dist-update}"
+NOTES="${UPDATE_NOTES:-Wave Terminal $VERSION}"
+
+[ -f "$SIG_FILE" ] || { echo "error: $SIG_FILE 없음 — 업데이터 서명 키로 tar.gz 를 서명하라(RELEASE.md)" >&2; exit 1; }
+ASSET="$(asset_name "$VERSION" "$ARCH")"
+arch_of "$ARCH"
 URL="https://github.com/${OWNER}/${REPO}/releases/download/v${VERSION}/${ASSET}"
-PUBDATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-mkdir -p dist-update
-cp "$TARBALL" "dist-update/${ASSET}"
-cat > dist-update/latest.json <<JSON
-{
-  "version": "${VERSION}",
-  "notes": "${NOTES}",
-  "pub_date": "${PUBDATE}",
-  "platforms": {
-    "darwin-aarch64": {
-      "signature": "${SIGNATURE}",
-      "url": "${URL}"
-    }
-  }
-}
-JSON
+mkdir -p "$OUT"
+TARBALL="${SIG_FILE%.sig}"
+if [ -f "$TARBALL" ]; then
+  [ "$TARBALL" -ef "$OUT/$ASSET" ] || cp "$TARBALL" "$OUT/$ASSET"
+  [ "$SIG_FILE" -ef "$OUT/$ASSET.sig" ] || cp "$SIG_FILE" "$OUT/$ASSET.sig"
+fi
 
-echo "생성됨:"
-echo "  dist-update/latest.json"
-echo "  dist-update/${ASSET}"
-echo ""
-echo "GitHub 릴리스에 올릴 자산: 위 두 파일 + DMG"
-echo "  gh release create v${VERSION} \\"
-echo "    dist-update/latest.json \\"
-echo "    dist-update/${ASSET} \\"
-echo "    dist-mac/cys-${VERSION}-macos-arm64.dmg"
-echo ""
-echo "⚠ Intel(x86_64)·Windows 플랫폼 키는 각 타깃 빌드 후 platforms에 추가하라(RELEASE.md)."
+python3 - "$OUT/latest.json" "$BASE_JSON" "$VERSION" "$NOTES" "$PLATFORM" "$URL" "$SIG_FILE" <<'PY'
+import json, sys, time
+out, base, version, notes, platform, url, sig = sys.argv[1:8]
+doc = json.load(open(base, encoding="utf-8")) if base else {}
+if doc.get("version") not in (None, version):
+    sys.exit("error: 기존 latest.json 버전(%s) != %s" % (doc.get("version"), version))
+doc.update(version=version, notes=doc.get("notes") or notes,
+           pub_date=doc.get("pub_date") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+doc.setdefault("platforms", {})[platform] = {"signature": open(sig, encoding="utf-8").read().strip(), "url": url}
+with open(out, "w", encoding="utf-8") as f:
+    json.dump(doc, f, ensure_ascii=False, indent=2)
+    f.write("\n")
+PY
+
+echo "생성됨: $OUT/latest.json ($PLATFORM → $ASSET)"
+[ -f "$OUT/$ASSET" ] && echo "자산:   $OUT/$ASSET  $OUT/$ASSET.sig"
+echo "발행 전 대조: sh scripts/check-update-manifest.sh $OUT/latest.json $OWNER/$REPO v$VERSION"

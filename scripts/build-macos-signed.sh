@@ -15,6 +15,12 @@
 #   #   (또는 API key: APPLE_API_KEY_PATH=AuthKey_XXXX.p8 · APPLE_API_KEY=KEYID · APPLE_API_ISSUER=ISSUER)
 #   export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/cys-updater.key)" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
 #   scripts/build-macos-signed.sh
+#
+# ★ad-hoc 경로(Developer ID 인증서가 없는 맥 — 시험·내부용, **공증 아님 · NOT NOTARIZED**):
+#   APPLE_SIGNING_IDENTITY=- scripts/build-macos-signed.sh [타깃]
+#   → 앱 빌드 → git-core dedup → scripts/macos-adhoc-resign.sh(안쪽 Mach-O → 중첩 번들 → 앱 순 ad-hoc
+#     재서명 + codesign --verify --deep --strict) → dist-mac/*-adhoc-NOT-NOTARIZED.dmg. 공증·staple·spctl·
+#     업데이터 아티팩트는 하지 않는다(미공증 빌드가 자동 업데이트 채널로 새지 않게). Apple 자격·업데이터 키 불필요.
 # exit 0=서명·공증·검증 통과 / 1=공증 검증 실패 / 2=자격증명·환경 미비
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
@@ -50,8 +56,12 @@ fi
 echo "== 대상 아키텍처: $TARGET (DMG=$DMG_ARCH · bundle=$BUNDLE_BASE) =="
 
 # ── 자격증명 fail-closed 검증 ──
-: "${APPLE_SIGNING_IDENTITY:?필요: export APPLE_SIGNING_IDENTITY='Developer ID Application: NAME (TEAMID)'}"
-if [ -n "${APPLE_NOTARY_PROFILE:-}" ]; then
+: "${APPLE_SIGNING_IDENTITY:?필요: export APPLE_SIGNING_IDENTITY='Developer ID Application: NAME (TEAMID)' (인증서 없으면 '-' = ad-hoc·공증 아님)}"
+AD_HOC=0
+[ "$APPLE_SIGNING_IDENTITY" = "-" ] && AD_HOC=1
+if [ "$AD_HOC" = 1 ]; then
+  echo "⚠ ad-hoc 모드(APPLE_SIGNING_IDENTITY=-): Developer ID 서명·공증 없음 — NOT NOTARIZED · 시험/내부용"
+elif [ -n "${APPLE_NOTARY_PROFILE:-}" ]; then
   echo "공증 자격: notarytool keychain 프로파일($APPLE_NOTARY_PROFILE)"
 elif [ -n "${APPLE_API_KEY:-}" ]; then
   : "${APPLE_API_ISSUER:?APPLE_API_KEY 사용 시 APPLE_API_ISSUER 필요}"
@@ -63,13 +73,13 @@ else
   echo "공증 자격: Apple ID($APPLE_ID) + app-specific password"
 fi
 command -v xcrun >/dev/null || { echo "✗ Xcode Command Line Tools 필요(xcrun) — xcode-select --install"; exit 2; }
-if ! security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
+if [ "$AD_HOC" = 0 ] && ! security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
   echo "✗ Keychain에 'Developer ID Application' 인증서 없음 — Apple Developer에서 발급·설치 필요"; exit 2
 fi
 # ★fail-closed 승격(2026-07-10 · v0.12.35 빌드 1차 실패 원인): 구 경고문("미설정이어도 설치 DMG는 정상")은
 # 실동작과 표류 — tauri.conf createUpdaterArtifacts 때문에 tauri build가 빌드 말미(~20분 후)에 hard-fail한다.
 # 20분 낭비 대신 여기서 3초 만에 명확히 실패시킨다(다른 자격증명 검증과 동형).
-if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+if [ "$AD_HOC" = 0 ] && [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
   echo "✗ TAURI_SIGNING_PRIVATE_KEY 미설정 — tauri build가 updater 아티팩트 서명에서 실패한다(빌드 말미 hard-fail)." >&2
   echo "  설정: export TAURI_SIGNING_PRIVATE_KEY=\"\$(cat ~/.tauri/cys-updater.key)\" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=\"\"" >&2
   exit 2
@@ -90,9 +100,10 @@ if [ "$RT_CUR" != "$TARGET" ] || ! bash scripts/verify-mac-runtime.sh src-tauri/
   bash scripts/prep-mac-runtime.sh "$TARGET"
   printf '%s' "$TARGET" > "$RT_MARKER"
 fi
-echo "== 동봉 runtime Mach-O inside-out 재서명 (Developer ID + hardened + timestamp) =="
 ENT="src-tauri/entitlements.plist"
 SIGN_N=0
+if [ "$AD_HOC" = 0 ]; then  # ad-hoc 은 빌드 후 앱 전체를 inside-out 재서명한다(아래 macos-adhoc-resign.sh)
+echo "== 동봉 runtime Mach-O inside-out 재서명 (Developer ID + hardened + timestamp) =="
 # 1) 동적 라이브러리·로드가능 번들(.dylib/.so/.node) 먼저 — entitlements 불요
 while IFS= read -r -d '' lib; do
   codesign --force --timestamp --options runtime --sign "$APPLE_SIGNING_IDENTITY" "$lib"
@@ -112,6 +123,7 @@ while IFS= read -r -d '' exe; do
   fi
 done < <(find src-tauri/runtime -type f -perm +111 ! -name '*.dylib' ! -name '*.so' ! -name '*.node' -print0)
 echo "  ✓ runtime Mach-O ${SIGN_N}개 재서명 (python/node=entitlements·git/uv=무 entitlements)"
+fi
 
 # ── 앱 번들 빌드 (서명만 · 공증은 dedup 뒤로 1회 미룸) — RC-23 git-core dedup ──
 # ★Tauri 번들러는 bundle.resources 디렉토리의 심볼릭링크를 역참조(dereference)한다(upstream #13219, 미해결).
@@ -122,8 +134,15 @@ echo "  ✓ runtime Mach-O ${SIGN_N}개 재서명 (python/node=entitlements·git
 #   fat DMG도 건너뛴다(--bundles app) — DMG는 dedup된 .app에서 hdiutil로 만든다
 #   (`tauri build --bundles dmg`는 .app을 재빌드해 역참조를 되돌리므로 사용 불가 — 실측 확인).
 echo "== 앱 번들 빌드(서명만·공증 보류) v$VERSION =="
+if [ "$AD_HOC" = 1 ]; then
+  # 서명 신원 없이 빌드(재서명은 dedup 뒤 1회) · 업데이터 아티팩트 끔(미공증 빌드는 업데이트 채널 금지).
+  env -u APPLE_SIGNING_IDENTITY -u APPLE_ID -u APPLE_PASSWORD -u APPLE_TEAM_ID -u APPLE_API_KEY -u APPLE_API_ISSUER \
+    bun x @tauri-apps/cli build ${TAURI_TARGET_ARGS[@]+"${TAURI_TARGET_ARGS[@]}"} --bundles app \
+    --config '{"bundle":{"createUpdaterArtifacts":false}}'
+else
 env -u APPLE_ID -u APPLE_PASSWORD -u APPLE_TEAM_ID -u APPLE_API_KEY -u APPLE_API_ISSUER \
   bun x @tauri-apps/cli build ${TAURI_TARGET_ARGS[@]+"${TAURI_TARGET_ARGS[@]}"} --bundles app
+fi
 
 APP="$BUNDLE_BASE/macos/$PRODUCT.app"
 DMG="$BUNDLE_BASE/dmg/cys_${VERSION}_${DMG_ARCH}.dmg"
@@ -134,6 +153,20 @@ DMG="$BUNDLE_BASE/dmg/cys_${VERSION}_${DMG_ARCH}.dmg"
 echo "== runtime/git dedup (git-core 빌트인 → 동일 디렉토리 git 심볼릭링크) =="
 bash scripts/dedup-git-core.sh "$APP"
 bash scripts/verify-mac-runtime.sh "$APP/Contents/Resources/runtime" "$TARGET"
+
+if [ "$AD_HOC" = 1 ]; then
+  echo "== ad-hoc inside-out 재서명 + codesign --verify --deep --strict (NOT NOTARIZED) =="
+  bash scripts/macos-adhoc-resign.sh "$APP"
+  DMGSTAGE="$(mktemp -d)"; ditto "$APP" "$DMGSTAGE/$PRODUCT.app"; ln -s /Applications "$DMGSTAGE/Applications"
+  mkdir -p "$(dirname "$DMG")" dist-mac
+  hdiutil create -volname "$PRODUCT" -srcfolder "$DMGSTAGE" -ov -format UDZO "$DMG"
+  rm -rf "$DMGSTAGE"
+  OUT_DMG="dist-mac/wave-terminal-${VERSION}-macos-${DIST_ARCH}-adhoc-NOT-NOTARIZED.dmg"
+  cp "$DMG" "$OUT_DMG"
+  echo "✓ ad-hoc 빌드 완료: $OUT_DMG"
+  echo "  ⚠ NOT NOTARIZED — Developer ID 서명·공증 아님. 이 맥/시험 전용, 릴리스·업데이터 발행 금지."
+  exit 0
+fi
 
 # dedup은 Resources를 바꿔 Tauri가 봉인한 외부 앱 서명을 깬다 → 외부 앱 서명만 재봉인(--force · ★--deep 금지).
 # 중첩 Mach-O(pre-sign된 runtime bin/git·Tauri가 서명한 sidecar/framework/메인바이너리)는 그대로 유효하다.
@@ -209,6 +242,6 @@ fi
 echo "== 배포본 정리 + 자동업데이트 매니페스트 =="
 mkdir -p dist-mac
 cp "$DMG" "dist-mac/cys-${VERSION}-macos-${DIST_ARCH}.dmg"
-sh scripts/make-update-manifest.sh "$VERSION" greatson79 wave-terminal >/dev/null 2>&1 || true
+sh scripts/make-update-manifest.sh "$VERSION" greatson79 wave-terminal "$TARGET" "$APP.tar.gz.sig"
 echo "✓ 공증 빌드 완료: dist-mac/cys-${VERSION}-macos-${DIST_ARCH}.dmg"
 echo "  → ad-hoc 재서명·xattr 우회 불필요. gh release 발행은 오너 승인 후."

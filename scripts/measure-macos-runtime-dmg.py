@@ -15,9 +15,12 @@ def measure(dmg, out, target, runner=subprocess.run):
     out.mkdir(parents=True, exist_ok=True)
     result = {'dmg': str(dmg), 'target': target, 'ok': False, 'steps': []}
     env = dict(os.environ)
+    # npm 10 refuses the same file as both user and global config; use two empty files.
     env.update(HOME=str(out / 'home'), PYTHONDONTWRITEBYTECODE='1',
-               NPM_CONFIG_USERCONFIG='/dev/null', NPM_CONFIG_GLOBALCONFIG='/dev/null')
+               NPM_CONFIG_USERCONFIG=str(out / 'npmrc-user'), NPM_CONFIG_GLOBALCONFIG=str(out / 'npmrc-global'))
     Path(env['HOME']).mkdir(exist_ok=True)
+    for rc in ('npmrc-user', 'npmrc-global'):
+        (out / rc).write_text('')
 
     def run(name, cmd):
         try:

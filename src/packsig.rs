@@ -16,6 +16,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 
+/// 무중단 팩 채널 기본 원격 manifest URL — ★우리 저장소의 **latest 릴리스** 자산 경로.
+/// 특정 태그(예 v0.1.0)에 고정하면 새 팩을 영원히 못 찾는다. sig·tar는 같은 디렉터리 형제
+/// (`pack-manifest.json.minisig`·`pack.tar.gz`)로 유도된다. release.yml·pack-release.yml이
+/// 이 이름 그대로 업로드하고 `--latest`로 마킹한다. 서명 검증은 embed 키링(우리 키)이 전담.
+pub const DEFAULT_PACK_MANIFEST_URL: &str =
+    "https://github.com/greatson79/wave-terminal/releases/latest/download/pack-manifest.json";
+
 // build.rs 자동 생성 키링(tauri.conf.json pubkey + cysjavis-pack/trusted-keys.json 병합).
 include!(concat!(env!("OUT_DIR"), "/pack_keyring.rs"));
 

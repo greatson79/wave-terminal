@@ -1923,9 +1923,8 @@ async fn check_update(app: AppHandle) -> Result<Option<Value>, String> {
 /// 기본 원격 pack-manifest.json URL — tauri.conf updater endpoint(latest.json)와 같은
 /// release 'latest' 자산에 동봉된다(release.yml이 함께 업로드, DESIGN §5 파일맵).
 fn default_pack_manifest_url() -> String {
-    // Phase 2 릴리스 통합(2026-07-03): 배포 원본 = 공개 소스 repo. 구 repo는 전환기 미러.
-    "https://github.com/greatson79/wave-terminal/releases/download/v0.1.0/pack-manifest.json"
-        .to_string()
+    // ★latest 릴리스 경로(태그 고정 금지 — v0.1.0 고정 시 새 팩 탐지 불가). SOT = packsig.
+    cys::packsig::DEFAULT_PACK_MANIFEST_URL.to_string()
 }
 
 /// 무중단 팩 업데이트 가용성 확인(DESIGN §7-④ 3축 게이트) — 원격 pack-manifest.json만 경량

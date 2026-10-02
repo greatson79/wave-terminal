@@ -351,7 +351,8 @@ enum Command {
         /// 로컬 소스 디렉터리(pack.tar.gz + pack-manifest.json + pack-manifest.json.minisig)
         #[arg(long)]
         from: Option<String>,
-        /// 원격 manifest URL (부차 — staging에 fetch; 핵심 로직은 --from으로 완전 테스트)
+        /// 원격 manifest URL (부차 — staging에 fetch; 핵심 로직은 --from으로 완전 테스트).
+        /// --from·--manifest-url 둘 다 없으면 우리 latest 릴리스(packsig::DEFAULT_PACK_MANIFEST_URL)
         #[arg(long)]
         manifest_url: Option<String>,
         /// 검증·버전게이트만 수행하고 디스크 반영·reinject는 생략(점검용)
@@ -7055,7 +7056,8 @@ fn run_pack_update(from: Option<String>, manifest_url: Option<String>, dry_run: 
         let from_dir: std::path::PathBuf = match (from, manifest_url) {
             (Some(d), _) => std::path::PathBuf::from(d),
             (None, Some(url)) => fetch_remote_pack(&url, &base)?,
-            (None, None) => return Err("--from <dir> 또는 --manifest-url <url> 필요".into()),
+            // 소스 미지정 = 우리 latest 릴리스 채널(DEFAULT_PACK_MANIFEST_URL)을 조회한다.
+            (None, None) => fetch_remote_pack(cys::packsig::DEFAULT_PACK_MANIFEST_URL, &base)?,
         };
 
         let now_unix = chrono::Utc::now().timestamp();
@@ -7785,6 +7787,68 @@ mod tests {
 
         assert!(res.is_err(), "데몬 미가동 → Err(graceful 스킵 신호)");
         assert!(preserved, "데몬 부재 시 pending 보존(소실 금지)");
+    }
+
+    /// ★팩 채널 = 우리 latest 릴리스(태그 고정 금지). 기본 URL이 latest 경로이고, 그 경로 레이아웃을
+    /// file:// 로컬 미러로 서빙하면 fetch_remote_pack(실 curl)→pack_update_from_dir가 더 새 팩을
+    /// 선택한다. 다른 키로 서명된 manifest는 같은 경로에서 와도 거부(서명 검증 약화 0). 네트워크 0.
+    #[cfg(unix)]
+    #[test]
+    fn pack_channel_follows_latest_release_and_rejects_foreign_key() {
+        const LATEST: &str = "https://github.com/greatson79/wave-terminal/releases/latest/download/";
+        let url = cys::packsig::DEFAULT_PACK_MANIFEST_URL;
+        assert_eq!(url, format!("{LATEST}pack-manifest.json"), "기본 채널이 latest 경로가 아님");
+        assert!(!url.contains("idoforgod"), "업스트림(idoforgod)을 가리킴");
+
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var(cys::pack::ENV_PACK_DIR).ok();
+        let saved_cfg = std::env::var(cys::pack::ENV_CONFIG_DIR).ok();
+        let td = std::env::temp_dir().join(format!("cys-pu-latest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&td);
+        let pack_dir = td.join("pack");
+        std::fs::create_dir_all(&pack_dir).unwrap();
+        std::env::set_var(cys::pack::ENV_PACK_DIR, &pack_dir);
+        std::env::set_var(cys::pack::ENV_CONFIG_DIR, td.join("cysclaude"));
+        std::fs::write(pack_dir.join(".pack-version"), "1.0.0").unwrap();
+
+        // github.com 루트를 로컬 미러로 치환 — 요청 경로(…/releases/latest/download/…)는 그대로.
+        let mirror = td.join("mirror");
+        let local_url = url.replacen("https://github.com", &format!("file://{}", mirror.display()), 1);
+        let serve_dir = mirror.join("greatson79/wave-terminal/releases/latest/download");
+        std::fs::create_dir_all(&serve_dir).unwrap();
+        let files = [("soul.md", "SOUL v2\n")];
+        let (pk, sign) = gen_signer();
+        let kr = test_keyring("TESTKEY", &pk);
+        let staging = td.join("staging");
+        let lock = td.join(".lock");
+
+        // ① 우리 키로 서명된 더 새 팩(2.0.0)을 latest 경로에 게시 → 발견·선택.
+        build_signed_pack(&serve_dir, &files, "TESTKEY", "2.0.0", "0.4.1", 1000, 9_000_000_000, &sign);
+        let ok = fetch_remote_pack(&local_url, &td.join("b1")).and_then(|dl| {
+            pack_update_from_dir(&dl, &staging, &lock, &td.join(".acc1"), 5000, "0.4.1", &kr, false)
+        });
+
+        // ② 같은 경로·같은 key_id지만 다른 키로 서명 → 거부.
+        let (_pk2, foreign) = gen_signer();
+        build_signed_pack(&serve_dir, &files, "TESTKEY", "3.0.0", "0.4.1", 1000, 9_000_000_000, &foreign);
+        let bad = fetch_remote_pack(&local_url, &td.join("b2")).and_then(|dl| {
+            pack_update_from_dir(&dl, &staging, &lock, &td.join(".acc2"), 5000, "0.4.1", &kr, false)
+        });
+
+        match &saved {
+            Some(v) => std::env::set_var(cys::pack::ENV_PACK_DIR, v),
+            None => std::env::remove_var(cys::pack::ENV_PACK_DIR),
+        }
+        match &saved_cfg {
+            Some(v) => std::env::set_var(cys::pack::ENV_CONFIG_DIR, v),
+            None => std::env::remove_var(cys::pack::ENV_CONFIG_DIR),
+        }
+        let _ = std::fs::remove_dir_all(&td);
+
+        let o = ok.expect("latest 경로의 정상 서명 팩이 거부됨");
+        assert_eq!(o.gate, VersionGate::Apply, "더 새 팩이 선택되지 않음");
+        assert_eq!(o.pack_version, "2.0.0");
+        assert!(bad.is_err(), "다른 키 서명 manifest가 통과함: {:?}", bad.map(|o| o.pack_version));
     }
 
     /// ★오프라인 통합: 서명된 테스트 팩을 --from 코어로 적용 → .pack-version·파일·accepted 반영.

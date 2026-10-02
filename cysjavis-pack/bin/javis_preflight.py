@@ -524,11 +524,50 @@ class Preflight:
         # report 모드 병렬화용 sink 격리: 병렬 워커 스레드는 자기 버퍼에 add() 하고
         # run() 이 원래 순서로 재조립한다(직렬 경로는 sink=None 으로 self.results 직행).
         self._local = threading.local()
+        self._product_warnings = {}
+        self._load_product_profile()
+
+    def _load_product_profile(self):
+        # D1: optional verdict policy, never a check/repair bypass. Invalid input keeps FAIL.
+        self._product_profile_path = os.path.join(pack_dir(), "preflight-product-profile.json")
+        self._product_decision = "D1 잠정(테오 대결 · 주인님 확인 대기)"
+        allowed = {"C20.nlm-sot", "C21.harness-creator", "C24.korean-law-mcp"}
+        try:
+            with open(self._product_profile_path, encoding="utf-8") as f:
+                profile = json.load(f)
+            if (not isinstance(profile, dict)
+                    or set(profile) != {"schema_version", "decision", "warnings"}
+                    or type(profile["schema_version"]) is not int
+                    or profile["schema_version"] != 1
+                    or profile["decision"] != self._product_decision
+                    or not isinstance(profile["warnings"], dict)):
+                raise ValueError("제품 프로필 스키마 불일치")
+            warnings = profile["warnings"]
+            if (not set(warnings).issubset(allowed)
+                    or any(not isinstance(reason, str) or not reason.strip()
+                           or len(reason.splitlines()) != 1
+                           for reason in warnings.values())):
+                raise ValueError("승인 범위 밖 검사 또는 한 줄 사유 누락")
+            self._product_warnings = warnings
+        except FileNotFoundError:
+            pass  # Deleting the profile restores the original verdicts.
+        except (OSError, ValueError) as exc:
+            self.add("C00.product-profile", WARN,
+                     "제품 프로필 미적용(원판정 유지): %s — %s"
+                     % (self._product_profile_path, exc))
 
     def add(self, cid, status, detail):
         sink = getattr(self._local, "sink", None)
         target = self.results if sink is None else sink
-        target.append({"id": cid, "status": status, "detail": detail})
+        row = {"id": cid, "status": status, "detail": detail}
+        if status == FAIL and cid in self._product_warnings:
+            reason = self._product_warnings[cid]
+            row.update(status=WARN, original_status=status, original_detail=detail,
+                       product_profile=self._product_profile_path,
+                       product_reason=reason, product_decision=self._product_decision)
+            row["detail"] = "%s · 제품 기준 경고: %s · %s" % (
+                detail, reason, self._product_decision)
+        target.append(row)
 
     def skipped(self, cid):
         if cid in self.skips:

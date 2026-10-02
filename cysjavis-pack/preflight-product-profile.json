@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "decision": "D1 잠정(테오 대결 · 주인님 확인 대기)",
+  "warnings": {
+    "C20.nlm-sot": "NotebookLM 별도 설치·인증은 제품 설치 완료의 필수 조건에서 잠정 제외한다.",
+    "C21.harness-creator": "harness-creator 별도 도구 설치는 제품 설치 완료의 필수 조건에서 잠정 제외한다.",
+    "C24.korean-law-mcp": "법령 MCP 별도 설치·설정은 제품 설치 완료의 필수 조건에서 잠정 제외한다."
+  }
+}

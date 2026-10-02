@@ -365,6 +365,8 @@ pub(crate) fn ownership(rel: &str) -> Ownership {
     if rel.starts_with("memory/")
         || rel == "round/SESSION_STATE.md"
         || rel == "round/RECOVERY.md"
+        // D1 판정 설정: 빈 warnings 교체 원복을 재설치/force가 덮어쓰지 않는다.
+        || rel == "preflight-product-profile.json"
     {
         return Ownership::SeedOnce;
     }
@@ -1996,6 +1998,19 @@ mod tests {
                   "directives/CEO_TEMPLATE.md", "sub/schedule.json"] {
             assert!(!is_user_owned(s), "system 여야: {s}");
         }
+    }
+
+    #[test]
+    fn product_profile_replacement_survives_pack_install() {
+        let rel = "preflight-product-profile.json";
+        assert_eq!(ownership(rel), Ownership::SeedOnce);
+        for force in [false, true] {
+            assert_eq!(decide_file_action(rel, "D1", true, Some("STRICT"), None, force),
+                FileAction::Keep { adopt_hash: false, new_pending: false });
+        }
+        assert_eq!(decide_file_action(rel, "D1", false, None, None, false),
+            FileAction::Write { heal_user_copy: false });
+        assert_eq!(ownership("sub/preflight-product-profile.json"), Ownership::System);
     }
 
     #[test]

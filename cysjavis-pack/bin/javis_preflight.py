@@ -129,12 +129,12 @@ CONTENT_PINS = {
 
 ROLES = ["master", "worker", "cso", "reviewer"]
 
-# Harness Creator 툴체인(오너 제작) 핀 — 2026-06-12 통합 시점 커밋.
-# 스킬(pack/skills/harness-creator)은 임베드 배포되지만 이미터·검증기·게놈 툴체인은
-# 6MB+ 개발 저장소라 클론 설치한다. 해석 순서: $CYS_HARNESS_HOME → ~/.cys/harness-creator
+# Harness Creator 툴체인 — 이 제품에서는 선택 기능이다(C21 = 승인 WARN 목록).
+# 원 업스트림 저장소에서 받아오지 않는다: 클론 출처는 비워 두어 비활성화했다(CEO 조건 ①).
+# 툴체인이 이미 있으면 사용한다. 해석 순서: $CYS_HARNESS_HOME → ~/.cys/harness-creator
 # → ~/Desktop/CYSjavis/cys-harness-creator(로컬 원본).
-HARNESS_REPO = "https://github.com/idoforgod/cys-harness-creator"
-HARNESS_PIN = "98a36f4b9aee761f208aa559c2e1f7c755f7c9a6"
+HARNESS_REPO = ""  # 비활성 — 런타임 클론·설치 안내 금지(제품 규칙)
+C21_OPTIONAL_DETAIL = "선택 기능 — 지금 필요 없음 · 필요할 때 운영팀이 안내"
 HARNESS_KEY_FILES = ("emit_orchestrator.py", "validate_harness.py", "warrant.py",
                      "genome/soul.md")
 
@@ -2367,9 +2367,9 @@ class Preflight:
         self.add(cid, FIXED if fixed else PASS,
                  "nlm %s · 인증 OK%s%s" % (ver_s, mcp_note, suffix))
 
-    # ── C21 Harness Creator 툴체인 (오너 제작 메타스킬의 도구 본체) ──
-    # 스킬은 pack 임베드로 자동 배포 — 이 검사는 스킬이 호출하는 TOOLS_ROOT의 존재를
-    # 결정론 검증하고, 신규 머신에서는 --fix가 핀 커밋을 자동 클론한다.
+    # ── C21 Harness Creator 툴체인 (선택 기능 — 제품 승인 WARN) ──
+    # 툴체인이 있으면 PASS. 없으면 WARN 한 줄만 낸다 — 설치·클론 명령을 출력하지 않고,
+    # --fix도 아무것도 받아오지 않는다(원 업스트림 무접촉).
     @staticmethod
     def _harness_root():
         cands = []
@@ -2393,40 +2393,7 @@ class Preflight:
             self.add(cid, PASS, "TOOLS_ROOT=%s (핵심 도구 %d종 존재)"
                      % (root, len(HARNESS_KEY_FILES)))
             return
-        dst = os.path.join(os.path.expanduser("~"), ".cys/harness-creator")
-        if self.mode in ("dry", "safe"):
-            # OPP-17: git clone 은 external_install(전역 디렉터리 신설·사실상 비가역) → 미리보기/무변경.
-            self.may_mutate(cid, "subprocess_install", "git clone %s → %s" % (HARNESS_REPO, dst),
-                            "harness-creator 툴체인 git clone(핀 %s)" % HARNESS_PIN[:8],
-                            denylist_class="external_install")
-            return
-        if self.fix and shutil.which("git") and self.may_mutate(
-                cid, "subprocess_install", "git clone %s → %s" % (HARNESS_REPO, dst),
-                "harness-creator 툴체인 git clone(핀 %s)" % HARNESS_PIN[:8],
-                denylist_class="external_install"):
-            try:
-                ok = subprocess.run(["git", "clone", HARNESS_REPO, dst],
-                                    capture_output=True, timeout=300).returncode == 0
-                if ok:
-                    # 핀은 검증돼야 핀이다 — checkout rc와 HEAD==핀을 기계 확인하지
-                    # 않으면 핀 부재(force-push·레포 교체) 시 조용히 moving HEAD로
-                    # 남아 FIXED가 거짓 핀 주장이 된다(공급망 표면).
-                    co = subprocess.run(["git", "-C", dst, "checkout", HARNESS_PIN],
-                                        capture_output=True, timeout=60).returncode
-                    head = subprocess.run(
-                        ["git", "-C", dst, "rev-parse", "HEAD"],
-                        capture_output=True, timeout=15).stdout.decode().strip()
-                    ok = co == 0 and head == HARNESS_PIN
-            except Exception:
-                ok = False
-            if ok and self._harness_root():
-                self.add(cid, FIXED, "%s 클론(핀 %s 검증)" % (dst, HARNESS_PIN[:8]))
-                return
-        dirty = " (기존 %s 불완전 — 제거 후 재시도 필요)" % dst if os.path.isdir(dst) else ""
-        self.add(cid, FAIL,
-                 "harness-creator 툴체인 미설치%s — --fix(git 자동 클론) 또는 "
-                 "`git clone %s %s && git -C %s checkout %s`"
-                 % (dirty, HARNESS_REPO, dst, dst, HARNESS_PIN[:8]))
+        self.add(cid, WARN, C21_OPTIONAL_DETAIL)
 
     # ── C22 work management 스킬 2종 (앵커5-4b·c — 환각방지·의도 합의) ──
     # 절대 강조 4규칙의 b(hallucination-guard)·c(grill-me)가 가리키는 전담 sub-skill이
@@ -3117,7 +3084,7 @@ class Preflight:
             self.add(cid, FIXED if fixed else PASS, detail)
 
     # ── C30 git 결정론 점검 (오너 2026-06-14 — git 온보딩) ──
-    # git은 기여자 clone·harness-creator(C21) 툴체인 자동설치·RSI 자기개선 push에 필요하다.
+    # git은 기여자 clone·RSI 자기개선 push에 필요하다(C21 harness-creator는 자동 클론하지 않는다).
     # 일반 .dmg 사용자 기본 기능엔 불필요 → 부재는 FAIL이 아니라 WARN(기능별 필수).
     def c30_git(self):
         cid = "C30.git"
@@ -3125,10 +3092,10 @@ class Preflight:
             return
         p = shutil.which("git")
         if p:
-            self.add(cid, PASS, "%s (기여자 clone·harness-creator·RSI 자기개선에 사용)" % p)
+            self.add(cid, PASS, "%s (기여자 clone·RSI 자기개선에 사용)" % p)
         else:
             self.add(cid, WARN,
-                     "git 미설치 — 기여자 clone·harness-creator(C21)·RSI 자기개선이 막힌다. "
+                     "git 미설치 — 기여자 clone·RSI 자기개선이 막힌다. "
                      "설치: macOS `xcode-select --install`(또는 brew install git) · "
                      "Windows git-scm.org · Linux `apt/dnf install git`. "
                      "(일반 .dmg 사용자 기본기능엔 불필요 — 기능별 필수)")

@@ -15,6 +15,8 @@ pf = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pf)
 IDS = ('C20.nlm-sot', 'C21.harness-creator', 'C24.korean-law-mcp')
 MARKER = 'D1 잠정(테오 대결 · 주인님 확인 대기)'
+# C21 is an optional feature in this product: missing toolchain is WARN by itself (no FAIL to map).
+MISSING = [pf.FAIL, pf.WARN, pf.FAIL]
 
 
 class ProductProfileTests(unittest.TestCase):
@@ -43,7 +45,7 @@ class ProductProfileTests(unittest.TestCase):
 
     def test_absent_profile_keeps_real_checks_fail(self):
         rows = self.measure_missing_tools()
-        self.assertEqual([r['status'] for r in rows], [pf.FAIL] * 3)
+        self.assertEqual([r['status'] for r in rows], MISSING)
         self.assertTrue(all(set(r) == {'id', 'status', 'detail'} for r in rows))
 
     def test_present_profile_warns_and_retains_original_evidence(self):
@@ -51,7 +53,8 @@ class ProductProfileTests(unittest.TestCase):
         self.write_profile()
         rows = self.measure_missing_tools()
         self.assertEqual([r['status'] for r in rows], [pf.WARN] * 3)
-        for before, after in zip(original, rows):
+        self.assertEqual(rows[1], original[1])  # C21 WARN is native, not profile-mapped
+        for before, after in zip(original[::2], rows[::2]):
             self.assertEqual(after['original_status'], pf.FAIL)
             self.assertEqual(after['original_detail'], before['detail'])
             self.assertIn(MARKER, after['detail'])
@@ -61,9 +64,9 @@ class ProductProfileTests(unittest.TestCase):
     def test_delete_or_empty_replacement_restores_fail(self):
         self.write_profile()
         self.path.unlink()
-        self.assertEqual([r['status'] for r in self.measure_missing_tools()], [pf.FAIL] * 3)
+        self.assertEqual([r['status'] for r in self.measure_missing_tools()], MISSING)
         self.write_profile({})
-        self.assertEqual([r['status'] for r in self.measure_missing_tools()], [pf.FAIL] * 3)
+        self.assertEqual([r['status'] for r in self.measure_missing_tools()], MISSING)
 
     def test_other_statuses_and_other_checks_unchanged(self):
         self.write_profile()
@@ -81,7 +84,7 @@ class ProductProfileTests(unittest.TestCase):
             with self.subTest(content=content):
                 self.path.write_text(content)
                 rows = self.measure_missing_tools()
-                self.assertEqual([r['status'] for r in rows if r['id'] in IDS], [pf.FAIL] * 3)
+                self.assertEqual([r['status'] for r in rows if r['id'] in IDS], MISSING)
                 self.assertTrue(any(r['id'] == 'C00.product-profile' and r['status'] == pf.WARN for r in rows))
 
     def test_thread_sink_keeps_transformed_row(self):
@@ -114,6 +117,26 @@ class ProductProfileTests(unittest.TestCase):
             result = json.loads(output.getvalue())
             self.assertEqual((result['fails'], result['warns']), (fails, warns))
             self.assertEqual(result['ok'], expected_exit == 0)
+
+    def test_c21_missing_is_optional_warn_and_never_fetches_upstream(self):
+        self.assertEqual(pf.HARNESS_REPO, '')
+        for mode, allow in (('fix', True), ('fix', False), ('dry', False), ('safe', False), ('report', False)):
+            with self.subTest(mode=mode, allow=allow):
+                check = pf.Preflight(mode == 'fix', [], mode=mode, allow_irreversible=allow)
+                with mock.patch.object(check, '_harness_root', return_value=None), \
+                     mock.patch.object(pf.subprocess, 'run', side_effect=AssertionError('no subprocess')), \
+                     mock.patch.object(pf.shutil, 'which', return_value='/usr/bin/git'):
+                    check.c21_harness_creator()
+                self.assertEqual(check.results, [{'id': 'C21.harness-creator', 'status': pf.WARN,
+                                                  'detail': pf.C21_OPTIONAL_DETAIL}])
+                self.assertEqual(check.planned, [])
+        detail = pf.C21_OPTIONAL_DETAIL
+        self.assertIn('선택 기능', detail)
+        self.assertIn('지금 필요 없음', detail)
+        for banned in ('git', 'clone', 'http', 'idoforgod', 'install', '설치'):
+            self.assertNotIn(banned, detail)
+        src = (ROOT / 'cysjavis-pack/bin/javis_preflight.py').read_text(encoding='utf-8')
+        self.assertNotIn('idoforgod', src)
 
     def test_shipped_profile_exact_scope_and_reasons(self):
         profile = json.loads((ROOT / 'cysjavis-pack/preflight-product-profile.json').read_text())

@@ -24,8 +24,7 @@ idoforgod/harness 대비: prose 규칙이 아니라 **머신체크 게이트 + �
 - **트리거:** `/harness-creator <도메인 한 문장>` (또는 description 매칭).
 - **TOOLS_ROOT** = `${CYS_HARNESS_HOME:-$HOME/.cys/harness-creator}` — 모든 도구·게놈(`genome/`)이 여기. 항상 `python3 "$TOOLS_ROOT"/<tool>.py`.
   (cysjavis pack 통합판: 없으면 로컬 원본 `~/Desktop/CYSjavis/cys-harness-creator` 폴백.
-  신규 머신은 preflight C21 `--fix`가 GitHub 핀 커밋을 자동 클론한다 — 직접 설치:
-  `git clone https://github.com/idoforgod/cys-harness-creator "$HOME/.cys/harness-creator"`)
+  도구가 없으면 이 제품에서는 선택 기능이다 — 지금 필요 없음 · 필요할 때 운영팀이 안내(preflight C21은 자동 설치하지 않는다).)
 - **TARGET** = 하네스 경로. 미지정 시 `./<harness_name>/`. 이하 `<TARGET>`.
 - **설치 모드 (2종):** 기본은 **자족(self-contained)** — `<TARGET>/`가 게놈 전체를 담는 독립 디렉토리. **`--in-project`** — `<TARGET>`가 **기존 호스트 프로젝트**일 때 idoforgod식 **오버레이 설치**: `.claude/`에 런타임 DNA만 얹고(.claude/hooks 갱신 + agents/skills/config 비클로버 union), 게놈 헌법·docs는 `.harness/genome/`로 **재배치**, 호스트 루트 파일(`CLAUDE.md`/`AGENTS.md`/`README.md`/`soul.md`)은 **보존**(host CLAUDE.md엔 포인터만 append), `prompt-runner`/`prompt`/`translations`는 미설치, 로그 디렉토리는 `.harness/` 하위. 설치모드는 `.harness/GENOME.json`의 `install_mode`에 stamp되어 `validate`가 자동 분기.
 

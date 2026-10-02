@@ -141,6 +141,21 @@ pub fn runtime_bin_dirs(exe_dir: &Path) -> Vec<PathBuf> {
     dirs
 }
 
+/// 실행 파일 경로 → runtime 탐색 기준 exe_dir. unix 는 심링크를 풀어 실체의 부모를 쓴다:
+/// 설치기가 `$WAVE_HOME/bin/cysd` → `<app>/Contents/MacOS/cysd` 심링크로 데몬을 띄우면 macOS
+/// `current_exe()`는 심링크 경로를 돌려줘(실측) `Resources/runtime`을 못 찾는다(RC 37052514355 좌석 uvx 미발견).
+/// canonicalize 실패 시 원경로 폴백. Windows 는 `\\?\` 접두 회피로 기존 동작(원경로) 유지.
+pub fn resolved_exe_dir(exe: &Path) -> Option<PathBuf> {
+    #[cfg(not(windows))]
+    let exe = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
+    exe.parent().map(|d| d.to_path_buf())
+}
+
+/// 현 프로세스의 [`resolved_exe_dir`].
+pub fn current_exe_dir() -> Option<PathBuf> {
+    resolved_exe_dir(&std::env::current_exe().ok()?)
+}
+
 /// pane/자식 프로세스에 물릴 PATH 를 계산 — 결과가 현행과 다르면 Some(주입값), 무변경이면 None.
 /// **이중 의미론**: unix = exe_dir + 번들 runtime bins 선두 주입 + `~/.local/bin` 말미 append(나머지 보존) —
 /// 로그인 셸(-l) 프로파일이 PATH 를 복원하나 claude native 설치기가 rc 를 수정하지 않음이 실측 확인되어
@@ -650,6 +665,34 @@ mod tests {
         // 부재 dir는 계상 안 함: uv 제거 후 3개.
         fs::remove_dir_all(rt.join("uv")).unwrap();
         assert_eq!(runtime_bin_dirs(&macos).len(), 3, "uv 부재 시 3개");
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn runtime_bin_dirs_found_via_symlinked_exe() {
+        // RC 37052514355 회귀 핀: 설치기가 $WAVE_HOME/bin/cysd → <app>/Contents/MacOS/cysd 심링크로
+        // 데몬을 띄우면 macOS current_exe()는 심링크 경로를 돌려준다(실측). exe_dir 를 그대로 쓰면
+        // Resources/runtime 을 못 찾아 좌석 PATH 에 동봉 runtime 이 빠진다 → 심링크를 풀어 번들을 찾아야 한다.
+        use std::fs;
+        let base = std::env::temp_dir().join(format!("cysrt-symlink-{}", std::process::id()));
+        let macos = base.join("X.app").join("Contents").join("MacOS");
+        let rt = base.join("X.app").join("Contents").join("Resources").join("runtime");
+        fs::create_dir_all(rt.join("uv")).unwrap();
+        fs::create_dir_all(&macos).unwrap();
+        fs::write(macos.join("cysd"), b"").unwrap();
+        let bin = base.join("wave").join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        std::os::unix::fs::symlink(macos.join("cysd"), bin.join("cysd")).unwrap();
+        let exe_dir = resolved_exe_dir(&bin.join("cysd")).expect("exe_dir");
+        let dirs = runtime_bin_dirs(&exe_dir);
+        assert!(
+            dirs.iter().any(|d| d.ends_with("Resources/runtime/uv")),
+            "심링크 exe 에서도 번들 runtime/uv 발견: exe_dir={exe_dir:?} dirs={dirs:?}"
+        );
+        // 심링크 아닌 exe 는 기존과 같은 exe_dir(번들 MacOS) 결과.
+        let direct = resolved_exe_dir(&macos.join("cysd")).expect("exe_dir");
+        assert!(direct.ends_with("Contents/MacOS"), "{direct:?}");
         fs::remove_dir_all(&base).ok();
     }
 

@@ -1553,10 +1553,7 @@ impl Daemon {
         // 온보딩①: 데몬 옆 동봉 cys CLI + (Windows)동봉 runtime을 pane PATH 선두 주입 —
         // 신규 머신(심링크 없음)에서도 pane 속 AI가 `cys identify`·python3·bash를 즉시 쓴다.
         // RC-5: GUI 직스폰과 공유하는 공용 fn(cys::runtime_prefixed_path) 사용 — 중복 구현 금지.
-        if let Some(bin_dir) = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        {
+        if let Some(bin_dir) = cys::current_exe_dir() {
             let cur = std::env::var("PATH").unwrap_or_default();
             if let Some(newp) = cys::runtime_prefixed_path(&bin_dir, &cur) {
                 builder.env("PATH", newp);
@@ -2326,9 +2323,7 @@ fn mac_lc_path_prefix(dirs: &[std::path::PathBuf]) -> Option<String> {
 /// cysd 자기 exe_dir(Contents/MacOS) 기준 runtime_bin_dirs와 단일화. runtime 부재(개발)여도 .local/bin은 주입.
 #[cfg(target_os = "macos")]
 fn mac_runtime_lc_prefix() -> Option<String> {
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))?;
+    let exe_dir = cys::current_exe_dir()?;
     let mut dirs = cys::runtime_bin_dirs(&exe_dir);
     dirs.push(cys::home_dir().join(".local").join("bin"));
     mac_lc_path_prefix(&dirs)

@@ -489,9 +489,7 @@ fn spawn_office_bridge(state_dir: std::path::PathBuf) {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(8642);
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    let exe_dir = cys::current_exe_dir();
     tokio::spawn(async move {
         let exe_dir_ref = exe_dir.as_deref().unwrap_or_else(|| std::path::Path::new("."));
         let python = bundled_python3(exe_dir_ref).unwrap_or_else(|| "python3".to_string());
@@ -596,9 +594,7 @@ fn spawn_auto_restore(
         .map(|v| v == "1")
         .unwrap_or(false);
     // exe_dir(데몬 바이너리 디렉터리) — PHOENIX_CYS·PATH 계산 기준.
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    let exe_dir = cys::current_exe_dir();
     let current_path = std::env::var("PATH").unwrap_or_default();
     let exe_dir_ref = exe_dir.as_deref().unwrap_or_else(|| std::path::Path::new("."));
     let socket = socket_path.to_string_lossy();

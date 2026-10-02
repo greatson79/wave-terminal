@@ -10,6 +10,18 @@ cd "$(dirname "$0")/.."
 # (Windows CPython은 python3 없이 python만 제공하는 경우가 있어 폴백).
 PY="$(command -v python3 || command -v python || true)"
 
+# Every macOS bundle entry point must carry a complete runtime, including direct tauri builds.
+# CI/local signing may have prepared it already; never silently ship only runtime/.gitkeep.
+runtime_target="${CYS_TARGET:-$(rustc -vV | sed -n 's/^host: //p')}"
+case "$runtime_target" in
+  *-apple-darwin)
+    if ! bash scripts/verify-mac-runtime.sh src-tauri/runtime "$runtime_target"; then
+      bash scripts/prep-mac-runtime.sh "$runtime_target"
+    fi
+    bash scripts/verify-mac-runtime.sh src-tauri/runtime "$runtime_target"
+    ;;
+esac
+
 sh ui/build.sh
 
 if [ -n "$CYS_TARGET" ]; then

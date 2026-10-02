@@ -18,6 +18,7 @@
 # exit 0=서명·공증·검증 통과 / 1=공증 검증 실패 / 2=자격증명·환경 미비
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
+PRODUCT="$(python3 -c 'import json; print(json.load(open("src-tauri/tauri.conf.json"))["productName"])')"
 VERSION=$(grep -m1 '"version"' src-tauri/tauri.conf.json | sed -E 's/.*"([0-9][0-9.]*)".*/\1/')
 
 # ── 타깃 아키텍처(무인자=호스트 네이티브 — arm64 경로 완전 불변) ──
@@ -84,7 +85,7 @@ fi
 # .prep-target 마커로 현재 런타임 아키텍처를 추적한다(없으면 안전측 재준비).
 RT_MARKER="src-tauri/runtime/.prep-target"
 RT_CUR="$(cat "$RT_MARKER" 2>/dev/null || echo '')"
-if [ ! -x "src-tauri/runtime/python/bin/python3" ] || [ "$RT_CUR" != "$TARGET" ]; then
+if [ "$RT_CUR" != "$TARGET" ] || ! bash scripts/verify-mac-runtime.sh src-tauri/runtime "$TARGET"; then
   echo "== 동봉 런타임 준비($TARGET) =="
   bash scripts/prep-mac-runtime.sh "$TARGET"
   printf '%s' "$TARGET" > "$RT_MARKER"
@@ -124,7 +125,7 @@ echo "== 앱 번들 빌드(서명만·공증 보류) v$VERSION =="
 env -u APPLE_ID -u APPLE_PASSWORD -u APPLE_TEAM_ID -u APPLE_API_KEY -u APPLE_API_ISSUER \
   bun x @tauri-apps/cli build ${TAURI_TARGET_ARGS[@]+"${TAURI_TARGET_ARGS[@]}"} --bundles app
 
-APP="$BUNDLE_BASE/macos/cys.app"
+APP="$BUNDLE_BASE/macos/$PRODUCT.app"
 DMG="$BUNDLE_BASE/dmg/cys_${VERSION}_${DMG_ARCH}.dmg"
 
 # ── git-core 빌트인 dedup (Tauri 역참조 되돌리기) — 공유 스크립트로 통일 ──
@@ -132,6 +133,7 @@ DMG="$BUNDLE_BASE/dmg/cys_${VERSION}_${DMG_ARCH}.dmg"
 # scripts/dedup-git-core.sh 단일 출처(.github/workflows/release.yml CI 경로와 공유 — 드리프트 방지).
 echo "== runtime/git dedup (git-core 빌트인 → 동일 디렉토리 git 심볼릭링크) =="
 bash scripts/dedup-git-core.sh "$APP"
+bash scripts/verify-mac-runtime.sh "$APP/Contents/Resources/runtime" "$TARGET"
 
 # dedup은 Resources를 바꿔 Tauri가 봉인한 외부 앱 서명을 깬다 → 외부 앱 서명만 재봉인(--force · ★--deep 금지).
 # 중첩 Mach-O(pre-sign된 runtime bin/git·Tauri가 서명한 sidecar/framework/메인바이너리)는 그대로 유효하다.
@@ -172,12 +174,12 @@ rm -f "$APPZIP"
 #  크기는 클라이언트 tauri 동작에 좌우될 수 있음. 신규 설치 경로인 DMG는 확실히 축소된다.)
 if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
   echo "== 업데이터 tar.gz 재생성(dedup 반영) + 재서명 =="
-  ( cd "$(dirname "$APP")" && tar czf cys.app.tar.gz cys.app )
+  ( cd "$(dirname "$APP")" && tar czf "$PRODUCT.app.tar.gz" "$PRODUCT.app" )
   bun x @tauri-apps/cli signer sign --private-key "$TAURI_SIGNING_PRIVATE_KEY" --password "" "$APP.tar.gz"
 fi
 
 echo "== dedup·staple된 앱으로 UDZO DMG 생성(hdiutil — Tauri 기본 포맷과 동일) =="
-DMGSTAGE="$(mktemp -d)"; ditto "$APP" "$DMGSTAGE/cys.app"; ln -s /Applications "$DMGSTAGE/Applications"
+DMGSTAGE="$(mktemp -d)"; ditto "$APP" "$DMGSTAGE/$PRODUCT.app"; ln -s /Applications "$DMGSTAGE/Applications"
 mkdir -p "$(dirname "$DMG")"
 hdiutil create -volname "cys" -srcfolder "$DMGSTAGE" -ov -format UDZO "$DMG"
 rm -rf "$DMGSTAGE"

@@ -63,5 +63,6 @@ rm -rf "$RT/node/include"
 #   바뀌어 '정보 불변' 엄격 해석에 걸릴 여지가 있어 retention 원칙으로 보존 — 오너 명시 승인 시 추가 트림.
 
 printf 'Bundled runtimes and their licenses (macOS):\n- CPython (python-build-standalone): PSF License (https://github.com/astral-sh/python-build-standalone)\n- git (desktop/dugite-native): GPLv2 (https://github.com/desktop/dugite-native)\n- uv (astral-sh): Apache-2.0 OR MIT (https://github.com/astral-sh/uv)\n- Node.js (+npm/npx): MIT (https://nodejs.org)\nWritten offer for corresponding source: contact the distributor.\n' > "$RT/LICENSES/BUNDLED-RUNTIMES.txt"
-ls -la "$RT/python/bin/python3" "$RT/git/bin/git" "$RT/uv/uv" "$RT/node/bin/node"
+bash scripts/verify-mac-runtime.sh "$RT" "$TARGET"
+printf '%s\n' "$TARGET" > "$RT/.prep-target"
 echo "✓ macOS 런타임 준비 완료 ($TARGET)"

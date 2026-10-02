@@ -152,7 +152,9 @@ jobs:
       - name: 동봉 런타임 준비 (Python·git·uv·node — macOS 전용, per-arch)
         if: matrix.platform == 'macos-latest'
         shell: bash
-        run: bash scripts/prep-mac-runtime.sh "${{ matrix.target }}"
+        run: |
+          python3 scripts/tests/test_mac_runtime.py
+          bash scripts/prep-mac-runtime.sh "${{ matrix.target }}"
 
       # ★RC-23 git-core dedup (macOS 전용) — Tauri 번들러가 bundle.resources 심볼릭링크를 역참조(upstream
       #   #13219, 미해결)해 runtime/git 을 141MB→608MB(중복 464MB)·DMG 434MB로 부풀린다. tauri-action에 그대로
@@ -172,7 +174,8 @@ jobs:
           set -euo pipefail
           TRIPLE="${{ matrix.target }}"
           BUNDLE="target/$TRIPLE/release/bundle"
-          APP="$BUNDLE/macos/cys.app"
+          PRODUCT="$(python3 -c 'import json; print(json.load(open("src-tauri/tauri.conf.json"))["productName"])')"
+          APP="$BUNDLE/macos/$PRODUCT.app"
           VERSION="$(grep -m1 '"version"' src-tauri/tauri.conf.json | sed -E 's/.*"([0-9][0-9.]*)".*/\1/')"
           case "$TRIPLE" in
             aarch64-apple-darwin) ARCH=aarch64 ;;
@@ -183,15 +186,16 @@ jobs:
           bun x @tauri-apps/cli@2 build --bundles app --target "$TRIPLE"
           # ② git-core dedup (역참조 되돌리기 · build-macos-signed.sh와 동일 공유 스크립트) → runtime/git 608→~144MB
           bash scripts/dedup-git-core.sh "$APP"
+          bash scripts/verify-mac-runtime.sh "$APP/Contents/Resources/runtime" "$TRIPLE"
           # ③ 업데이터 tar.gz 재생성(dedup 반영·심볼릭링크 보존) + 재서명 → tauri-action이 이 .sig로 latest.json 작성
-          ( cd "$BUNDLE/macos" && tar czf cys.app.tar.gz cys.app )
-          bun x @tauri-apps/cli@2 signer sign --private-key "$TAURI_SIGNING_PRIVATE_KEY" --password "" "$BUNDLE/macos/cys.app.tar.gz"
+          ( cd "$BUNDLE/macos" && tar czf "$PRODUCT.app.tar.gz" "$PRODUCT.app" )
+          bun x @tauri-apps/cli@2 signer sign --private-key "$TAURI_SIGNING_PRIVATE_KEY" --password "" "$BUNDLE/macos/$PRODUCT.app.tar.gz"
           # ④ dedup된 .app으로 UDZO DMG(hdiutil · Tauri 기본 포맷 동일). 파일명 cys_<ver>_<arch>.dmg = tauri-action 표준 수집명.
-          STAGE="$(mktemp -d)"; ditto "$APP" "$STAGE/cys.app"; ln -s /Applications "$STAGE/Applications"
+          STAGE="$(mktemp -d)"; ditto "$APP" "$STAGE/$PRODUCT.app"; ln -s /Applications "$STAGE/Applications"
           mkdir -p "$BUNDLE/dmg"
           hdiutil create -volname "cys" -srcfolder "$STAGE" -ov -format UDZO "$BUNDLE/dmg/cys_${VERSION}_${ARCH}.dmg"
           rm -rf "$STAGE"
-          echo "✓ macOS slim 산출물 준비: $BUNDLE/dmg/cys_${VERSION}_${ARCH}.dmg + $BUNDLE/macos/cys.app.tar.gz(.sig)"
+          echo "✓ macOS slim 산출물 준비: $BUNDLE/dmg/cys_${VERSION}_${ARCH}.dmg + $BUNDLE/macos/$PRODUCT.app.tar.gz(.sig)"
 
       # tauri build → beforeBuildCommand(bundle-prep.sh)가 UI 번들 + cys/cysd 릴리스 빌드 + externalBin
       # 배치 → 번들(dmg/app) → createUpdaterArtifacts(.app.tar.gz + .sig + latest.json) → 비공개 repo 릴리스 업로드.

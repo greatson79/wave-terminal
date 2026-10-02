@@ -31,7 +31,7 @@ def check(name, cond, detail=""):
 
 
 def make_env(tmp, *, claim_exit=0, ping_exit=0, boot_exit=0, preflight_exit=0,
-             check_fail_times=0, check_final=0, socket="", check_needs_reviewers=False,
+             check_fail_times=0, check_final=0, socket="", check_needs_report=False,
              br_exit=0):
     """임시 HOME + 가짜 팩 + 스텁 생성 → 환경 dict 반환."""
     home = os.path.join(tmp, "home")
@@ -59,21 +59,21 @@ def make_env(tmp, *, claim_exit=0, ping_exit=0, boot_exit=0, preflight_exit=0,
     w(os.path.join(pack, "bin", "javis_preflight.py"),
       "import sys; sys.exit(%d)\n" % preflight_exit, 0o644)
     # 스텁 orchestra — 서브커맨드 분기: boot-reviewers=마커 생성(④-b 재현), check=카운터
-    # (+needs_reviewers면 마커 없을 때 실패 — "cys boot만으론 리뷰어 0" 시나리오).
+    # (+needs_report면 보고 호출 마커가 없을 때 실패 — ④b→⑤ 순서 검증).
     w(os.path.join(pack, "bin", "javis_orchestra.py"), (
         "import os,sys\n"
         "mode=sys.argv[1] if len(sys.argv)>1 else ''\n"
         "open('%s/orch.log','a').write(mode+'\\n')\n"
         "if mode=='boot-reviewers':\n"
-        "    open('%s/reviewers.flag','w').write('1')\n"
+        "    open('%s/reviewer-report.flag','w').write('1')\n"
         "    sys.exit(%d)\n"
         "if mode!='check': sys.exit(0)\n"
         "c='%s/check.count'\n"
         "n=int(open(c).read()) if os.path.exists(c) else 0\n"
         "open(c,'w').write(str(n+1))\n"
-        "if %d and not os.path.exists('%s/reviewers.flag'): sys.exit(1)\n"
+        "if %d and not os.path.exists('%s/reviewer-report.flag'): sys.exit(1)\n"
         "sys.exit(1 if n < %d else %d)\n")
-      % (tmp, tmp, br_exit, tmp, 1 if check_needs_reviewers else 0, tmp,
+      % (tmp, tmp, br_exit, tmp, 1 if check_needs_report else 0, tmp,
          check_fail_times, check_final), 0o644)
     # 스텁 cys-dept — 인자 기록
     w(os.path.join(pack, "bin", "cys-dept"),
@@ -221,12 +221,12 @@ with open(os.path.join(home, ".cys", ".pack-version"), "w", encoding="utf-8") as
 check("7e 버전 불일치 exit 5", run(env, "assert-ready")[0] == 5)
 shutil.rmtree(tmp)
 
-# ── 9. ④-b 리뷰어 폴백 (D-IMPL-1 재현 핀 · 산문 §0 ④-b 전사) ──
-# 9a: check가 리뷰어 폴백 마커를 요구(=agy/codex 부재 기계) → ④-b가 체인에 있어야만 부트 성공.
+# ── 9. ④-b 후보 보고 순서·Degrade (실제 무스폰은 test_three_seat_boot.py) ──
+# 9a: check 스텁이 후보 보고 호출 마커를 요구해 ④-b→⑤ 순서를 확인한다.
 tmp = tempfile.mkdtemp(prefix="boot-t9a-")
-env, home = make_env(tmp, check_needs_reviewers=True)
+env, home = make_env(tmp, check_needs_report=True)
 code, out, err = run(env)
-check("9a ④-b 폴백으로 부트 성공(agy/codex 부재 기계)", code == 0, "exit=%d" % code)
+check("9a ④-b 후보 보고 후 부트 성공", code == 0, "exit=%d" % code)
 orch = open(os.path.join(tmp, "orch.log"), encoding="utf-8").read().split() if \
     os.path.exists(os.path.join(tmp, "orch.log")) else []
 check("9b ④-b가 check보다 선행", orch[:1] == ["boot-reviewers"], "order=%s" % orch[:3])
@@ -236,6 +236,8 @@ tmp = tempfile.mkdtemp(prefix="boot-t9c-")
 env, home = make_env(tmp, br_exit=1)
 code, out, err = run(env)
 check("9c ④-b 실패해도 체인 계속(check green이면 부트 성공)", code == 0, "exit=%d" % code)
+check("9d ④-b 실패 경고 보존", json.loads(out).get("warnings") == [{"step": "④b-boot-reviewers", "exit": 1}])
+check("9e ④-b Degrade 경고 출력", "Degrade" in err)
 shutil.rmtree(tmp)
 
 # ── 8. 롤백 불변식: 마커·상태 삭제 = 부재 상태로 완전 복귀(재부트로 재생성 가능) ──

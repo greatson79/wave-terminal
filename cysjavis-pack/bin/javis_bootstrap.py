@@ -6,7 +6,7 @@ LLM(master)의 역할은 이 스크립트 실행·출력 인용·이후 지휘�
 
 단계 체인 (preflight 실패는 경고·계속, 필수 단계 실패는 즉시 중단):
   ① preflight --fix (진단)        ② cys ping                ③ cys claim-role master
-  ④ cys boot                     ⑤ orchestra check (bounded retry 3s×10 — 노드 스폰은
+  ④ cys boot (cso·worker)        ⑤ orchestra check (2종 의무) (bounded retry 3s×10 — 노드 스폰은
   비동기·check는 무대기 스냅샷이므로 레이스 봉쇄)          ⑥ 완료 마커 write
   ⑦ cys-dept promote-if-pending --request-only (비대기 — 부트와 승격 동의의 분리)
   ⑧ 기계 요약 JSON 출력 (master는 이것을 인용해 보고한다)
@@ -189,8 +189,8 @@ def cmd_run():
                "선언을 중단하고 기존 master에 인계하라.\n%s" % out)
         return log.fail("③claim-role", code, msg, 7)
 
-    # ④ 4종 의무 노드 기동
-    _progress("④ 4종 의무 노드 기동 중(최대 300s)…")
+    # ④ 기본 함대 자식 2종(cso·worker) 기동
+    _progress("④ 기본 함대 자식 2종 기동 중(최대 300s)…")
     code, out = _run(["cys", "boot"], timeout=300)
     log.step("④boot", code, out)
     if code != 0:
@@ -198,12 +198,16 @@ def cmd_run():
 
     orchestra = os.path.join(PACK, "bin", "javis_orchestra.py")
 
-    # ④-b 리뷰어 감지·무구독 폴백(R1·D-IMPL-1 — 산문 §0 ④-b의 코드 전사): cys boot는 미설치
-    # CLI를 건너뛰므로 agy/codex 부재 기계(초보 전원)에서 대체 리뷰어(reviewer-claude-*)를 기동할
-    # 주체가 없으면 ⑤ check가 영영 실패한다. 실패=기록만(best-effort) — 최종 게이트는 ⑤ check.
-    _progress("④-b 리뷰어 감지·폴백 기동 중(최대 320s — 대체 리뷰어 2슬롯 순차)…")
+    # ④-b: 기본 호출은 후보 보고만(스폰 0). 필요 시 boot-reviewers --spawn으로 기동.
+    # v1.1.6 bin/javis_bootstrap.py:3120-3128: 리뷰어 실패는 Degrade, ⑤는 계속한다.
+    _progress("④-b 선택 리뷰어 후보 확인 중(기본 스폰 0)…")
     code, out = _run([py, orchestra, "boot-reviewers"], timeout=320)
     log.step("④b-boot-reviewers", code, out)
+    if code != 0:
+        warnings.append({"step": "④b-boot-reviewers", "exit": code})
+        log.data["warnings"] = warnings
+        _atomic_write_json(BOOT_LAST, log.data)
+        _progress("경고: 선택 리뷰어 확인 실패(exit %d, Degrade), ⑤ 계속.\n%s" % (code, out.strip()))
 
     # ⑤ orchestra check — bounded retry(노드 ready는 비동기·check는 스냅샷)
     _progress("⑤ 노드 생존 결정론 확인(check · 최대 %d회×%.0fs 재시도)…" % (CHECK_RETRIES, CHECK_INTERVAL_S))

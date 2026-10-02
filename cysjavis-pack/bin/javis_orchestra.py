@@ -2,13 +2,13 @@
 # -*- coding: utf-8 -*-
 """javis_orchestra — LLM 오케스트레이션의 결정론 도구 (절대지침 4차: LLM orchestrating 앵커).
 
-master가 (a) "4개 노드 다 떴나"를 눈대중 판단, (b) 리뷰 프롬프트에 제약을 빠뜨림,
+master가 (a) "기본 함대가 다 떴나"를 눈대중 판단, (b) 리뷰 프롬프트에 제약을 빠뜨림,
 (c) 라운드 번호·완료조건을 머리로 셈 — 이 세 가지는 결정론으로 환원 가능하다. 이 도구가
 그 사실을 산출한다(LLM 자연어 재추론 금지 — 출력만이 사실).
 
 서브커맨드:
-  check                         4종 의무 노드(cso·worker·reviewer-gemini·reviewer-codex)
-                                생존을 cys status로 판정. exit 0=4종 생존, 1=부재 존재.
+  check                         2종 의무 노드(cso·worker)
+                                생존을 cys status로 판정. exit 0=2종 생존, 1=부재 존재.
   review-prompt --task T --scope S [--reviewer gemini|codex] [--round N] [--success X]
                                 REVIEWER_DIRECTIVE §2 제약 + 형식 + 회신 채널을 항상 포함한
                                 리뷰 의뢰 프롬프트를 출력(제약 누락 구조 차단). --success는
@@ -60,11 +60,10 @@ import shutil
 import subprocess
 import sys
 
-# 4차 앵커4-1: 프로젝트 상주 의무 노드(grok은 선택). 이것은 *표준(Tier-2 이상) 기본 로스터*다.
-# ★check 가 실제로 검증하는 것은 effective_required_roles()(=감지 폴백 적용) — REQUIRED_ROLES 는
-# 계약·문서용 표준 상수로 보존한다. agy/codex 미감지 시 리뷰어 슬롯은 Claude 대체로 치환된다.
-REQUIRED_ROLES = ["cso", "worker", "reviewer-gemini", "reviewer-codex"]
-OPTIONAL_ROLES = ["reviewer-grok"]
+# 기본 함대 = master·cso·worker. 리뷰어는 필요할 때 --spawn으로 연다.
+# 이식: oogisoogi/cys-ro v1.1.6 bin/javis_orchestra.py:118-129 (MIT, 루트 LICENSE 유지).
+REQUIRED_ROLES = ["cso", "worker"]
+OPTIONAL_ROLES = ["reviewer-gemini", "reviewer-codex", "reviewer-grok"]
 MAX_ROUNDS = 10  # 앵커4 5-8: 맥킨지급 도달 또는 10R 완료 시 멈춤
 
 # ★리뷰어 슬롯 + 무구독 폴백(오너 2026-06-14): agy(reviewer-gemini)·codex(reviewer-codex)는
@@ -128,8 +127,9 @@ def reviewer_roster(detect=None, agents=None):
 
 
 def effective_required_roles(detect=None, agents=None):
-    """check 가 검증할 유효 의무 역할 = cso·worker + 유효 리뷰어 로스터(감지 폴백 적용)."""
-    return ["cso", "worker"] + [e["role"] for e in reviewer_roster(detect, agents)]
+    """기본 함대의 자식 2석. detect/agents는 기존 호출자 호환을 위해 보존한다."""
+    # v1.1.6 bin/javis_orchestra.py:334-345 — 감지 결과와 무관, 상수 오염 방지 사본.
+    return list(REQUIRED_ROLES)
 
 
 def pack_dir():
@@ -200,15 +200,13 @@ def _quiet_alive_roles(status, roles):
     return out
 
 
-# ── check: 4종 의무 노드 생존 판정 ──
+# ── check: 기본 함대 자식 2종 생존 판정 ──
 def cmd_check(args):
     status = cys_status()
     if status is None:
         print("[orchestra check] cys status 수집 실패(데몬 미가동?) — `cys ping` 확인 후 재실행")
         return 2
-    # ★유효 의무 역할 = cso·worker + 감지 폴백 적용 리뷰어 로스터(agy/codex 미감지 시 Claude 대체).
-    roster = reviewer_roster()
-    required = ["cso", "worker"] + [e["role"] for e in roster]
+    required = effective_required_roles()
     alive = live_roles(status)
     # 워커는 복수 인스턴스(worker, worker-2 …) — 하나라도 생존이면 'worker' 요건을 충족(접두 수용).
     # 데몬이 둘째 워커부터 worker-N으로 dedup하므로 'worker' 키가 없을 수 있다.
@@ -219,13 +217,7 @@ def cmd_check(args):
     still_missing = [r for r in required if not alive.get(r)]
     estimated = _quiet_alive_roles(status, still_missing) if still_missing else {}
     alive.update(estimated)
-    print("LLM orchestrating 노드 점검 (4종 의무 + grok 선택):")
-    # 리뷰어 대체 고지(오너 2026-06-14 — 정직한 라벨링: 보편적이나 벤더 다양성은 약함)
-    for e in roster:
-        if not e["native"]:
-            print("  ⚠ %s 미감지(%s) → %s(Claude 대체) — 보편적이나 벤더 다양성 약함, "
-                  "페르소나/렌즈/익명화로 보완(REVIEWER_DIRECTIVE §6)"
-                  % (e["substituted_for"], e["reason"], e["role"]))
+    print("LLM orchestrating 노드 점검 (cso·worker 2종 의무 · 리뷰어 선택):")
     missing = []
     for r in required:
         if alive.get(r):
@@ -241,9 +233,7 @@ def cmd_check(args):
         print("  %s %s — %s" % ("✓" if alive.get(r) else "·", r,
                                 "생존" if alive.get(r) else "미설치/미기동(선택)"))
     if missing:
-        only_rev = all(m.startswith("reviewer") for m in missing)
-        howto = ("javis_orchestra.py boot-reviewers (리뷰어 감지·자동 폴백)" if only_rev
-                 else "cys boot")
+        howto = "cys boot"
         print("종합: 필수 %d/%d 생존 — 부재: %s → `%s`로 기동하라"
               % (len(required) - len(missing), len(required), ", ".join(missing), howto))
         return 1
@@ -269,6 +259,13 @@ def cmd_boot_reviewers(args):
     2층 감지: (1) 바이너리 미설치 → 즉시 대체(detect_reviewer). (2) 설치됐으나 부트가
     각성(set-status ack)에 실패(미인증·깨짐) → 대체로 2차 폴백. 절대 halt 하지 않는다."""
     roster = reviewer_roster()
+    # v1.1.6 bin/javis_orchestra.py:1350-1365: 기본 호출은 보고만, 명시 --spawn만 기동.
+    if not getattr(args, "spawn", False):
+        print("[boot-reviewers] 기본 함대 master·cso·worker — 리뷰어 스폰 0")
+        for e in roster:
+            print("  · 후보 %s ← %s (지금은 열지 않음)" % (e["role"], e["agent"]))
+        print("  필요 시: javis_orchestra.py boot-reviewers --spawn")
+        return 0
     print("[boot-reviewers] 리뷰어 슬롯 기동 (미감지/각성실패 시 Claude 대체로 자동 폴백):")
     results = []
     for (nrole, nagent, srole, sagent), e in zip(REVIEWER_SLOTS, roster):
@@ -659,7 +656,7 @@ def cmd_task_prompt(args):
                   "대상 생존 미확인 상태로는 티켓을 내지 않는다.", file=sys.stderr)
             return 2
         if not live_roles(status).get(args.to):
-            print("[task-prompt] 대상 '%s' 미기동 — 티켓 미출력. `cys boot`(4종 의무 기동) 또는 "
+            print("[task-prompt] 대상 '%s' 미기동 — 티켓 미출력. `cys boot`(cso·worker 기동) 또는 "
                   "`cys launch-agent --role %s --agent claude`로 기동 후 재실행하라."
                   % (args.to, args.to), file=sys.stderr)
             return 1
@@ -1374,8 +1371,8 @@ def cmd_guard_master_claim(args):
 def cmd_self_test(args):
     """순수 로직 자기검증 (cys 의존 없음) — preflight C19가 호출. assert 실패는 exit 1."""
     try:
-        assert REQUIRED_ROLES == ["cso", "worker", "reviewer-gemini", "reviewer-codex"], \
-            "4종 의무 노드 목록이 변형됐다"
+        assert REQUIRED_ROLES == ["cso", "worker"], \
+            "기본 함대 자식 2종 목록이 변형됐다"
         assert MAX_ROUNDS == 10, "라운드 상한은 10이어야 한다(앵커4 5-8)"
         # round_path 경로 탈출 방지: 악성 task가 round 디렉터리 밖으로 못 나간다(실효 검증).
         rnd_dir = os.path.realpath(os.path.join(pack_dir(), "round"))
@@ -1590,9 +1587,9 @@ def cmd_self_test(args):
         mix = lambda a, ag=None: (a == "gemini", "mix")
         rmix = reviewer_roster(detect=mix, agents=synth_ag)
         assert [e["role"] for e in rmix] == ["reviewer-gemini", "reviewer-claude-2"], "혼합 로스터 오류"
-        # effective_required_roles: 미감지 시 의무 역할이 Claude 대체로 치환(check 가 영영 부재 보고 안 함)
+        # effective_required_roles: 리뷰어 설치 유무와 무관하게 기본 함대만 의무
         assert effective_required_roles(detect=no, agents=synth_ag) == \
-            ["cso", "worker", "reviewer-claude-1", "reviewer-claude-2"], "유효 의무역할 치환 오류"
+            ["cso", "worker"], "리뷰어 미감지가 기본 함대를 변형"
         assert effective_required_roles(detect=yes, agents=synth_ag) == REQUIRED_ROLES, \
             "감지 시 유효 의무역할이 표준과 불일치"
 
@@ -1728,7 +1725,7 @@ def cmd_self_test(args):
     except AssertionError as e:
         print("javis_orchestra self-test FAIL: %s" % e, file=sys.stderr)
         return 1
-    print("javis_orchestra self-test OK (4종 노드·라운드 상한·경로 탈출방지·제약 주입·"
+    print("javis_orchestra self-test OK (기본 함대 3석·라운드 상한·경로 탈출방지·제약 주입·"
           "4규칙 티켓 주입·do/don't 무접촉·파싱·셀 새니타이즈·무음실패 카탈로그·전제지식 주입·매니페스트 배선)")
     return 0
 
@@ -1740,10 +1737,11 @@ def main():
     ap = argparse.ArgumentParser(description="LLM 오케스트레이션 결정론 도구(앵커4)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("check", help="4종 의무 노드 생존 판정")
+    sub.add_parser("check", help="기본 함대 자식 2종(cso·worker) 생존 판정")
 
     br = sub.add_parser("boot-reviewers",
-                        help="리뷰어(agy·codex) 감지→기동. 미감지/각성실패 시 Claude 대체로 자동 폴백(멈춤 없음)")
+                        help="리뷰어 후보 보고(기본 스폰 0). --spawn 시 감지·기동·Claude 대체 폴백")
+    br.add_argument("--spawn", action="store_true", help="리뷰어 슬롯을 명시적으로 기동")
     br.add_argument("--plan", action="store_true", help="기동 없이 감지 결과 로스터만 출력(dry-run)")
 
     rp = sub.add_parser("review-prompt", help="제약 포함 리뷰 의뢰 프롬프트 생성")

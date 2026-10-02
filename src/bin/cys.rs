@@ -508,7 +508,7 @@ enum Command {
         #[arg(long)]
         cwd: Option<String>,
     },
-    /// Boot the standard node set — 설치된 CLI만 자동 감지·기동·지침 주입. 표준 편성 4종(CSO 먼저 + worker claude + reviewer agy/codex) + 선택 grok
+    /// Boot the standard node set — master에 CSO·worker를 추가. 리뷰어는 필요 시 명시 기동
     Boot {
         /// Working directory for launched nodes
         #[arg(long)]
@@ -3717,8 +3717,6 @@ fn run_doctor(fix: bool, json_out: bool) -> i32 {
     }
 }
 
-/// 표준 노드 일괄 부트: 설치된 CLI만 자동 감지해 워커+리뷰어를 기동·지침 주입한다.
-/// 마스터 부트 시퀀스 ④의 결정론적 구현 — 모델 재량("필요할 때 띄우자")에 맡기지 않는다.
 /// '~/'-시작 경로를 홈으로 확장 (그 외는 그대로) — boot의 경로형 cmd 설치 판정용.
 fn expand_tilde(p: &str) -> std::path::PathBuf {
     if let Some(rest) = p.strip_prefix("~/") {
@@ -3729,17 +3727,13 @@ fn expand_tilde(p: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(p)
 }
 
-/// 절대지침 앵커4-1: 프로젝트 시작 시 CSO·worker·agy·codex 4개 노드를 의무 기동한다
-/// (LLM orchestrating 상주 편성). grok은 설치돼 있으면 추가 리뷰어로 띄운다(미설치 skip).
+// 기본 편성: 이미 실행 중인 master + CSO + worker. 리뷰어는 명시 기동한다.
+// 이식: oogisoogi/cys-ro v1.1.6 bin/javis_formation.py:91-94,
+// bin/javis_orchestra.py:153-160 (MIT, 루트 LICENSE 유지). CSO 먼저.
+const BOOT_PLAN: &[(&str, &str)] = &[("cso", "claude"), ("worker", "claude")];
+
+/// master의 기본 편성에 CSO·worker를 추가하고 지침을 주입한다.
 fn run_boot(cwd: Option<String>) -> i32 {
-    // (역할, 에이전트) 표준 편성 — 4차 의무 4종 + 선택 grok. 순서: CSO 먼저(감독).
-    const PLAN: &[(&str, &str)] = &[
-        ("cso", "claude"),
-        ("worker", "claude"),
-        ("reviewer-gemini", "gemini"),
-        ("reviewer-codex", "codex"),
-        ("reviewer-grok", "grok"),
-    ];
     let agents: Value = std::fs::read_to_string(cys::pack::pack_dir().join("agents.json"))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -3755,8 +3749,8 @@ fn run_boot(cwd: Option<String>) -> i32 {
         .collect();
     let mut launched = 0;
     let mut failed = 0;
-    println!("cys boot — LLM orchestrating 편성 점검 (CSO·worker·agy·codex 4종 의무 + grok 선택)");
-    for (role, agent) in PLAN {
+    println!("cys boot — 기본 편성 점검 (master + CSO·worker, 리뷰어는 필요 시 명시 기동)");
+    for (role, agent) in BOOT_PLAN {
         let bin = agents
             .get(*agent)
             .and_then(|a| a["cmd"].as_str())
@@ -8174,6 +8168,16 @@ mod tests {
         assert_eq!(expand_tilde("codex"), std::path::PathBuf::from("codex"));
         // '~user' 형태는 확장하지 않는다 (보수적 — 그대로 존재 판정)
         assert_eq!(expand_tilde("~root/x"), std::path::PathBuf::from("~root/x"));
+    }
+
+    #[test]
+    fn boot_plan_keeps_default_formation_at_three_seats() {
+        // 호출자 master를 제외한 부트 대상만 센다. 설치된 리뷰어 CLI 수와 무관한 정책이다.
+        let roles: Vec<_> = BOOT_PLAN.iter().map(|(role, _)| *role).collect();
+        assert_eq!(roles, ["cso", "worker"]);
+        assert_eq!(1 + roles.len(), 3);
+        assert!(BOOT_PLAN.iter().all(|(_, agent)| *agent == "claude"));
+        assert!(!roles.iter().any(|role| role.starts_with("reviewer")));
     }
 
     /// 회귀 박제: boot의 바이너리 존재 검사가 cmd의 env-prefix(KEY=VAL)를 바이너리명으로

@@ -1,0 +1,7 @@
+{
+ "name": "transcription",
+ "description": "음성·영상을 단어 단위 타임스탬프가 붙은 텍스트로 전사(ASR)하는 대표 스킬 — provider는 하드코딩하지 않고 javis_select로 결정론 선택(무료·로컬 whisperx 바닥부터, deny-by-default). 자막·번역·클립 추출·점프컷의 공통 전처리. \"전사 / 받아쓰기 / 자막 텍스트 / 타임스탬프 / transcribe / ASR / whisper\" 트리거, 또는 clip-factory·localization-dub·podcast-repurpose·screen-demo·talking-head·hybrid 아키타입의 script 단계로 발동.",
+ "triggers": [],
+ "permissions": null,
+ "_fingerprint": "c968676382eaaad7"
+}

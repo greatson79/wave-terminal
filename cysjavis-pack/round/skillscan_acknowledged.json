@@ -1,0 +1,28 @@
+{
+  "_schema": "cys-skillscan-ack/v1",
+  "_basis": "설치본 형태(build.rs 임베드 집합) card fingerprint — scripts/gen-shipped-acks.py",
+  "brainstorming": {
+    "fingerprint": "sha256:de9865a7e7d69de9d70b8b05b8c2b444",
+    "approved_by": "CEO 결정 0445 (2026-10-03) — C60 미승인스킬 결정표 승인 6건"
+  },
+  "insane-search": {
+    "fingerprint": "sha256:0e5917505b07d8bc0478a232886a5088",
+    "approved_by": "CEO 결정 0445 (2026-10-03) — C60 미승인스킬 결정표 승인 6건"
+  },
+  "kosis-stats": {
+    "fingerprint": "sha256:afd7c928a4c34446658606620f568d16",
+    "approved_by": "CEO 결정 0445 (2026-10-03) — C60 미승인스킬 결정표 승인 6건"
+  },
+  "skillscan-semantic": {
+    "fingerprint": "sha256:d7279f5b3459b99f42d3393fb17f370d",
+    "approved_by": "CEO 결정 0445 (2026-10-03) — C60 미승인스킬 결정표 승인 6건"
+  },
+  "systematic-debugging": {
+    "fingerprint": "sha256:817e29540422429e9fc64353e3c3654c",
+    "approved_by": "CEO 결정 0445 (2026-10-03) — C60 미승인스킬 결정표 승인 6건"
+  },
+  "transcription": {
+    "fingerprint": "sha256:2f6c6ab846966fc25970c97f60f513de",
+    "approved_by": "CEO 결정 0445 (2026-10-03) — C60 미승인스킬 결정표 승인 6건"
+  }
+}

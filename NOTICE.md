@@ -9,7 +9,7 @@ This file consolidates third-party attributions for discoverability.
 |---|---|---|---|
 | portable-pty (patched) | `vendor/portable-pty/` | wezterm (Wez Furlong) | MIT — original copyright preserved in `vendor/portable-pty/LICENSE.md` |
 | insane-search | `cysjavis-pack/skills/insane-search/` | fivetaku/insane-search | MIT — see `cysjavis-pack/skills/THIRD_PARTY.md` |
-| skill collections (32 skills) | `cysjavis-pack/skills/` | NomaDamas/k-skill · obra/superpowers · mattpocock/skills | MIT — commit-pinned attributions in `cysjavis-pack/skills/THIRD_PARTY.md` |
+| skill collections (31 skills) | `cysjavis-pack/skills/` | NomaDamas/k-skill · obra/superpowers · mattpocock/skills | MIT — commit-pinned attributions in `cysjavis-pack/skills/THIRD_PARTY.md` |
 
 ## Design-only references (no code vendored)
 

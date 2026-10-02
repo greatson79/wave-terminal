@@ -1565,8 +1565,8 @@ mod tests {
             "subagent-driven-development", "dispatching-parallel-agents",
             "verification-before-completion", "brainstorming",
             "receiving-code-review", "writing-plans", "using-git-worktrees",
-            // mattpocock A+B+집필3 9종 (2026-06-12 오너 채택 · 핀 694fa30)
-            "git-guardrails-claude-code", "grill-with-docs", "prototype",
+            // mattpocock B+집필3 8종 (2026-06-12 오너 채택 · 핀 694fa30 · git-guardrails는 2026-10-03 CEO 0445 제외)
+            "grill-with-docs", "prototype",
             "improve-codebase-architecture", "zoom-out", "handoff",
             "writing-fragments", "writing-beats", "writing-shape",
         ] {

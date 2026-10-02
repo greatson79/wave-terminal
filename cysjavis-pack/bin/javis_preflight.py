@@ -331,6 +331,29 @@ def pack_dir():
     return os.path.join(os.path.expanduser("~"), ".cys/pack")
 
 
+def _shipped_record(rel):
+    """팩 동봉 승인 기록(rel) 로드 — 설치 매니페스트 해시 결속. 반환 (data|None, 문제문자열|None).
+    파일 없음·매니페스트 없음/미등재 = (None, None)(출하 기록 미사용 — 작업폴더 기록만 본다).
+    매니페스트 등재인데 해시 불일치 = 변조 → (None, 문제). 해시는 src/pack.rs content_hash와 동형."""
+    p = os.path.join(pack_dir(), *rel.split("/"))
+    try:
+        with open(p, "rb") as f:
+            raw = f.read()
+        with open(os.path.join(pack_dir(), ".install-manifest.json"), encoding="utf-8") as f:
+            man = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None, None
+    want = man.get(rel) if isinstance(man, dict) else None
+    if not want:
+        return None, None
+    if hashlib.sha256(raw).hexdigest() != want:
+        return None, "출하 승인 기록 변조(설치 매니페스트 해시 불일치): %s" % rel
+    try:
+        return json.loads(raw.decode("utf-8")), None
+    except (ValueError, UnicodeDecodeError):
+        return None, "출하 승인 기록 파손: %s" % rel
+
+
 # ── C63 트립와이어 마커 (attention-p0 · 2026-07-14 박사님 승인) ──
 # 파일당 기능 계약의 '안정 문자열'(사용자 대면 메시지·상수·함수명 — 변경 저빈도)만 절제 등재.
 # 마커를 바꾸는 티켓은 이 표도 같은 티켓에서 갱신(변경 결합 — TRIPWIRE_PIN_DESIGN.md).
@@ -3537,7 +3560,13 @@ class Preflight:
         #     (feedback_skillscan-gate-policy)에 따라 WARN+명시 목록(처분은 master/CSO).
         #     ★승인 저장소(2026-07-04 master 승인): _round/skillscan_acknowledged.json —
         #     fingerprint 핀 일치 시만 면제. 스킬 내용 변경=핀 불일치=자동 재차단.
+        #     ★출하 승인 기록(CEO 결정 0445 · 2026-10-03): 팩 동봉 round/skillscan_acknowledged.json
+        #     (+round/mcp_approved/) — 사용자 PC에도 따라간다. 설치 매니페스트(.install-manifest.json)
+        #     해시와 일치할 때만 신뢰한다(변조·매니페스트 부재=무시). 핀은 설치본 기준(build.rs가 빼는
+        #     tests/·dot·__pycache__ 제외 형태 — scripts/gen-shipped-acks.py). 출하 승인 스킬의 핀 불일치
+        #     = 설치 팩 변조 → FAIL. 작업폴더 _round/ 기록은 추가 출처로 계속 유효(불일치=기존대로 WARN).
         acked_note = ""
+        ws_round = os.path.join(os.environ.get("JAVIS_ROOT") or os.getcwd(), "_round")
         try:
             scan_tool = os.path.join(pack_dir(), "bin", "javis_skillscan.py")
             r = subprocess.run([sys.executable, scan_tool, "all", "--roots", os.path.join(pack_dir(), "skills"), "--json"],
@@ -3545,16 +3574,22 @@ class Preflight:
             data = json.loads(r.stdout or "{}")
             blocked = data.get("blocked") or []
             if blocked:
-                ack_p = os.path.join(os.environ.get("JAVIS_ROOT") or os.getcwd(),
-                                     "_round", "skillscan_acknowledged.json")
+                shipped, bad = _shipped_record("round/skillscan_acknowledged.json")
+                if bad:
+                    probs.append(bad)
                 try:
-                    acks = json.load(open(ack_p, encoding="utf-8"))
+                    with open(os.path.join(ws_round, "skillscan_acknowledged.json"), encoding="utf-8") as f:
+                        ws_acks = json.load(f)
                 except (OSError, json.JSONDecodeError):
-                    acks = {}
-                residual, acked = [], []
+                    ws_acks = {}
+                shipped = shipped if isinstance(shipped, dict) else {}
+                ws_acks = ws_acks if isinstance(ws_acks, dict) else {}
+                residual, acked, tampered = [], [], []
                 for s in blocked:
+                    pins = [a.get("fingerprint") for a in (shipped.get(s), ws_acks.get(s))
+                            if isinstance(a, dict) and a.get("fingerprint")]
                     fp = None
-                    if s in acks:
+                    if pins:
                         rc = subprocess.run(
                             [sys.executable, scan_tool, "card",
                              os.path.join(pack_dir(), "skills", s), "--json"],
@@ -3563,10 +3598,15 @@ class Preflight:
                             fp = json.loads(rc.stdout).get("fingerprint")
                         except (json.JSONDecodeError, ValueError):
                             fp = None
-                    if fp and fp == acks[s].get("fingerprint"):
+                    if fp and fp in pins:
                         acked.append(s)
+                    elif isinstance(shipped.get(s), dict):
+                        tampered.append(s)
                     else:
                         residual.append(s)
+                if tampered:
+                    probs.append("skillscan 출하 승인 스킬 핀 불일치(설치 팩 변조 의심): %s — "
+                                 "cys init-pack --force 로 복원" % ", ".join(sorted(tampered)))
                 if residual:
                     warns.append("skillscan BLOCK %d건(미승인/핀 불일치): %s — 정지경계 정책 "
                                  "검토(master/CSO)" % (len(residual), ", ".join(sorted(residual)[:8])))
@@ -3574,22 +3614,37 @@ class Preflight:
                     acked_note = " · BLOCK 승인 %d건(핀 일치)" % len(acked)
         except Exception as e:
             probs.append("skillscan 집행 스캔 실행 불가(%s)" % e)
-        # (d) mcpgate rug-pull diff — 승인 스냅샷 저장소 기반(스냅샷 없으면 미가동 경고)
-        store = os.path.join(os.environ.get("JAVIS_ROOT") or os.getcwd(), "_round", "mcp_approved")
-        snaps = sorted(f for f in (os.listdir(store) if os.path.isdir(store) else [])
-                       if f.endswith(".json"))
-        if not snaps:
+        # (d) mcpgate rug-pull diff — 승인 스냅샷 저장소 기반(스냅샷 없으면 미가동 경고).
+        #     출처 = 팩 동봉 round/mcp_approved/(매니페스트 결속) + 작업폴더 _round/mcp_approved/.
+        stores = []
+        ship_store = os.path.join(pack_dir(), "round", "mcp_approved")
+        if os.path.isdir(ship_store):
+            ok_files = []
+            for f in sorted(os.listdir(ship_store)):
+                if not f.endswith(".json"):
+                    continue
+                snap, bad = _shipped_record("round/mcp_approved/" + f)
+                if bad:
+                    probs.append(bad)
+                elif snap is not None:
+                    ok_files.append(f)
+            stores.append((ship_store, ok_files))
+        store = os.path.join(ws_round, "mcp_approved")
+        stores.append((store, sorted(f for f in (os.listdir(store) if os.path.isdir(store) else [])
+                                     if f.endswith(".json"))))
+        if not any(snaps for _, snaps in stores):
             warns.append("mcpgate 승인 스냅샷 0 — MCP 등록 시 snapshot 의무화 미가동")
         else:
             changed = []
-            for f in snaps[:10]:
-                skill = os.path.join(pack_dir(), "skills", f[:-5])
-                r = subprocess.run(
-                    [sys.executable, os.path.join(pack_dir(), "bin", "javis_mcpgate.py"),
-                     "diff", skill, "--store", store, "--json"],
-                    capture_output=True, text=True, timeout=60)
-                if r.returncode != 0:
-                    changed.append(f[:-5])
+            for store, snaps in stores:
+                for f in snaps[:10]:
+                    skill = os.path.join(pack_dir(), "skills", f[:-5])
+                    r = subprocess.run(
+                        [sys.executable, os.path.join(pack_dir(), "bin", "javis_mcpgate.py"),
+                         "diff", skill, "--store", store, "--json"],
+                        capture_output=True, text=True, timeout=60)
+                    if r.returncode != 0:
+                        changed.append(f[:-5])
             if changed:
                 probs.append("mcpgate diff 변경 감지(rug-pull 의심): %s" % ", ".join(changed))
         if probs:

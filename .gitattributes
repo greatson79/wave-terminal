@@ -1,0 +1,4 @@
+# The pack is embedded byte-for-byte into the app and hashed into the pack manifest.
+# Keep it LF on every checkout (Windows runners default to core.autocrlf=true), so
+# installed directives, hooks and manifest hashes are identical on macOS and Windows.
+cysjavis-pack/** text=auto eol=lf

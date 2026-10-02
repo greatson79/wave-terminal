@@ -72,13 +72,15 @@ case "$CYS_ROLE" in
         } 2>/dev/null || :
       fi
       # MSYS timeout breaks the native caller ancestry. Keep cys under this live shell.
+      # Watchdog bound (seconds): slow-but-alive daemons must answer before fail-open.
+      CLAIM_WATCHDOG_S=5
       if CLAIM_TMP=$(mktemp); then
         cys claim-role "$CYS_ROLE" >"$CLAIM_TMP" 2>&1 &
         CLAIM_PID=$!
         (
           CLAIM_SLEEP=''
           trap '[ -z "$CLAIM_SLEEP" ] || { kill "$CLAIM_SLEEP" 2>/dev/null; wait "$CLAIM_SLEEP" 2>/dev/null; }; exit 0' TERM INT
-          sleep 2 & CLAIM_SLEEP=$!
+          sleep "$CLAIM_WATCHDOG_S" & CLAIM_SLEEP=$!
           wait "$CLAIM_SLEEP"
           kill -KILL "$CLAIM_PID" 2>/dev/null
         ) </dev/null >/dev/null 2>&1 &

@@ -165,7 +165,10 @@ for mode in ("ok", "identity"):
     check("8 trace write failure keeps claim " + mode, run_hook(env, role="master") == baseline)
     shutil.rmtree(tmp)
 
-# A hostile timeout on PATH must never be called; preserve the two-second bound.
+# A hostile timeout on PATH must never be called; preserve the five-second bound
+# (CLAIM_WATCHDOG_S in session-start.sh — G8: slow-but-alive daemons must not fail open).
+WATCHDOG_S = 5
+check("9 watchdog constant", "CLAIM_WATCHDOG_S=%d" % WATCHDOG_S in open(HOOK, encoding="utf-8").read())
 for mode in ("ok", "identity", "silent"):
     tmp = tempfile.mkdtemp(prefix="hook-watchdog-")
     env = setup(tmp, mode)
@@ -177,9 +180,9 @@ for mode in ("ok", "identity", "silent"):
     code, out, err = run_hook(env, role="master")
     elapsed = time.monotonic() - started
     check("9 timeout binary unused " + mode, not os.path.exists(os.path.join(tmp, "timeout-called")))
-    check("9 bounded completion " + mode, elapsed < 5, str(elapsed))
+    check("9 bounded completion " + mode, elapsed < WATCHDOG_S + 3, str(elapsed))
     if mode == "silent":
-        check("9 two-second deadline", 1.5 <= elapsed < 5, str(elapsed))
+        check("9 five-second deadline", WATCHDOG_S - 0.5 <= elapsed < WATCHDOG_S + 3, str(elapsed))
         check("9 deadline fail-open", "DIRECTIVE-BODY-MASTER" in out and "재확인 불가" in out)
     if mode == "identity":
         check("9 denial preserved", "caller (surface None)" in err and "DIRECTIVE-BODY-MASTER" not in out)

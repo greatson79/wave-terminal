@@ -103,7 +103,7 @@ def _line_is_exempt(line: str, ext: str) -> bool:
 def _scan_file(path: Path, root: Path) -> list[str]:
     """Return list of violation strings for this file."""
     rel = path.relative_to(root.parent)
-    if str(rel) in EXPLICIT_ALLOW_FILES:
+    if rel.as_posix() in EXPLICIT_ALLOW_FILES:
         return []
 
     ext = path.suffix.lower()
@@ -160,7 +160,7 @@ def _call_attr_name(func: ast.AST) -> str | None:
 def _scan_file_subprocess(path: Path, root: Path) -> list[str]:
     """Return env= violations for one .py file (Rule 2)."""
     rel = path.relative_to(root.parent)
-    if str(rel) in EXPLICIT_ALLOW_SUBPROCESS_FILES:
+    if rel.as_posix() in EXPLICIT_ALLOW_SUBPROCESS_FILES:
         return []
     try:
         src = path.read_text(encoding="utf-8", errors="strict")

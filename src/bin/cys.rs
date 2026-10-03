@@ -3813,8 +3813,11 @@ fn run_boot(cwd: Option<String>) -> i32 {
             continue;
         }
         println!("· {agent}: 기동 시작 (role={role})…");
-        if run_launch_agent(role, agent, cwd.clone()) == 0 {
+        let rc = run_launch_agent(role, agent, cwd.clone());
+        if rc == 0 {
             launched += 1;
+        } else if rc == LAUNCH_PENDING_RC {
+            println!("· {agent}: 다른 호출이 기동 중인 좌석을 재사용 — 완료를 기다리지 못함(실패로 세지 않음)");
         } else {
             failed += 1;
             println!("· {agent}: 기동 실패 — 나머지 노드는 계속 진행");
@@ -4232,7 +4235,7 @@ fn model_step(model_error: bool, fell_back: bool, fallback: Option<&str>) -> Mod
 enum LaunchError {
     Failed(String),
     GateTypingPending { sid: u64, operation: &'static str },
-    ReusedLaunchPending { sid: u64 },
+    ReusedLaunchPending { sid: u64, secs: u64 },
 }
 
 impl From<String> for LaunchError {
@@ -4258,9 +4261,11 @@ impl std::fmt::Display for LaunchError {
                  send_text 대기면 지침이 아직 붙여넣어지지 않았고, send_key 대기면 붙여넣은 \
                  지침이 제출되지 않았습니다. 새 좌석을 만들지 말고 기존 좌석에서 이어가세요."
             ),
-            Self::ReusedLaunchPending { sid } => write!(
+            Self::ReusedLaunchPending { sid, secs } => write!(
                 f,
-                "surface:{sid} retained (role 유지): earlier launch-agent has not completed within 30s"
+                "surface:{sid} retained (role 유지): earlier launch-agent has not completed within {secs}s \
+                 — 다른 호출이 아직 기동 중이거나 그 호출이 끝나지 못했습니다. 새 좌석을 만들지 말고 \
+                 기존 좌석 surface:{sid}에서 이어가세요."
             ),
         }
     }
@@ -4658,6 +4663,11 @@ fn sanitize_launch_cwd(cwd: String) -> String {
     cwd
 }
 
+const REUSED_LAUNCH_WAIT_SECS: u64 = 120;
+/// 다른 launch-agent 호출이 기동 중인 좌석을 재사용했고 아직 완료 신호가 없다 — 실패가 아니라 대기 중.
+/// boot/restore 는 이 값을 실패로 세지 않는다(2 = 주입 미완료와 구분).
+const LAUNCH_PENDING_RC: i32 = 3;
+
 fn run_launch_agent(role: &str, agent: &str, cwd: Option<String>) -> i32 {
     run_launch_agent_opts(role, agent, cwd, false, None, false, None)
 }
@@ -4665,7 +4675,11 @@ fn run_launch_agent(role: &str, agent: &str, cwd: Option<String>) -> i32 {
 /// 멱등 create가 돌려준 좌석은 이 호출이 소유하지 않는다. 이전 launch-agent의 완료
 /// 신호를 확인하고, 미완료라면 살아 있는 좌석을 닫거나 중복 주입하지 않는다.
 fn wait_for_reused_launch(sid: u64, role: &str) -> Result<(), LaunchError> {
-    for _ in 0..30 {
+    // 상한 = 멱등 캐시 TTL(120초) — 최초 기동 최악(≈90초)보다 길어야 정상 기동을 실패로 오판하지 않는다.
+    let secs = cys::env_compat("CYS_REUSED_LAUNCH_WAIT_SECS")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(REUSED_LAUNCH_WAIT_SECS);
+    for _ in 0..secs {
         let list = request("surface.list", json!({}))?;
         let surface = list["surfaces"]
             .as_array()
@@ -4680,12 +4694,13 @@ fn wait_for_reused_launch(sid: u64, role: &str) -> Result<(), LaunchError> {
         if !same_role || surface["exited"].as_bool() != Some(false) {
             return Err(LaunchError::Failed(format!("reused surface:{sid} no longer holds role {role}")));
         }
-        if surface["launch_complete"].as_bool() == Some(true) {
+        // 필드 부재 = 완료 신호를 모르는 옛 데몬 — 기다릴 수 없으므로 좌석을 그대로 돌려준다.
+        if surface["launch_complete"].is_null() || surface["launch_complete"].as_bool() == Some(true) {
             return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
-    Err(LaunchError::ReusedLaunchPending { sid })
+    Err(LaunchError::ReusedLaunchPending { sid, secs })
 }
 
 /// 절대지침(앵커1-b): 탭(타이틀) = 워크플로우 폴더명 — "{role}-{agent} · {폴더}".
@@ -4772,7 +4787,8 @@ fn run_launch_agent_opts(
             return Ok(());
         }
         created = Some(sid);
-        let launch_token = r["launch_token"].as_str().ok_or("create returned no launch token")?;
+        // 토큰 부재 = 완료 신호를 모르는 옛 데몬(앱 교체 뒤에도 살아 있는 경우) — 좌석을 닫지 않고 신호만 건너뛴다.
+        let launch_token = r["launch_token"].as_str();
         eprintln!("[launch-agent] {} created (role={role})", surface_ref(sid));
         // (W1) 데몬이 기록·반환한 권위 config_dir을 resume 게이트·restore 인라인의 결정론 소스로 쓴다.
         let recorded_cfg = r["claude_config_dir"].as_str().map(String::from);
@@ -4788,13 +4804,22 @@ fn run_launch_agent_opts(
             recorded_cfg.as_deref(),
             true,
         )?;
-        request("surface.launch_complete", json!({"surface_id": sid, "launch_token": launch_token}))?;
+        match launch_token {
+            Some(token) => {
+                request("surface.launch_complete", json!({"surface_id": sid, "launch_token": token}))?;
+            }
+            None => eprintln!("[launch-agent] note: 데몬이 완료 신호를 지원하지 않는다(구 데몬) — 신호 생략"),
+        }
         println!("{}", surface_ref(sid));
         Ok(())
     })();
     match result {
         Ok(()) => 0,
-        Err(e @ (LaunchError::GateTypingPending { .. } | LaunchError::ReusedLaunchPending { .. })) => {
+        Err(e @ LaunchError::ReusedLaunchPending { .. }) => {
+            eprintln!("[launch-agent] warning: {e}");
+            LAUNCH_PENDING_RC
+        }
+        Err(e @ LaunchError::GateTypingPending { .. }) => {
             // 0이 아닌 종료값은 주입 미완료다. 살아 있는 에이전트와 역할은 보존한다.
             eprintln!("[launch-agent] warning: {e}");
             2
@@ -5811,7 +5836,10 @@ fn run_restore(cwd: Option<String>, include_master: bool, no_resume: bool) -> i3
             let sess = entry["session_id"].as_str().map(String::from);
             // (W1) topology에 기록된 원 계정 config_dir을 넘긴다(구 topology=None → 기존 템플릿 동작).
             let cfg = entry["claude_config_dir"].as_str().map(String::from);
-            if run_launch_agent_opts(role, agent, target_cwd, !no_resume, sess, true, cfg) == 0 {
+            let rc = run_launch_agent_opts(role, agent, target_cwd, !no_resume, sess, true, cfg);
+            if rc == LAUNCH_PENDING_RC {
+                println!("· {role}: 다른 호출이 기동 중인 좌석을 재사용 — 완료를 기다리지 못함(실패로 세지 않음)");
+            } else if rc == 0 {
                 ok += 1;
                 if let Ok(r) = request("system.resolve_role", json!({"role": role})) {
                     if let Some(sid) = r["surface_id"].as_u64() {

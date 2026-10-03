@@ -1180,7 +1180,7 @@ pub fn cmdline_matches_agent(cmdline: &str, bin_base: &str) -> bool {
         base == bin_base || exe_ci || base.strip_suffix(".js").is_some_and(|b| b == bin_base)
     };
     // ① 문자열 전체를 실행 파일 경로(sysinfo exe/name)로 보고 basename 비교 — 공백·한글
-    // 사용자 폴더(`C:\Users\Kyle Choi\…\claude.exe`)를 토큰으로 쪼개기 전에 판정한다.
+    // 사용자 폴더(`C:\Users\Jane Doe\…\claude.exe`)를 토큰으로 쪼개기 전에 판정한다.
     if file_matches(cmdline.trim()) {
         return true;
     }
@@ -2001,13 +2001,13 @@ mod tests {
     #[test]
     fn cmdline_matches_agent_windows_space_korean_case_paths() {
         use super::cmdline_matches_agent as m;
-        assert!(m(r"C:\Users\Kyle Choi\.local\bin\claude.exe", "claude"));
-        assert!(m(r"C:\Users\최경민\AppData\Roaming\npm\Claude.EXE", "claude"));
+        assert!(m(r"C:\Users\Jane Doe\.local\bin\claude.exe", "claude"));
+        assert!(m(r"C:\Users\홍길동\AppData\Roaming\npm\Claude.EXE", "claude"));
         assert!(m(r"C:\USERS\KYLE CHOI\BIN\CLAUDE.EXE", "claude"));
-        assert!(!m(r"C:\Users\Kyle Choi\tools\claude-code-router.exe", "claude"));
-        assert!(!m(r"C:\Users\최경민\bin\node.exe", "claude"));
+        assert!(!m(r"C:\Users\Jane Doe\tools\claude-code-router.exe", "claude"));
+        assert!(!m(r"C:\Users\홍길동\bin\node.exe", "claude"));
         // mac/linux 는 확장자 없는 이름 정확 일치 그대로(대소문자 무시는 .exe 한정)
-        assert!(!m("/Users/Kyle Choi/bin/CLAUDE", "claude"));
+        assert!(!m("/Users/user/bin/CLAUDE", "claude"));
     }
 
     /// ★불변식 박제(2026-06-12 실측 결함): npm 래퍼 에이전트의 모든 실행 형태가 생존으로

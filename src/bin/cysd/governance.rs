@@ -1155,6 +1155,14 @@ fn check_load(daemon: &Daemon, last_alert: &mut f64) {
 /// (2026-06-12 실측). false-negative(오살)가 false-positive보다 훨씬 위험하므로 매칭을
 /// 넓힌다 — 검사 범위는 어차피 해당 surface의 자손 프로세스로 한정된다.
 pub fn cmdline_matches_agent(cmdline: &str, bin_base: &str) -> bool {
+    // Windows 프로세스명은 `claude.exe` — 끝의 `.exe`(대소문자 무시)는 이름 비교에서 뗀다.
+    fn strip_exe(s: &str) -> &str {
+        match s.len().checked_sub(4) {
+            Some(i) if s.is_char_boundary(i) && s[i..].eq_ignore_ascii_case(".exe") => &s[..i],
+            _ => s,
+        }
+    }
+    let bin_base = strip_exe(bin_base);
     if bin_base.is_empty() {
         return false;
     }
@@ -1165,8 +1173,11 @@ pub fn cmdline_matches_agent(cmdline: &str, bin_base: &str) -> bool {
     let pkg_cli = format!("{bin_base}-cli");
     let pkg_code = format!("{bin_base}-code");
     cmdline.split_whitespace().any(|tok| {
-        let base = tok.rsplit(['/', '\\']).next().unwrap_or(tok);
-        if base == bin_base || base.strip_suffix(".js").is_some_and(|b| b == bin_base) {
+        let raw = tok.rsplit(['/', '\\']).next().unwrap_or(tok);
+        let base = strip_exe(raw);
+        // `.exe` 토큰(Windows 파일명)만 대소문자 무시 — mac/linux 비교는 종전대로 정확 일치.
+        let exe_ci = base.len() != raw.len() && base.eq_ignore_ascii_case(bin_base);
+        if base == bin_base || exe_ci || base.strip_suffix(".js").is_some_and(|b| b == bin_base) {
             return true;
         }
         // 경로 세그먼트 매칭은 실제 경로 토큰에서만 (단어 인자 오탐 방지)
@@ -1963,6 +1974,19 @@ mod tests {
         let (kept, killed) = plan_duplicate_kills(ages, now, 45.0);
         assert_eq!(kept, 10);
         assert_eq!(killed, vec![20], "정확히 45초는 kill 적격(>=)");
+    }
+
+    /// Windows: 프로세스명 `claude.exe`(대소문자 무관)도 bin_base `claude` 로 생존 매칭.
+    #[test]
+    fn cmdline_matches_agent_ignores_windows_exe_suffix() {
+        use super::cmdline_matches_agent as m;
+        assert!(m("claude.exe", "claude"));
+        assert!(m("CLAUDE.EXE --resume", "claude"));
+        assert!(m(r"C:\Users\u\AppData\Roaming\npm\claude.exe", "claude"));
+        assert!(m("claude", "claude.exe"));
+        assert!(!m("claude-code-router.exe", "claude"));
+        assert!(!m(r"C:\tools\claude-code-router.exe", "claude"));
+        assert!(!m(".exe", ""));
     }
 
     /// ★불변식 박제(2026-06-12 실측 결함): npm 래퍼 에이전트의 모든 실행 형태가 생존으로

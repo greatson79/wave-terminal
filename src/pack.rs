@@ -475,6 +475,10 @@ pub(crate) fn decide_file_action(
     if exists && is_seed_once(rel) {
         return FileAction::Keep { adopt_hash: false, new_pending: false };
     }
+    // 설치-당시 해시 그대로 = 사용자 비수정. 디스크가 그 배포본의 개행 변형(LF 매니페스트 + CRLF 디스크)이어도 비수정.
+    let unmodified = |d: &str| {
+        manifest_hash.is_some_and(|m| m == content_hash(d) || m == content_hash(&d.replace("\r\n", "\n")))
+    };
     // 개행만 다른(CRLF↔LF) 사본 = 배포본 그대로(Windows v0.2.3 이 CRLF 로 설치) — 사용자 수정이
     // 아니므로 .new/.user 없이 LF 임베드로 덮는다. 실제 내용 편집은 아래 기존 분기가 그대로 보존.
     if let Some(d) = disk {
@@ -498,7 +502,7 @@ pub(crate) fn decide_file_action(
             Some(d) if d == embed => {
                 return FileAction::Keep { adopt_hash: true, new_pending: false };
             }
-            Some(d) if manifest_hash == Some(content_hash(d).as_str()) => {
+            Some(d) if unmodified(d) => {
                 // 설치-당시 해시 그대로(사용자 비수정) + 임베드가 더 새 버전 → 갱신.
                 return FileAction::Write { heal_user_copy: false };
             }
@@ -510,7 +514,7 @@ pub(crate) fn decide_file_action(
                 }
                 // system: 강제 치유(P0-4 — 임베드 진실). 진짜 사용자 수정본이면 먼저 .user 보존.
                 let heal = matches!(disk, Some(d) if d != embed
-                    && manifest_hash != Some(content_hash(d).as_str()));
+                    && !unmodified(d));
                 return FileAction::Write { heal_user_copy: heal };
             }
         }
@@ -518,7 +522,7 @@ pub(crate) fn decide_file_action(
     // 신규 생성 또는 force 갱신 — force 로 수정본을 덮을 때도 사용자본은 보존한다(파괴 0).
     let heal = exists
         && matches!(disk, Some(d) if d != embed
-            && manifest_hash != Some(content_hash(d).as_str()));
+            && !unmodified(d));
     FileAction::Write { heal_user_copy: heal }
 }
 
@@ -2546,6 +2550,19 @@ mod tests {
         }
         assert_eq!(decide_file_action("soul.md", embed, true, Some("A\r\nEDIT\r\n"), None, false),
                    FileAction::Keep { adopt_hash: false, new_pending: true }, "실제 편집 보존");
+
+        // 옛 배포본(매니페스트=옛 내용 LF 해시)의 CRLF 사본 + 임베드는 새 내용.
+        let (old, old_crlf, new_embed) = ("OLD\nX\n", "OLD\r\nX\r\n", "NEW\nX\n");
+        let mh = content_hash(old);
+        assert_eq!(decide_file_action("bin/x.py", new_embed, true, Some(old_crlf), Some(&mh), false),
+                   w, "system: 비수정 CRLF 사본 → 갱신(.user 없음)");
+        assert_eq!(decide_file_action("bin/x.py", new_embed, true, Some("OLD\r\nEDIT\r\n"), Some(&mh), false),
+                   FileAction::Write { heal_user_copy: true }, "system: 실편집 → .user 보존 후 치유");
+        // user 소유는 LF 사용자와 같은 정책: 내용이 바뀐 신버전은 .new 병치(개행 때문에 달라지지 않음).
+        assert_eq!(decide_file_action("soul.md", new_embed, true, Some(old_crlf), Some(&mh), false),
+                   decide_file_action("soul.md", new_embed, true, Some(old), Some(&mh), false), "user: CRLF = LF 동작");
+        assert_eq!(decide_file_action("soul.md", new_embed, true, Some("OLD\r\nEDIT\r\n"), Some(&mh), false),
+                   FileAction::Keep { adopt_hash: false, new_pending: true }, "user: 실편집 보존·.new");
 
         // 디스크 통합: CRLF 배포본 soul.md → LF 로 교체·.new 없음 / CRLF+편집 CSO 디렉티브 → 보존 + .new.
         let base = std::env::temp_dir().join(format!("cys-crlf-{}", std::process::id()));

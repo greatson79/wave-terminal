@@ -4226,6 +4226,81 @@ fn model_step(model_error: bool, fell_back: bool, fallback: Option<&str>) -> Mod
     }
 }
 
+/// 실제 관측한 첫기동 관문 뒤 typing_guard만 좌석을 보존한다.
+/// 별도 오류형으로 구분해 다른 기동/RPC 실패의 역할 롤백을 유지한다.
+#[derive(Debug)]
+enum LaunchError {
+    Failed(String),
+    GateTypingPending { sid: u64, operation: &'static str },
+}
+
+impl From<String> for LaunchError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+impl From<&str> for LaunchError {
+    fn from(message: &str) -> Self {
+        Self::Failed(message.to_string())
+    }
+}
+
+impl std::fmt::Display for LaunchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Failed(message) => write!(f, "{message}"),
+            Self::GateTypingPending { sid, operation } => write!(
+                f,
+                "surface:{sid} retained (role 유지): directive injection incomplete at {operation} \
+                 — typing_guard still active after 30s. Wave 창의 입력을 확인해 주세요. \
+                 send_text 대기면 지침이 아직 붙여넣어지지 않았고, send_key 대기면 붙여넣은 \
+                 지침이 제출되지 않았습니다. 새 좌석을 만들지 말고 기존 좌석에서 이어가세요."
+            ),
+        }
+    }
+}
+
+/// 거부된 RPC만 재시도한다 — 수락된 지침 붙여넣기를 중복 전송하지 않는다.
+/// 관문 뒤에도 사람이 입력 중일 수 있으므로 authoritative 면제를 요청하지 않는다.
+fn inject_after_first_run_gate(sid: u64, text: &str) -> Result<(), LaunchError> {
+    let wrapped = format!("\x1b[200~{text}\x1b[201~");
+    for (method, params) in [
+        (
+            "surface.send_text",
+            json!({"surface_id": sid, "text": wrapped, "quiet": true}),
+        ),
+        (
+            "surface.send_key",
+            json!({"surface_id": sid, "key": "Return"}),
+        ),
+    ] {
+        let start = std::time::Instant::now();
+        loop {
+            match request(method, params.clone()) {
+                Ok(_) => break,
+                Err(e) if e.starts_with("typing_guard:") => {
+                    if start.elapsed() >= std::time::Duration::from_secs(30) {
+                        return Err(LaunchError::GateTypingPending {
+                            sid,
+                            operation: method,
+                        });
+                    }
+                    if start.elapsed() < std::time::Duration::from_secs(1) {
+                        eprintln!("[launch-agent] {method}: waiting for human input to stop (max 30s)");
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        if method == "surface.send_text" {
+            std::thread::sleep(std::time::Duration::from_millis(800));
+        }
+    }
+    Ok(())
+}
+
 /// launch-agent(새 surface)와 node-recover(기존 surface 재기동)가 공유한다.
 /// model_by_role 폴백(master opus → sonnet)은 여기서 1회만 처리한다.
 #[allow(clippy::too_many_arguments)]
@@ -4239,7 +4314,7 @@ fn boot_agent_on_surface(
     restore: bool,
     cwd: Option<&str>,
     config_dir: Option<&str>,
-) -> Result<(), String> {
+) -> Result<(), LaunchError> {
     let (first, fallback) = model_plan(spec, role)?;
     let mut model = first;
     let mut fell_back = false;
@@ -4255,7 +4330,8 @@ fn boot_agent_on_surface(
                 return Err(format!(
                     "agent '{agent}' model error on screen (--model {}) — 폴백 후에도 실패",
                     model.as_deref().unwrap_or("-")
-                ))
+                )
+                .into())
             }
             ModelStep::Retry(fb) => {
                 if role == "master" {
@@ -4308,7 +4384,7 @@ fn launch_once_on_surface(
     // config_dir=None이면 게이트가 cys::resolve_claude_config_dir()로 best-effort 해소한다.
     cwd: Option<&str>,
     config_dir: Option<&str>,
-) -> Result<bool, String> {
+) -> Result<bool, LaunchError> {
     let mut cmd = cmd_with_model(spec, model)?;
     if resume {
         if let Some(arg) = spec["resume_arg"].as_str() {
@@ -4397,7 +4473,8 @@ fn launch_once_on_surface(
             ReadyStep::Failed => {
                 return Err(format!(
                     "agent '{agent}' failed to start (command error on screen) — check cmd in agents.json"
-                ))
+                )
+                .into())
             }
             // ★주인님 지시(2026-10-03): 첫기동 관문 창이면 키 0 — 사람이 Wave 창에서 고른다.
             // 실패로 치지 않고 마감도 멈춘다(실패 = 호출부가 surface 를 닫는다 = 좌석 소실).
@@ -4441,13 +4518,18 @@ fn launch_once_on_surface(
              aborted (셸 오주입 차단). 실패 surface는 정리된다. 마지막 화면 꼬리:\n{tail}\n\
              → agents.json의 cmd를 점검하고 `cys launch-agent --role <role> --agent {agent}`로 \
              재시도하라"
-        ));
+        )
+        .into());
     }
     // marker 감지 직후 TUI 입력 활성화까지 약간의 여유
     std::thread::sleep(std::time::Duration::from_secs(2));
 
     // 3) 지침 주입 — bracketed paste로 감싸 단일 입력으로 전달
-    inject_text(sid, &directive)?;
+    if gate_announced {
+        inject_after_first_run_gate(sid, &directive)?;
+    } else {
+        inject_text(sid, &directive)?;
+    }
 
     // 4) 주입 확인: 화면에 지침 머리말이 나타났는지 검사 (실패 시 경고)
     std::thread::sleep(std::time::Duration::from_secs(3));
@@ -4618,7 +4700,7 @@ fn run_launch_agent_opts(
         .map(sanitize_launch_cwd);
     // 기동 실패 시 정리용 — 만들어 둔 surface가 role을 점유한 채 남으면 재기동이 차단된다
     let mut created: Option<u64> = None;
-    let result = (|| -> Result<(), String> {
+    let result = (|| -> Result<(), LaunchError> {
         let spec = load_agent_spec(agent)?;
         // (E-f) 멱등 기동 키 — 같은 role+agent+cwd 재시도가 중복 surface를 만들지 않게
         // 데몬이 단기 캐시(create_idem)로 기존 surface를 재반환하도록. 단일 머신·단일
@@ -4669,6 +4751,11 @@ fn run_launch_agent_opts(
     })();
     match result {
         Ok(()) => 0,
+        Err(e @ LaunchError::GateTypingPending { .. }) => {
+            // 0이 아닌 종료값은 주입 미완료다. 살아 있는 에이전트와 역할은 보존한다.
+            eprintln!("[launch-agent] warning: {e}");
+            2
+        }
         Err(e) => {
             eprintln!("error: {e}");
             if let Some(sid) = created {
@@ -5609,7 +5696,8 @@ fn run_node_recover(surface: Option<String>, role: Option<String>) -> i32 {
             false,
             rec_cwd.as_deref(),
             rec_cfg.as_deref(),
-        )?;
+        )
+        .map_err(|e| e.to_string())?;
         inject_text(sid, "[RECOVER] 너는 방금 재기동되었다. _round/SESSION_STATE.md와 자기 TODO 파일을 읽어 작업 기억을 복원한 뒤 master에게 복귀를 1줄 push로 보고하라. 작업 재개는 master 지시를 따른다.")?;
         println!("recovered surface:{sid} ({agent})");
         Ok(())

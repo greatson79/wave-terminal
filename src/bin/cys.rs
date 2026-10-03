@@ -2926,9 +2926,9 @@ fn run_schedule(action: ScheduleAction) -> i32 {
 /// --no-install-hook으로만 끌 수 있다.
 fn run_init_pack(force: bool, no_install_hook: bool, claude_settings: Option<String>) -> i32 {
     let dir = cys::pack::pack_dir();
-    // §3.1 팩 atomic swap: 파일별 in-place write(중단 시 반쯤 쓰인 팩) 대신 staging 전개→검증→
-    // 원자 rename 교체(pack_dir.prev 1세대 보존). 중단은 기존 팩을 건드리지 않는다.
-    let (written, kept) = match cys::pack::install_staged(force) {
+    // 제자리 설치(파일별 원자 write): 디렉터리 통째 교체(staging→swap)는 그 사이 라이브 좌석이
+    // 팩에 쓴 round/·memory/ 를 pack.prev 로 밀어내 소실시켰다(C10). 임베드 외 파일은 불가침.
+    let (written, kept) = match cys::pack::install(force) {
         Ok(wk) => wk,
         Err(e) => {
             eprintln!("error: {e}");

@@ -1172,12 +1172,20 @@ pub fn cmdline_matches_agent(cmdline: &str, bin_base: &str) -> bool {
     // 죽음 은폐 → node-recover 거부의 역결함).
     let pkg_cli = format!("{bin_base}-cli");
     let pkg_code = format!("{bin_base}-code");
-    cmdline.split_whitespace().any(|tok| {
+    let file_matches = |tok: &str| {
         let raw = tok.rsplit(['/', '\\']).next().unwrap_or(tok);
         let base = strip_exe(raw);
         // `.exe` 토큰(Windows 파일명)만 대소문자 무시 — mac/linux 비교는 종전대로 정확 일치.
         let exe_ci = base.len() != raw.len() && base.eq_ignore_ascii_case(bin_base);
-        if base == bin_base || exe_ci || base.strip_suffix(".js").is_some_and(|b| b == bin_base) {
+        base == bin_base || exe_ci || base.strip_suffix(".js").is_some_and(|b| b == bin_base)
+    };
+    // ① 문자열 전체를 실행 파일 경로(sysinfo exe/name)로 보고 basename 비교 — 공백·한글
+    // 사용자 폴더(`C:\Users\Kyle Choi\…\claude.exe`)를 토큰으로 쪼개기 전에 판정한다.
+    if file_matches(cmdline.trim()) {
+        return true;
+    }
+    cmdline.split_whitespace().any(|tok| {
+        if file_matches(tok) {
             return true;
         }
         // 경로 세그먼트 매칭은 실제 경로 토큰에서만 (단어 인자 오탐 방지)
@@ -1987,6 +1995,19 @@ mod tests {
         assert!(!m("claude-code-router.exe", "claude"));
         assert!(!m(r"C:\tools\claude-code-router.exe", "claude"));
         assert!(!m(".exe", ""));
+    }
+
+    /// Windows 사용자 폴더 공백·한글·대문자 확장자 — exe 경로 basename 으로 생존 매칭.
+    #[test]
+    fn cmdline_matches_agent_windows_space_korean_case_paths() {
+        use super::cmdline_matches_agent as m;
+        assert!(m(r"C:\Users\Kyle Choi\.local\bin\claude.exe", "claude"));
+        assert!(m(r"C:\Users\최경민\AppData\Roaming\npm\Claude.EXE", "claude"));
+        assert!(m(r"C:\USERS\KYLE CHOI\BIN\CLAUDE.EXE", "claude"));
+        assert!(!m(r"C:\Users\Kyle Choi\tools\claude-code-router.exe", "claude"));
+        assert!(!m(r"C:\Users\최경민\bin\node.exe", "claude"));
+        // mac/linux 는 확장자 없는 이름 정확 일치 그대로(대소문자 무시는 .exe 한정)
+        assert!(!m("/Users/Kyle Choi/bin/CLAUDE", "claude"));
     }
 
     /// ★불변식 박제(2026-06-12 실측 결함): npm 래퍼 에이전트의 모든 실행 형태가 생존으로

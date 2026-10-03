@@ -1131,22 +1131,29 @@ fn xml_escape(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-/// 현재 사용자 식별자("DOMAIN\\User") — 태스크 principal/trigger 의 UserId. whoami 우선(정확), env 폴백.
+/// env(USERDOMAIN·USERNAME)로 "DOMAIN\\User" 조립 — 순수(테스트 가능). USERNAME 부재·빈값 = None.
+#[cfg(any(windows, test))]
+fn user_id_from_env(domain: Option<&str>, user: Option<&str>) -> Option<String> {
+    let user = user.filter(|u| !u.is_empty())?;
+    match domain {
+        Some(d) if !d.is_empty() => Some(format!("{d}\\{user}")),
+        _ => Some(user.to_string()),
+    }
+}
+
+/// 현재 사용자 식별자("DOMAIN\\User") — 태스크 principal/trigger 의 UserId. env 우선(std::env 는 와이드 API 라
+/// 비ASCII 계정명 안전), whoami 는 USERNAME 부재 시에만 폴백 — whoami 는 파이프 시 OEM 코드페이지로 써서
+/// `Kyle 최` 가 `kyle ?` 로 깨지고 작업 스케줄러가 UserId 매핑을 거부한다.
 #[cfg(windows)]
 fn current_user_id() -> Option<String> {
-    if let Ok(out) = std::process::Command::new("whoami").output() {
-        if out.status.success() {
-            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !s.is_empty() {
-                return Some(s);
-            }
-        }
+    let d = std::env::var("USERDOMAIN").ok();
+    let u = std::env::var("USERNAME").ok();
+    if let Some(id) = user_id_from_env(d.as_deref(), u.as_deref()) {
+        return Some(id);
     }
-    let user = std::env::var("USERNAME").ok()?;
-    match std::env::var("USERDOMAIN") {
-        Ok(d) if !d.is_empty() => Some(format!("{d}\\{user}")),
-        _ => Some(user),
-    }
+    let out = std::process::Command::new("whoami").output().ok()?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !s.is_empty()).then_some(s)
 }
 
 /// cysd 작업 스케줄러 태스크 XML. LogonTrigger(현재 사용자) + RestartOnFailure(PT1M×10) +
@@ -7320,6 +7327,17 @@ extern "C" fn scoped_cleanup_handler(sig: libc::c_int) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn user_id_from_env_keeps_non_ascii_and_falls_back() {
+        use super::user_id_from_env;
+        assert_eq!(user_id_from_env(Some("RUNNER"), Some("홍길동 최")).as_deref(), Some("RUNNER\\홍길동 최"));
+        assert_eq!(user_id_from_env(Some("RUNNER"), Some("Jane Doe")).as_deref(), Some("RUNNER\\Jane Doe"));
+        assert_eq!(user_id_from_env(None, Some("홍길동")).as_deref(), Some("홍길동"));
+        assert_eq!(user_id_from_env(Some(""), Some("홍길동")).as_deref(), Some("홍길동"));
+        assert_eq!(user_id_from_env(Some("RUNNER"), None), None);
+        assert_eq!(user_id_from_env(Some("RUNNER"), Some("")), None);
+    }
+
     use super::*;
 
     // ★루트 cwd 교정(2026-07-15 실사고): 루트류는 home으로, 정상 경로는 불변.

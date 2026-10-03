@@ -689,6 +689,10 @@ async fn fire_push(daemon: &Arc<Daemon>, job: &Job) -> Result<String, String> {
 /// 동시 발화·동시 배달과 섞이지 않는다 (메시지 병합·오염 차단).
 fn inject(daemon: &Arc<Daemon>, sid: u64, text: &str) -> Result<(), String> {
     let surface = daemon.get_surface(sid).ok_or("surface gone")?;
+    // ★첫기동 관문 창 위 주입 금지(Return 이 `No, exit` 를 누른다) — 이번 발화는 에러로 남긴다.
+    if let Some(gate) = surface.first_run_gate() {
+        return Err(format!("first-run gate on screen ({gate}) — not injected; user must choose in the Wave window"));
+    }
     surface
         .write_tx
         .try_send(crate::state::WriteReq::Inject {

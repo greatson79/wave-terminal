@@ -113,6 +113,18 @@ fn param_dim(params: &Value, key: &str, fallback: u16, max: u64) -> Result<u16, 
 /// feed.push 자동 request_id의 프로세스 내 유일성 보장 카운터
 static FEED_REQ_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// 첫기동 관문 창이 떠 있으면 거부 응답(`first_run_gate`). 호출자는 사람이 고른 뒤 재시도한다.
+fn refuse_on_first_run_gate(surface: &crate::state::Surface, id: &Value) -> Option<Value> {
+    let gate = surface.first_run_gate()?;
+    Some(err_response(
+        id,
+        "first_run_gate",
+        &format!(
+            "first-run gate on screen ({gate}) — no key is sent; the user must choose in the Wave window"
+        ),
+    ))
+}
+
 /// PTY 쓰기 채널 send 결과 → RPC 응답 (성공 시 None)
 fn try_write(
     surface: &crate::state::Surface,
@@ -945,6 +957,13 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                     json!({"surface_id": sid, "queued": true, "depth": depth}),
                 ));
             }
+            // ★첫기동 관문 창 위 프로그램 직접 주입 금지(숫자·Return 이 `No, exit` 를 고른다).
+            // 사람 입력(human)만 통과 — 고르는 것은 사람이다. --queued 는 위에서 큐에 남는다.
+            if !human {
+                if let Some(e) = refuse_on_first_run_gate(&surface, &id) {
+                    return Reply::Single(e);
+                }
+            }
             // T3-13 타이핑 가드: 사람이 방금(기본 3초) 입력 중인 pane에 원격 직접 주입 금지.
             // 무음 큐잉 대신 명시 에러 — 후속 send-key Return이 사람의 미완성 입력을
             // 실행해버리는 최악 경로를 차단한다 (--queued는 quiet 대기 배달이라 허용).
@@ -1084,6 +1103,10 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                     &id,
                     json!({"surface_id": sid, "key": key, "queued": true, "depth": depth}),
                 ));
+            }
+            // ★첫기동 관문 창이면 어떤 키도 쓰지 않는다(authoritative 포함 — send_key 는 전부 프로그램 경로).
+            if let Some(e) = refuse_on_first_run_gate(&surface, &id) {
+                return Reply::Single(e);
             }
             // 권위 주입(send_text와 동일 근거)은 타이핑 가드를 면제 — launch-agent/reinject가
             // 디렉티브 주입 후 보내는 제출 Return이 사람-입력 잔향에 막히지 않게 한다.
@@ -4129,6 +4152,67 @@ mod tests {
             "agent 등록 pane의 clear_first는 통과해야 한다 (응답: {resp})"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ★주인님 지시(2026-10-03): 첫기동 관문 화면(구 신뢰·2.1.261 신뢰·Bypass 면책)에는 프로그램
+    /// 경로가 키 0 — send_key(authoritative 포함)·비-human send_text 는 거부, --queued 는 큐에 남고
+    /// 배달자도 꺼내지 않는다. 사람 입력(human)은 통과(고르는 것은 사람). 정상 화면은 종전대로 배달.
+    #[test]
+    fn first_run_gate_screen_gets_zero_program_keys() {
+        use cys::first_run_gate::fixtures::*;
+        let _g = ACL_ENV_LOCK.lock().unwrap();
+        let (daemon, dir, _dirs) =
+            daemon_with_acl("first-run-gate", r#"{"default":"allow","rules":[]}"#);
+        let rpc = |method: &str, params: Value| {
+            let req = Request { id: json!(1), method: method.into(), params };
+            let Reply::Single(resp) = dispatch(&daemon, req, None) else {
+                panic!("expected single reply");
+            };
+            resp
+        };
+        for (name, screen, is_gate) in [
+            ("old-trust", OLD_TRUST, true),
+            ("trust-2.1.261", TRUST_2_1_261, true),
+            ("bypass", BYPASS, true),
+            ("ready", READY, false),
+        ] {
+            let s = daemon
+                .create_surface(None, Some("sleep 30".into()), None, None, 24, 80)
+                .expect("create surface");
+            daemon.surfaces.lock().unwrap().insert(s.id, s.clone());
+            s.parser.lock().unwrap().process(screen.replace('\n', "\r\n").as_bytes());
+            assert_eq!(s.first_run_gate().is_some(), is_gate, "{name}");
+
+            for (method, params) in [
+                ("surface.send_key", json!({"surface_id": s.id, "key": "Return", "authoritative": true})),
+                ("surface.send_key", json!({"surface_id": s.id, "key": "2"})),
+                ("surface.send_text", json!({"surface_id": s.id, "text": "1", "authoritative": true})),
+            ] {
+                let r = rpc(method, params);
+                if is_gate {
+                    assert_eq!(r["error"]["code"], json!("first_run_gate"), "{name}/{method}: {r}");
+                } else {
+                    assert!(r["error"].is_null(), "{name}/{method} 정상 화면은 배달: {r}");
+                }
+            }
+            // 사람 입력은 관문에서도 통과한다.
+            let r = rpc("surface.send_text", json!({"surface_id": s.id, "text": "", "human": true}));
+            assert!(r["error"].is_null(), "{name} human: {r}");
+
+            // --queued Return 은 큐에 남고, 배달자는 관문 화면에서 꺼내지 않는다.
+            *s.last_human_input.lock().unwrap() = None;
+            let r = rpc("surface.send_key", json!({"surface_id": s.id, "key": "Return", "queued": true}));
+            assert_eq!(r["result"]["queued"], json!(true), "{name}: {r}");
+            std::thread::sleep(std::time::Duration::from_millis(300)); // 에코 출력이 last_output 을 갱신할 틈
+            *s.last_output.lock().unwrap() =
+                std::time::Instant::now() - std::time::Duration::from_secs(600);
+            crate::governance::deliver_queued(&daemon, &mut std::collections::HashMap::new());
+            let left = s.pending_queue.lock().unwrap().len();
+            assert_eq!(left, if is_gate { 1 } else { 0 }, "{name}: 큐 잔량");
+            s.pending_queue.lock().unwrap().clear();
+            let _ = s.child.lock().unwrap().kill();
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

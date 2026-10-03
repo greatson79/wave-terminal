@@ -300,6 +300,15 @@ pub struct Config {
     pub max_active_workers: usize,
 }
 
+impl Surface {
+    /// ★주인님 지시(2026-10-03): 보이는 화면에 첫기동 관문(폴더신뢰·Bypass 면책)이 떠 있으면 그 이름.
+    /// `Some` 이면 프로그램 경로는 키·텍스트를 PTY 에 쓰지 않는다(사람이 Wave 창에서 고른다).
+    pub fn first_run_gate(&self) -> Option<&'static str> {
+        let text = self.parser.lock().unwrap_or_else(|e| e.into_inner()).screen().contents();
+        cys::first_run_gate::identify(&text)
+    }
+}
+
 impl Config {
     pub fn from_env() -> Self {
         let cores = std::thread::available_parallelism()

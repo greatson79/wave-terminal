@@ -3979,6 +3979,34 @@ fn screen_tail_is_shell_prompt(text: &str) -> bool {
     t.ends_with('%') || t.ends_with('$') || t.ends_with('#') || t.ends_with('❯')
 }
 
+/// readiness 폴링 한 틱의 판정. ★키를 보내는 갈래가 없다 — 관문은 `Gate`(대기)뿐이다.
+#[derive(Debug, PartialEq, Eq)]
+enum ReadyStep {
+    Failed,
+    Gate(&'static str),
+    Ready,
+    Wait,
+}
+
+fn readiness_step(text: &str, ready_marker: Option<&str>, waited: u64, delay: u64) -> ReadyStep {
+    let flat: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    if screen_shows_launch_failure(&flat) {
+        return ReadyStep::Failed;
+    }
+    // 관문 창에도 `❯` 가 있어 marker 보다 먼저 본다(관문 위 주입 = Return 이 No, exit 를 누른다).
+    if let Some(id) = cys::first_run_gate::identify(text) {
+        return ReadyStep::Gate(id);
+    }
+    match ready_marker {
+        Some(m) if text.contains(m) => ReadyStep::Ready,
+        // marker 미정의 에이전트(codex 등)의 시간 폴백 — 단 화면 끝이 여전히
+        // 셸 프롬프트(%·$)면 에이전트(TUI)가 안 뜬 것이다(조용한 즉시 종료 등):
+        // 시간만 믿고 주입하면 디렉티브가 zsh로 들어간다(맹주입 잔존 경로 차단).
+        None if waited >= delay && !screen_tail_is_shell_prompt(text) => ReadyStep::Ready,
+        _ => ReadyStep::Wait,
+    }
+}
+
 /// 기동 화면(공백 제거 평탄화 문자열)에 "명령을 못 찾았다"는 셸 오류가 떴는지 판정.
 /// readiness 폴링이 죽은 셸에 지침을 주입하는 것을 막는 사망 감지의 핵심 술어다.
 /// Unix sh/zsh/bash뿐 아니라 Windows PowerShell·cmd.exe의 표현까지 덮어
@@ -4192,7 +4220,7 @@ fn boot_agent_on_surface(
         delay.max(30) * 2
     );
 
-    // 2) 준비 감지 폴링: 폴더 신뢰 프롬프트는 자동 확인, ready_marker가 보이면 주입 단계로
+    // 2) 준비 감지 폴링: 첫기동 관문은 키 0·대기, ready_marker가 보이면 주입 단계로
     let ready_marker = spec["ready_marker"].as_str().map(|s| s.to_string());
     // ★Phase 5 ①b: restore 모드에선 역할별 readiness 대기를 짧게 캡한다(타임아웃+continue). 한
     // 역할이 readiness에서 stall해도 run_restore가 실패로 처리해 다음 역할로 진행하게 해, 한 노드
@@ -4206,43 +4234,37 @@ fn boot_agent_on_surface(
     let mut waited = 0u64;
     let mut ready = false;
     let mut last_screen = String::new();
+    let mut gate_announced = false;
     while waited < max_wait_secs {
         std::thread::sleep(std::time::Duration::from_millis(2500));
         waited += 2; // ~2.5s per tick (보수적 집계)
         let screen = request("surface.read_text", json!({"surface_id": sid}))?;
         let text = screen["text"].as_str().unwrap_or("");
         last_screen = text.to_string();
-        let flat: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-        if screen_shows_launch_failure(&flat) {
-            return Err(format!(
-                "agent '{agent}' failed to start (command error on screen) — check cmd in agents.json"
-            ));
-        }
-        if flat.contains("trustthisfolder") || flat.contains("Doyoutrust") {
-            eprintln!("[launch-agent] folder-trust prompt detected → confirming");
-            request(
-                "surface.send_key",
-                json!({"surface_id": sid, "key": "Return", "authoritative": true}),
-            )?;
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            continue;
-        }
-        match &ready_marker {
-            Some(m) if text.contains(m.as_str()) => {
-                ready = true;
-                break;
+        match readiness_step(text, ready_marker.as_deref(), waited, delay) {
+            ReadyStep::Failed => {
+                return Err(format!(
+                    "agent '{agent}' failed to start (command error on screen) — check cmd in agents.json"
+                ))
             }
-            // marker 미정의 에이전트(codex 등)의 시간 폴백 — 단 화면 끝이 여전히
-            // 셸 프롬프트(%·$)면 에이전트(TUI)가 안 뜬 것이다(조용한 즉시 종료 등):
-            // 시간만 믿고 주입하면 디렉티브가 zsh로 들어간다(맹주입 잔존 경로 차단).
-            None if waited >= delay => {
-                if screen_tail_is_shell_prompt(text) {
-                    continue; // 아직 셸 — max_wait까지 더 기다린다(못 뜨면 아래 Err)
+            // ★주인님 지시(2026-10-03): 첫기동 관문 창이면 키 0 — 사람이 Wave 창에서 고른다.
+            // 실패로 치지 않고 마감도 멈춘다(실패 = 호출부가 surface 를 닫는다 = 좌석 소실).
+            ReadyStep::Gate(id) => {
+                if !gate_announced {
+                    gate_announced = true;
+                    eprintln!(
+                        "[launch-agent] first-run gate on screen ({id}) — waiting for the user to \
+                         choose in the Wave window (no key will be sent). Wave 창에서 \
+                         'Yes, I trust this folder'(또는 해당 동의)를 골라 주세요."
+                    );
                 }
+                waited -= 2;
+            }
+            ReadyStep::Ready => {
                 ready = true;
                 break;
             }
-            _ => {}
+            ReadyStep::Wait => {}
         }
     }
     if !ready {
@@ -8780,6 +8802,24 @@ mod tests {
         )));
         // 빈 화면
         assert!(!screen_shows_launch_failure(&flatten_ws("")));
+    }
+
+    /// ★주인님 지시(2026-10-03): readiness 폴링은 관문 화면에서 키 0 — `ReadyStep` 에 키 갈래가
+    /// 없으므로 `Gate` 판정이 곧 '키 0' 이다. 관문 화면에도 `❯` 가 있어 marker 보다 먼저 잡혀야 한다.
+    #[test]
+    fn readiness_holds_on_first_run_gates_without_keys() {
+        use cys::first_run_gate::fixtures::*;
+        for (name, screen) in [("old-trust", OLD_TRUST), ("trust-2.1.261", TRUST_2_1_261), ("bypass", BYPASS)] {
+            assert!(screen.contains('❯'), "{name}: 고정본에 marker 가 있어야 선행 판정이 증명된다");
+            for marker in [Some("❯"), None] {
+                assert!(
+                    matches!(readiness_step(screen, marker, 999, 12), ReadyStep::Gate(_)),
+                    "{name}/{marker:?}: 관문 화면은 Gate(키 0·대기)여야 한다"
+                );
+            }
+        }
+        assert_eq!(readiness_step(READY, Some("❯"), 2, 12), ReadyStep::Ready);
+        assert_eq!(readiness_step("user@host ~ %", None, 2, 12), ReadyStep::Wait);
     }
 
     #[test]

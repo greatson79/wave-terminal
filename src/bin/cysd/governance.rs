@@ -1769,7 +1769,7 @@ fn alert_queue_depth_if_high(
 /// 인플라이트 큐 배달자: 대상 surface가 quiet 임계(기본 3초) 이상 조용하면 큐에서 한 건 주입.
 /// 연속 배달은 다음 틱 — 메시지 사이 자연 간격이 생겨 에이전트가 한 건씩 소화한다.
 /// 배달이 막힌 채 적체되면(depth ≥ 임계) `queue.depth_high`를 쿨다운(5분)으로 발행한다.
-fn deliver_queued(daemon: &Arc<Daemon>, depth_alerted: &mut HashMap<u64, f64>) {
+pub(crate) fn deliver_queued(daemon: &Arc<Daemon>, depth_alerted: &mut HashMap<u64, f64>) {
     // T4-15 kill-switch: pause 중에는 큐 배달 동결 (메시지는 보존 — resume 시 재개)
     if daemon.paused.load(Ordering::Relaxed) {
         return;
@@ -1811,6 +1811,12 @@ fn deliver_queued(daemon: &Arc<Daemon>, depth_alerted: &mut HashMap<u64, f64>) {
             .unwrap_or(false);
         if human_recent {
             alert_queue_depth_if_high(daemon, &s, depth_alerted, "human_typing(사람 입력 직후)");
+            continue;
+        }
+        // ★첫기동 관문 창 위 배달 금지(주인님 2026-10-03) — 큐 Return 이 `No, exit` 를 누른다.
+        // 메시지는 큐에 남고, 사람이 Wave 창에서 고른 뒤 다음 틱에 배달된다.
+        if let Some(gate) = s.first_run_gate() {
+            alert_queue_depth_if_high(daemon, &s, depth_alerted, &format!("first_run_gate({gate})"));
             continue;
         }
         // pop은 writer 채널 인계 성공 후에만 — 실패 시 메시지를 보존해 다음 틱에 재시도.

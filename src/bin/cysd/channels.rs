@@ -1456,6 +1456,9 @@ fn inject_master(daemon: &Arc<Daemon>, sid: u64, envelope: &str) -> bool {
     let Some(surface) = daemon.get_surface(sid) else {
         return false;
     };
+    if surface.first_run_gate().is_some() {
+        return false; // ★첫기동 관문 창 위 주입 금지 → 보류(queued). 사람이 고른 뒤 배달.
+    }
     surface
         .write_tx
         .try_send(crate::state::WriteReq::Inject {

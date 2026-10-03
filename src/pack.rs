@@ -492,7 +492,11 @@ pub(crate) fn decide_file_action(
             if d != embed {
                 // 임베드가 마지막 적용본(매니페스트 해시)에서 전진했으면 신버전 병치(병합 대기).
                 // 매니페스트 부재(구설치본)도 안전측으로 병치해 가시화한다(base 없는 2-way 병합).
-                let new_pending = manifest_hash != Some(content_hash(embed).as_str());
+                // 구 Windows 빌드(autocrlf)는 임베드를 CRLF 로 굽고 그 해시를 매니페스트에 남겼다 —
+                // 같은 배포본의 CRLF 변형 해시도 "같은 버전"으로 본다(개행 동치 수리와 일관).
+                let crlf = embed.replace("\r\n", "\n").replace('\n', "\r\n");
+                let new_pending = manifest_hash
+                    .is_none_or(|m| m != content_hash(embed) && m != content_hash(&crlf));
                 return FileAction::Keep { adopt_hash: false, new_pending };
             }
         }
@@ -1646,6 +1650,16 @@ mod tests {
         assert_eq!(decide_file_action("soul.md", embed, true, Some("MY-SOUL"),
                        Some(eh.as_str()), false),
                    Keep { adopt_hash: false, new_pending: false });
+        // 구 Windows CRLF 매니페스트 + 데몬 런타임 수정본 + 임베드 무변경 → .new 없음(같은 버전).
+        let sched = "{\n  \"jobs\": []\n}\n";
+        let crlf_hash = content_hash(&sched.replace('\n', "\r\n"));
+        assert_eq!(decide_file_action("schedule.json", sched, true, Some("{\"jobs\":[\"phoenix\"]}"),
+                       Some(crlf_hash.as_str()), false),
+                   Keep { adopt_hash: false, new_pending: false });
+        // 매니페스트가 다른 구버전 해시면 종전대로 병치.
+        assert_eq!(decide_file_action("schedule.json", sched, true, Some("{\"jobs\":[\"phoenix\"]}"),
+                       Some(content_hash("{\"jobs\":[\"old\"]}").as_str()), false),
+                   Keep { adopt_hash: false, new_pending: true });
         // user-owned 는 force 여도 보존(기존 ★B2 계약 불변).
         assert_eq!(decide_file_action("soul.md", embed, true, Some("MY-SOUL"),
                        Some(eh.as_str()), true),

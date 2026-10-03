@@ -54,6 +54,9 @@ pack_version은 빌드 시점 `CARGO_PKG_VERSION`에 용접돼 있어(`cys.rs bu
   (2026-07-12 도입 — 종전의 "스윕 실행 → 다운그레이드 가드 no-op" 소음 제거). 수동 `cys init-pack`은
   게이트를 타지 않고 여전히 다운그레이드 가드에 막힌다(동일 최종 상태·이중 방어).
 
+## 0-B. ★배포본 `schedule.json` 변경 금지 (v0.3.1 분리 전까지 · CEO 결정 2026-10-03 1057)
+데몬이 부트마다 기본 잡을 사용자 `schedule.json`에 써 넣어 설치본은 항상 「사용자 수정」으로 분류된다 → 배포본 `cysjavis-pack/schedule.json`을 바꾸면 맥·윈 전 사용자에게 `schedule.json.new`가 생겨 설치기 S06이 막힌다. v0.3.1에서 기본 잡을 별도 파일로 분리할 때까지 이 파일을 바꾸는 릴리스를 내지 않는다.
+
 ## 0. 버전 위치 (범프 시 모두 갱신 — 실측 4곳)
 
 - `Cargo.toml` / `src-tauri/Cargo.toml` — `version`

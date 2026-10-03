@@ -130,8 +130,9 @@ jobs:
           Start-Process -FilePath $exe.FullName -ArgumentList '/S' -Wait
           Start-Sleep -Seconds 6
           Get-Process cys,cysd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-          $inst = Get-ChildItem "$env:LOCALAPPDATA" -Recurse -Filter cysd.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $inst) { throw "설치 후 cysd.exe 를 LOCALAPPDATA 아래에서 못 찾음" }
+          # CRT inspection also extracts cysd.exe under LOCALAPPDATA/Temp; never select that copy.
+          $inst = Get-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Wave Terminal\cysd.exe') -ErrorAction Stop
+          if (-not $inst) { throw "설치 후 Wave Terminal\cysd.exe 미발견" }
           $dir = $inst.Directory.FullName
           $rt = Join-Path $dir 'runtime'
           Write-Host "install dir: $dir"
@@ -175,7 +176,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $inst = Get-ChildItem "$env:LOCALAPPDATA" -Recurse -Filter cysd.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          # CRT inspection also extracts cysd.exe under LOCALAPPDATA/Temp; never select that copy.
+          $inst = Get-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Wave Terminal\cysd.exe') -ErrorAction Stop
           if (-not $inst) { throw "설치된 cysd.exe 미발견" }
           $dir = $inst.Directory.FullName
           $cys = Join-Path $dir 'cys.exe'
@@ -219,7 +221,8 @@ jobs:
         shell: pwsh
         timeout-minutes: 12   # ★백스톱: 어떤 하위 호출이 hang해도 12분에 스텝 종료(6h 방지)
         run: |
-          $inst = Get-ChildItem "$env:LOCALAPPDATA" -Recurse -Filter cysd.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          # CRT inspection also extracts cysd.exe under LOCALAPPDATA/Temp; never select that copy.
+          $inst = Get-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Wave Terminal\cysd.exe') -ErrorAction Stop
           if (-not $inst) { throw "설치된 cysd.exe 미발견" }
           $dir = $inst.Directory.FullName
           $cys = Join-Path $dir 'cys.exe'
@@ -329,7 +332,8 @@ jobs:
               return @{Code=$p.ExitCode;Out="$(Get-Content $o -Raw -ErrorAction SilentlyContinue)$(Get-Content $e -Raw -ErrorAction SilentlyContinue)"}
             } finally { Remove-Item $o,$e -Force -ErrorAction SilentlyContinue }
           }
-          $inst = Get-ChildItem "$env:LOCALAPPDATA" -Recurse -Filter cysd.exe -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'cysd.exe' } | Select-Object -First 1
+          # CRT inspection also extracts cysd.exe under LOCALAPPDATA/Temp; never select that copy.
+          $inst = Get-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Wave Terminal\cysd.exe') -ErrorAction Stop
           if (-not $inst) { throw "T4: 설치된 cysd.exe 미발견" }
           $dir = $inst.Directory.FullName; $cys = Join-Path $dir 'cys.exe'; $cysd = $inst.FullName
           $setup = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
@@ -419,7 +423,8 @@ jobs:
           PYTHONUTF8: '1'     # 한글 stdout cp1252 크래시 방지(RC-16 관례)
         run: |
           $ErrorActionPreference = 'Stop'
-          $inst = Get-ChildItem "$env:LOCALAPPDATA" -Recurse -Filter cysd.exe -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'cysd.exe' } | Select-Object -First 1
+          # CRT inspection also extracts cysd.exe under LOCALAPPDATA/Temp; never select that copy.
+          $inst = Get-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Wave Terminal\cysd.exe') -ErrorAction Stop
           if (-not $inst) { throw "T5: 설치된 cysd.exe 미발견" }
           $dir = $inst.Directory.FullName
           $cys = Join-Path $dir 'cys.exe'

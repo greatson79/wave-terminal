@@ -1,0 +1,13 @@
+# CRT 정책 SOT — Windows MSVC 바이너리는 CRT 정적 링크(자기완결).
+# 운영판(cys-terminal-wave 9eacc2e .cargo/config.toml) 이식.
+# 근거: VCRUNTIME140.dll 부재 머신(VC++ 재배포 패키지 미설치)에서 cysd.exe 가 기동 불능이던
+# 현장 결함("VCRUNTIME140.dll이(가) 없어 코드 실행을 진행할 수 없습니다" + 데몬 무한 대기).
+# 설치판 RC v0.3.0 윈 설치본(0.2.0 빌드) 실측: cys.exe·cysd.exe·cys-app.exe 3종 모두 VCRUNTIME140 임포트.
+# 이 선언 하나가 리포 루트 이하 모든 Windows MSVC cargo 빌드(사이드카 cys/cysd·src-tauri·테스트)에
+# 상속된다. 비 Windows(macOS 등) 빌드는 cfg 불일치로 무영향.
+# 검증 게이트: scripts/verify_win_crt.py (windows-build.yml — NSIS setup.exe PE 임포트 스윕).
+# UCRT(api-ms-win-crt-*)는 Windows 10+ OS 동봉이라 판정 대상이 아니지만,
+# crt-static 은 vcruntime·UCRT 를 함께 정적화한다(tier-1 지원 경로).
+# ⚠ RUSTFLAGS 환경변수가 설정되면 이 rustflags 는 무시된다(cargo 우선순위) — 빌드에서 RUSTFLAGS 금지.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

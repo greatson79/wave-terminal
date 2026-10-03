@@ -98,6 +98,20 @@ jobs:
           # updater 서명 산출을 끈다(릴리스 경로 release.yml은 windows conf 기본값 true+서명키 사용).
           bunx @tauri-apps/cli@2 build --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
+      # ★CRT 게이트(운영판 9eacc2e 이식): 산출 setup.exe 를 7z 로 풀어 전 exe 의 PE 임포트 표를 스윕한다.
+      #   cys.exe·cysd.exe·cys-app.exe 가 VCRUNTIME140*.dll 을 임포트하면 exit 1 → 잡 실패
+      #   (정책 SOT = .cargo/config.toml crt-static). 아티팩트 업로드는 if: always() 라 진단용으로 남는다.
+      - name: CRT gate (VCRUNTIME import sweep on NSIS setup.exe)
+        shell: bash
+        env:
+          PYTHONUTF8: '1'
+          PYTHONIOENCODING: 'utf-8'
+        run: |
+          set -euo pipefail
+          SETUP=(target/release/bundle/nsis/*-setup.exe)
+          [ ${#SETUP[@]} -eq 1 ] && [ -f "${SETUP[0]}" ] || { echo "setup.exe 후보 이상: ${SETUP[*]}" >&2; exit 1; }
+          python scripts/verify_win_crt.py --setup "${SETUP[0]}"
+
       - name: Upload NSIS installer artifact
         if: always()
         uses: actions/upload-artifact@v4

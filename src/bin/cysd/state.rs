@@ -145,6 +145,8 @@ pub struct Surface {
     pub last_injected: Mutex<Option<Instant>>,
     /// T5 사용량 관측 스냅샷 (usage.rs 수집기가 갱신 — 자기보고 agent_status와 별개 층위)
     pub observed_usage: Mutex<Option<crate::usage::ObservedUsage>>,
+    /// launch-agent가 실제로 붙인 `--model` 슬러그와 폴백 여부(set_meta 기록 — list·status 노출용).
+    pub agent_model: Mutex<Option<(String, bool)>>,
     /// T5 세션 트랜스크립트 등록 (`usage.register` — SessionStart hook의 결정론 매핑)
     pub registered_transcript: Mutex<Option<String>>,
     /// (4) resume 핀용 agent transcript session_id — analytics.rs의 회계 session_id와 무관(별개 개념).
@@ -1668,6 +1670,7 @@ impl Daemon {
             queue_paused_until: Mutex::new(None),
             last_injected: Mutex::new(None),
             observed_usage: Mutex::new(None),
+            agent_model: Mutex::new(None),
             registered_transcript: Mutex::new(None),
             agent_session_id: Mutex::new(None),
             // (W1) restore가 넘긴 원값이 있으면 그대로 고정(재해소 금지 — 데몬 env 변동 시 오염 방지),

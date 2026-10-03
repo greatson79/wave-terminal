@@ -4174,17 +4174,61 @@ fn model_for_role(spec: &Value, role: &str) -> Result<Option<String>, String> {
     Ok(Some(slug.to_string()))
 }
 
-/// spec.cmd + (있으면) ` --model <slug>`. resume 인자는 boot_agent_on_surface가 이 뒤에 붙인다.
-fn agent_cmd_for_role(spec: &Value, role: &str) -> Result<String, String> {
+/// spec.cmd + (있으면) ` --model <slug>`. resume 인자는 이 뒤에 붙는다.
+fn cmd_with_model(spec: &Value, model: Option<&str>) -> Result<String, String> {
     let mut cmd = spec["cmd"].as_str().ok_or("agent cmd missing")?.to_string();
-    if let Some(model) = model_for_role(spec, role)? {
+    if let Some(m) = model {
         cmd.push_str(" --model ");
-        cmd.push_str(&model);
+        cmd.push_str(m);
     }
     Ok(cmd)
 }
 
+#[cfg(test)]
+fn agent_cmd_for_role(spec: &Value, role: &str) -> Result<String, String> {
+    cmd_with_model(spec, model_for_role(spec, role)?.as_deref())
+}
+
+/// (첫 모델, 폴백 모델). 폴백은 역할이 표에 **명시**돼 있고 `_default`가 그와 다를 때만
+/// (= master opus → sonnet). `_default`로 뜬 좌석은 폴백이 없다.
+fn model_plan(spec: &Value, role: &str) -> Result<(Option<String>, Option<String>), String> {
+    let first = model_for_role(spec, role)?;
+    let explicit = spec.get("model_by_role").is_some_and(|t| t.get(role).is_some());
+    let fallback = if explicit && role != "_default" {
+        model_for_role(spec, "_default")?.filter(|d| Some(d) != first.as_ref())
+    } else {
+        None
+    };
+    Ok((first, fallback))
+}
+
+/// 모델 오류 화면(실측 Claude Code 2.1.288 · `--model claude-sonnet-9-9` 후 첫 입력):
+/// "There's an issue with the selected model (…). It may not exist or you may not have access to it."
+/// TUI는 살아 있고 오류는 첫 프롬프트(=지침 주입) 응답 자리에 뜬다.
+fn screen_shows_model_error(text: &str) -> bool {
+    let flat: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    flat.contains("There'sanissuewiththeselectedmodel")
+}
+
+#[derive(Debug, PartialEq)]
+enum ModelStep {
+    Done,
+    Retry(String),
+    Fail,
+}
+
+/// 모델 오류 뒤 다음 단계: 폴백은 딱 1회, 폴백 좌석의 오류는 그대로 실패.
+fn model_step(model_error: bool, fell_back: bool, fallback: Option<&str>) -> ModelStep {
+    match (model_error, fell_back, fallback) {
+        (false, _, _) => ModelStep::Done,
+        (true, false, Some(fb)) => ModelStep::Retry(fb.to_string()),
+        _ => ModelStep::Fail,
+    }
+}
+
 /// launch-agent(새 surface)와 node-recover(기존 surface 재기동)가 공유한다.
+/// model_by_role 폴백(master opus → sonnet)은 여기서 1회만 처리한다.
+#[allow(clippy::too_many_arguments)]
 fn boot_agent_on_surface(
     sid: u64,
     role: &str,
@@ -4193,12 +4237,79 @@ fn boot_agent_on_surface(
     resume: bool,
     session_id: Option<&str>,
     restore: bool,
+    cwd: Option<&str>,
+    config_dir: Option<&str>,
+) -> Result<(), String> {
+    let (first, fallback) = model_plan(spec, role)?;
+    let mut model = first;
+    let mut fell_back = false;
+    loop {
+        let watch = fallback.is_some() || fell_back;
+        let err = launch_once_on_surface(
+            sid, role, agent, spec, model.as_deref(), fell_back, watch, resume, session_id,
+            restore, cwd, config_dir,
+        )?;
+        match model_step(err, fell_back, fallback.as_deref()) {
+            ModelStep::Done => return Ok(()),
+            ModelStep::Fail => {
+                return Err(format!(
+                    "agent '{agent}' model error on screen (--model {}) — 폴백 후에도 실패",
+                    model.as_deref().unwrap_or("-")
+                ))
+            }
+            ModelStep::Retry(fb) => {
+                if role == "master" {
+                    eprintln!("[launch-agent] 마스터를 Sonnet으로 시작했습니다(요금제에서 Opus 사용 불가)");
+                }
+                eprintln!(
+                    "[launch-agent] model fallback: {} → {fb} (role={role})",
+                    model.as_deref().unwrap_or("-")
+                );
+                stop_agent_to_shell(sid)?;
+                model = Some(fb);
+                fell_back = true;
+            }
+        }
+    }
+}
+
+/// 모델 오류로 살아 있는 TUI를 셸까지 내린다(C-c 두 번) — 셸 프롬프트가 보여야 재기동한다.
+fn stop_agent_to_shell(sid: u64) -> Result<(), String> {
+    for _ in 0..2 {
+        request("surface.send_key", json!({"surface_id": sid, "key": "C-c", "authoritative": true}))?;
+        std::thread::sleep(std::time::Duration::from_millis(800));
+    }
+    for _ in 0..8 {
+        let screen = request("surface.read_text", json!({"surface_id": sid}))?;
+        if screen_tail_is_shell_prompt(screen["text"].as_str().unwrap_or("")) {
+            request("surface.send_key", json!({"surface_id": sid, "key": "C-u", "authoritative": true}))?;
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1250));
+    }
+    Err("model fallback: agent did not return to the shell after C-c ×2".into())
+}
+
+/// 1회 기동 + 지침 주입. watch_model이면 주입 뒤 모델 오류 화면을 살펴 Ok(true)로 알린다.
+#[allow(clippy::too_many_arguments)]
+fn launch_once_on_surface(
+
+    sid: u64,
+    role: &str,
+    agent: &str,
+    spec: &Value,
+    model: Option<&str>,
+    fell_back: bool,
+    watch_model: bool,
+    resume: bool,
+    session_id: Option<&str>,
+    restore: bool,
     // (W1) 이 pane의 cwd(resume 사전검증 munge용)와 데몬이 기록·반환한 권위 config_dir.
     // config_dir=None이면 게이트가 cys::resolve_claude_config_dir()로 best-effort 해소한다.
     cwd: Option<&str>,
     config_dir: Option<&str>,
-) -> Result<(), String> {
-    let mut cmd = agent_cmd_for_role(spec, role)?;
+) -> Result<bool, String> {
+    let mut cmd = cmd_with_model(spec, model)?;
     if resume {
         if let Some(arg) = spec["resume_arg"].as_str() {
             // T2-6 resume 어댑터: 대화 기억 복원 플래그 (예: claude --continue).
@@ -4244,10 +4355,18 @@ fn boot_agent_on_surface(
     // → agent_seen 영원히 false → status 허위 DEAD → task-prompt 생존게이트가 '미기동' 오판(DRILL_LIVE_1).
     // 스폰 시점에 의도가 확정되므로 여기서 등록하는 것이 정직하다(§3-1 진단의 수리).
     let bin = extract_bin(&cmd, agent).to_string();
-    request(
+    let meta = request(
         "surface.set_meta",
-        json!({"surface_id": sid, "agent": agent, "agent_bin": bin}),
-    )?;
+        json!({"surface_id": sid, "agent": agent, "agent_bin": bin,
+               "model": model, "model_fallback": fell_back}),
+    );
+    match meta {
+        // 폴백 재기동의 재등록 거부(타 pane 발신 meta_denied)로 살아 있는 좌석을 닫지 않는다.
+        Err(e) if fell_back => eprintln!("[launch-agent] warning: set_meta after fallback: {e}"),
+        r => {
+            r?;
+        }
+    }
     eprintln!(
         "[launch-agent] {agent} starting… (polling readiness, max {}s)",
         delay.max(30) * 2
@@ -4354,7 +4473,21 @@ fn boot_agent_on_surface(
     // 5) T2-5 에이전트 메타 등록은 ★Phase 5 ①a로 기동 직후(위)로 이동했다 — readiness 폴링/주입
     // 성공에 의존하지 않게. 여기서 재등록하면 set_meta가 agent_seen을 false로 리셋해, 이미 사망감지가
     // 관측한(agent_seen=true) 노드를 일시 허위 DEAD로 되돌리므로 재호출하지 않는다.
-    Ok(())
+
+    // 6) 모델 오류 감시(폴백 가능 좌석만): 오류는 지침 주입 응답 자리에 뜬다 — 최대 ~20초.
+    if watch_model {
+        for i in 0..8 {
+            let text = if i == 0 { screen["text"].as_str().unwrap_or("").to_string() } else {
+                std::thread::sleep(std::time::Duration::from_millis(2500));
+                request("surface.read_text", json!({"surface_id": sid}))?["text"]
+                    .as_str().unwrap_or("").to_string()
+            };
+            if screen_shows_model_error(&text) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// 에이전트 기동 + 역할 지침 자동 주입 (어댑터: agents.json).
@@ -8744,6 +8877,38 @@ mod tests {
                 assert_eq!(agent_cmd_for_role(spec, "master").unwrap(), spec["cmd"].as_str().unwrap());
             }
         }
+    }
+
+    /// 실측 고정본(Claude Code 2.1.288 · `--model claude-sonnet-9-9` · 첫 입력 뒤 TUI 화면 꼬리).
+    const MODEL_ERROR_SCREEN: &str = "❯ say ok\n\n⏺ There's an issue with the selected model \
+(claude-sonnet-9-9). It may not exist or you may not have access to it. Run /model to pick a \
+different model.\n✻ Worked for 0s\n────────\n❯ \n────────\nclaude-sonnet-9-9\n\
+⏵⏵ bypass permissions on (shift+tab to cycle)\n";
+
+    #[test]
+    fn master_model_fallback_once_to_sonnet() {
+        let agents: Value =
+            serde_json::from_str(include_str!("../../cysjavis-pack/agents.json")).unwrap();
+        let claude = &agents["claude"];
+        // master만 폴백(opus → sonnet). _default로 뜬 좌석·표 없는 에이전트는 폴백 없음.
+        assert_eq!(
+            model_plan(claude, "master").unwrap(),
+            (Some("claude-opus-5-5".into()), Some("claude-sonnet-5-5".into()))
+        );
+        for role in ["cso", "worker", "worker-2"] {
+            assert_eq!(model_plan(claude, role).unwrap(), (Some("claude-sonnet-5-5".into()), None));
+        }
+        assert_eq!(model_plan(&agents["codex"], "master").unwrap(), (None, None));
+
+        assert!(screen_shows_model_error(MODEL_ERROR_SCREEN));
+        assert!(!screen_shows_model_error(cys::first_run_gate::fixtures::READY));
+        // 오류 → 1회 재기동 · 정상 → 재기동 없음 · 폴백 좌석의 2회째 오류 → 그대로 실패.
+        let fb = Some("claude-sonnet-5-5");
+        assert_eq!(model_step(true, false, fb), ModelStep::Retry("claude-sonnet-5-5".into()));
+        assert_eq!(model_step(false, false, fb), ModelStep::Done);
+        assert_eq!(model_step(false, true, fb), ModelStep::Done);
+        assert_eq!(model_step(true, true, fb), ModelStep::Fail);
+        assert_eq!(model_step(true, false, None), ModelStep::Fail);
     }
 
     #[test]

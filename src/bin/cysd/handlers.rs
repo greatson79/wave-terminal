@@ -840,6 +840,8 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                         "claude_config_dir": s.claude_config_dir.lock().unwrap().clone(), // (W1) node-recover resume 게이트용
                         "agent": agent,
                         "agent_alive": agent_alive,
+                        "model": s.agent_model.lock().unwrap().as_ref().map(|(m, _)| m.clone()),
+                        "model_fallback": s.agent_model.lock().unwrap().as_ref().map(|(_, f)| *f),
                         "usage": s.observed_usage.lock().unwrap().clone()
                             .and_then(|u| serde_json::to_value(u).ok()),
                     })
@@ -2610,6 +2612,8 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                         "queue_paused": queue_paused,
                         "agent": agent,
                         "agent_alive": agent_alive,
+                        "model": s.agent_model.lock().unwrap().as_ref().map(|(m, _)| m.clone()),
+                        "model_fallback": s.agent_model.lock().unwrap().as_ref().map(|(_, f)| *f),
                         "status": status,
                         "usage": s.observed_usage.lock().unwrap().clone()
                             .and_then(|u| serde_json::to_value(u).ok()),
@@ -2993,6 +2997,8 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                 }
             }
             *surface.agent_meta.lock().unwrap() = Some((agent.clone(), agent_bin));
+            *surface.agent_model.lock().unwrap() = param_str(&params, "model")
+                .map(|m| (m, params["model_fallback"].as_bool().unwrap_or(false)));
             surface.agent_seen.store(false, Ordering::Relaxed);
             surface.agent_exit_notified.store(false, Ordering::Relaxed);
             crate::governance::persist_topology(daemon);
@@ -4862,6 +4868,33 @@ mod tests {
             Some("gemini".into()),
             "거부됐는데 victim agent_meta가 덮어써졌다"
         );
+    }
+
+    /// launch-agent가 set_meta로 넘긴 --model·폴백 여부가 surface.list·org.status 좌석 항목에 실린다.
+    #[test]
+    fn set_meta_model_is_listed() {
+        let daemon = claim_daemon();
+        let s = make_surface(&daemon, Some("master"));
+        let plain = make_surface(&daemon, Some("worker"));
+        let req = Request {
+            id: json!(1),
+            method: "surface.set_meta".into(),
+            params: json!({"surface_id": s, "agent": "claude",
+                           "model": "claude-sonnet-5-5", "model_fallback": true}),
+        };
+        let Reply::Single(resp) = dispatch(&daemon, req, None) else { panic!() };
+        assert_eq!(resp["ok"], json!(true), "{resp}");
+        set_meta(&daemon, plain, "claude", None);
+        for method in ["surface.list", "org.status"] {
+            let req = Request { id: json!(2), method: method.into(), params: json!({}) };
+            let Reply::Single(resp) = dispatch(&daemon, req, None) else { panic!() };
+            let rows = resp["result"]["surfaces"].as_array()
+                .unwrap_or_else(|| panic!("{method}: {resp}")).clone();
+            let row = |sid: u64| rows.iter().find(|r| r["surface_id"] == json!(sid)).unwrap().clone();
+            assert_eq!(row(s)["model"], json!("claude-sonnet-5-5"), "{method}");
+            assert_eq!(row(s)["model_fallback"], json!(true), "{method}");
+            assert_eq!(row(plain)["model"], Value::Null, "{method}");
+        }
     }
 
     /// 대조군 ①: 자기 surface 메타 갱신은 통과 (cs == sid). 정상 경로 박제.

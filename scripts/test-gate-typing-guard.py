@@ -15,7 +15,7 @@ import threading
 import time
 
 GATE = 'WARNING: Claude Code running in Bypass Permissions mode\n❯ 1. No, exit\n2. Yes, I accept\nEnter to confirm · Esc to cancel\n'
-READY = 'Welcome to Claude Code!\n❯\n? for shortcuts\n'
+READY = 'Welcome to Claude Code!\n❯ Try \"how do I log an error?\"\n? for shortcuts\n'
 
 
 def scenario(binary, name, *, gate=True, key=False, permanent=False, error='typing_guard', command_error=False):
@@ -93,7 +93,7 @@ def scenario(binary, name, *, gate=True, key=False, permanent=False, error='typi
             thread.join(timeout=2)
             listener.close()
         assert not failures, failures
-        preserve = gate and error == 'typing_guard' and not command_error
+        preserve = error == 'typing_guard' and not command_error
         expected_code = 2 if preserve and permanent else 0 if preserve else 1
         expected = dict(alive=preserve, role='master' if preserve else None)
         details = f'{name}: exit={proc.returncode} state={state}\n{proc.stderr}'
@@ -125,7 +125,9 @@ def main():
         ('gate_return_retry_no_duplicate_paste', {'key': True}),
         ('gate_text_exhaustion_keeps_role', {'permanent': True}),
         ('gate_return_exhaustion_keeps_role', {'key': True, 'permanent': True}),
-        ('no_gate_guard_still_rolls_back', {'gate': False}),
+        ('no_gate_text_retry_keeps_role', {'gate': False}),
+        ('no_gate_return_retry_keeps_role', {'gate': False, 'key': True}),
+        ('no_gate_guard_exhaustion_keeps_role', {'gate': False, 'permanent': True}),
         ('gate_other_error_still_rolls_back', {'error': 'send_denied'}),
         ('command_error_still_rolls_back', {'command_error': True}),
     ]

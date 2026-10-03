@@ -4226,7 +4226,7 @@ fn model_step(model_error: bool, fell_back: bool, fallback: Option<&str>) -> Mod
     }
 }
 
-/// 실제 관측한 첫기동 관문 뒤 typing_guard만 좌석을 보존한다.
+/// 새로 만든 좌석의 지침 주입 중 typing_guard만 좌석을 보존한다.
 /// 별도 오류형으로 구분해 다른 기동/RPC 실패의 역할 롤백을 유지한다.
 #[derive(Debug)]
 enum LaunchError {
@@ -4262,8 +4262,8 @@ impl std::fmt::Display for LaunchError {
 }
 
 /// 거부된 RPC만 재시도한다 — 수락된 지침 붙여넣기를 중복 전송하지 않는다.
-/// 관문 뒤에도 사람이 입력 중일 수 있으므로 authoritative 면제를 요청하지 않는다.
-fn inject_after_first_run_gate(sid: u64, text: &str) -> Result<(), LaunchError> {
+/// 사람이 입력 중일 수 있으므로 authoritative 면제를 요청하지 않는다.
+fn inject_on_new_surface(sid: u64, text: &str) -> Result<(), LaunchError> {
     let wrapped = format!("\x1b[200~{text}\x1b[201~");
     for (method, params) in [
         (
@@ -4314,6 +4314,7 @@ fn boot_agent_on_surface(
     restore: bool,
     cwd: Option<&str>,
     config_dir: Option<&str>,
+    fresh: bool,
 ) -> Result<(), LaunchError> {
     let (first, fallback) = model_plan(spec, role)?;
     let mut model = first;
@@ -4322,7 +4323,7 @@ fn boot_agent_on_surface(
         let watch = fallback.is_some() || fell_back;
         let err = launch_once_on_surface(
             sid, role, agent, spec, model.as_deref(), fell_back, watch, resume, session_id,
-            restore, cwd, config_dir,
+            restore, cwd, config_dir, fresh,
         )?;
         match model_step(err, fell_back, fallback.as_deref()) {
             ModelStep::Done => return Ok(()),
@@ -4384,6 +4385,7 @@ fn launch_once_on_surface(
     // config_dir=None이면 게이트가 cys::resolve_claude_config_dir()로 best-effort 해소한다.
     cwd: Option<&str>,
     config_dir: Option<&str>,
+    fresh: bool,
 ) -> Result<bool, LaunchError> {
     let mut cmd = cmd_with_model(spec, model)?;
     if resume {
@@ -4525,8 +4527,8 @@ fn launch_once_on_surface(
     std::thread::sleep(std::time::Duration::from_secs(2));
 
     // 3) 지침 주입 — bracketed paste로 감싸 단일 입력으로 전달
-    if gate_announced {
-        inject_after_first_run_gate(sid, &directive)?;
+    if fresh {
+        inject_on_new_surface(sid, &directive)?;
     } else {
         inject_text(sid, &directive)?;
     }
@@ -4745,6 +4747,7 @@ fn run_launch_agent_opts(
             restore,
             cwd.as_deref(),
             recorded_cfg.as_deref(),
+            true,
         )?;
         println!("{}", surface_ref(sid));
         Ok(())
@@ -5696,6 +5699,7 @@ fn run_node_recover(surface: Option<String>, role: Option<String>) -> i32 {
             false,
             rec_cwd.as_deref(),
             rec_cfg.as_deref(),
+            false,
         )
         .map_err(|e| e.to_string())?;
         inject_text(sid, "[RECOVER] 너는 방금 재기동되었다. _round/SESSION_STATE.md와 자기 TODO 파일을 읽어 작업 기억을 복원한 뒤 master에게 복귀를 1줄 push로 보고하라. 작업 재개는 master 지시를 따른다.")?;

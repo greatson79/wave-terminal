@@ -125,6 +125,22 @@ fn refuse_on_first_run_gate(surface: &crate::state::Surface, id: &Value) -> Opti
     ))
 }
 
+/// xterm 5.5의 터미널 질의 응답은 onData → GUI send_input(human=true)로 되돌아온다.
+/// 키보드 시퀀스와 겹치지 않는 완성된 응답 프레임만 기록에서 제외한다.
+/// CPR(...R)은 Shift+F3 등 실제 키와 겹치므로 보수적으로 사람 입력으로 남긴다.
+fn is_terminal_query_reply(text: &str) -> bool {
+    use std::sync::OnceLock;
+    static REPLY: OnceLock<regex::Regex> = OnceLock::new();
+    REPLY.get_or_init(|| {
+        regex::Regex::new(
+            r"^\x1b\[(?:0n|\?(?:1;2|6)c|>(?:0;276;0|85;95;0|83;40003;0)c|8;[0-9]+;[0-9]+t|\??[0-9]+;[0-9]+\$y)$",
+        )
+        .expect("terminal query reply regex")
+    })
+    .is_match(text)
+}
+
+
 /// PTY 쓰기 채널 send 결과 → RPC 응답 (성공 시 None)
 fn try_write(
     surface: &crate::state::Surface,
@@ -896,7 +912,7 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                 Ok(v) => v,
                 Err(e) => return Reply::Single(err_response(&id, "acl_denied", &e)),
             };
-            if human {
+            if human && !is_terminal_query_reply(&text) {
                 *surface.last_human_input.lock().unwrap() = Some(std::time::Instant::now());
             }
             // T3-13 권위 전달(clear_first): 잔존 미제출 텍스트를 Ctrl-U로 지운 깨끗한 라인에
@@ -4159,6 +4175,49 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ★주인님 지시(2026-10-03): 첫기동 관문 화면(구 신뢰·2.1.261 신뢰·Bypass 면책)에는 프로그램
+    /// 경로가 키 0 — send_key(authoritative 포함)·비-human send_text 는 거부, --queued 는 큐에 남고
+    /// 배달자도 꺼내지 않는다. 사람 입력(human)은 통과(고르는 것은 사람). 정상 화면은 종전대로 배달.
+    #[test]
+    fn terminal_query_reply_does_not_mark_human_typing_but_real_key_does() {
+        let _g = ACL_ENV_LOCK.lock().unwrap();
+        let (daemon, dir, _dirs) =
+            daemon_with_acl("terminal-query-reply", r#"{"default":"allow","rules":[]}"#);
+        let surface = daemon
+            .create_surface(None, Some("sleep 30".into()), None, Some("master".into()), 24, 80)
+            .expect("create master surface");
+        daemon.surfaces.lock().unwrap().insert(surface.id, surface.clone());
+        surface.parser.lock().unwrap().process(
+            b"Welcome to Claude Code!\r\nTry \"how do I log an error?\"\r\n? for shortcuts\r\n",
+        );
+        assert!(surface.first_run_gate().is_none());
+        let rpc = |text: &str, human: bool| {
+            let req = Request {
+                id: json!(1),
+                method: "surface.send_text".into(),
+                params: json!({"surface_id": surface.id, "text": text, "human": human}),
+            };
+            let Reply::Single(resp) = dispatch(&daemon, req, None) else {
+                panic!("expected single reply");
+            };
+            resp
+        };
+        // xterm.js가 터미널의 primary-device-attributes 질의에 자동 생성하는 응답.
+        assert_eq!(rpc("\x1b[?1;2c", true)["ok"], json!(true));
+        assert!(surface.last_human_input.lock().unwrap().is_none());
+        assert_eq!(rpc("directive", false)["ok"], json!(true));
+        // 같은 GUI 경로의 실제 키는 여전히 타이핑 가드를 작동시킨다.
+        assert_eq!(rpc("x", true)["ok"], json!(true));
+        assert!(surface.last_human_input.lock().unwrap().is_some());
+        assert_eq!(rpc("directive", false)["error"]["code"], json!("typing_guard"));
+        // CPR과 Shift+F3는 같은 바이트가 될 수 있다. 이 경우 가드를 유지한다.
+        *surface.last_human_input.lock().unwrap() = None;
+        assert_eq!(rpc("\x1b[1;2R", true)["ok"], json!(true));
+        assert!(surface.last_human_input.lock().unwrap().is_some());
+        let _ = surface.child.lock().unwrap().kill();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// ★주인님 지시(2026-10-03): 첫기동 관문 화면(구 신뢰·2.1.261 신뢰·Bypass 면책)에는 프로그램

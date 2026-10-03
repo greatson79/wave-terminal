@@ -564,7 +564,9 @@ class Preflight:
     def _load_product_profile(self):
         # D1: optional verdict policy, never a check/repair bypass. Invalid input keeps FAIL.
         self._product_profile_path = os.path.join(pack_dir(), "preflight-product-profile.json")
-        self._product_decision = "D1 잠정(테오 대결 · 주인님 확인 대기)"
+        self._product_decision = "제품 프로필 — 선택 구성요소는 경고로 표시"
+        # seed-once 라 업그레이드 설치본은 구 decision 문구를 그대로 갖는다 — 그 값(sha256 핀)도 받는다.
+        legacy = "015bce8676cf8937b9ce072d043b39c480029c9eb11b2f36df9c9645dd788ddd"
         allowed = {"C20.nlm-sot", "C21.harness-creator", "C24.korean-law-mcp"}
         try:
             with open(self._product_profile_path, encoding="utf-8") as f:
@@ -573,7 +575,9 @@ class Preflight:
                     or set(profile) != {"schema_version", "decision", "warnings"}
                     or type(profile["schema_version"]) is not int
                     or profile["schema_version"] != 1
-                    or profile["decision"] != self._product_decision
+                    or not isinstance(profile["decision"], str)
+                    or (profile["decision"] != self._product_decision
+                        and hashlib.sha256(profile["decision"].encode("utf-8")).hexdigest() != legacy)
                     or not isinstance(profile["warnings"], dict)):
                 raise ValueError("제품 프로필 스키마 불일치")
             warnings = profile["warnings"]

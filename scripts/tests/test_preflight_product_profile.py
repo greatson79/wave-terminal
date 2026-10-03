@@ -14,7 +14,7 @@ spec = importlib.util.spec_from_file_location('d1_pf', ROOT / 'cysjavis-pack/bin
 pf = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pf)
 IDS = ('C20.nlm-sot', 'C21.harness-creator', 'C24.korean-law-mcp')
-MARKER = 'D1 잠정(테오 대결 · 주인님 확인 대기)'
+MARKER = '제품 프로필 — 선택 구성요소는 경고로 표시'
 # C21 is an optional feature in this product: missing toolchain is WARN by itself (no FAIL to map).
 MISSING = [pf.FAIL, pf.WARN, pf.FAIL]
 
@@ -86,6 +86,29 @@ class ProductProfileTests(unittest.TestCase):
                 rows = self.measure_missing_tools()
                 self.assertEqual([r['status'] for r in rows if r['id'] in IDS], MISSING)
                 self.assertTrue(any(r['id'] == 'C00.product-profile' and r['status'] == pf.WARN for r in rows))
+
+    def test_shipped_profile_matches_and_has_no_internal_names(self):
+        shipped = json.loads((ROOT / 'cysjavis-pack/preflight-product-profile.json').read_text(encoding='utf-8'))
+        self.assertEqual(shipped['decision'], MARKER)
+        src = (ROOT / 'cysjavis-pack/bin/javis_preflight.py').read_text(encoding='utf-8')
+        # '주인님'은 제품 기본 호칭(soul.md 보강)이라 소스엔 남는다 — 프로필·decision 문구만 금지.
+        for text, banned in ((json.dumps(shipped, ensure_ascii=False), ('테오', '주인님', 'D1 잠정')),
+                             (src, ('테오', 'D1 잠정'))):
+            for b in banned:
+                self.assertNotIn(b, text)
+
+    def test_upgraded_install_with_legacy_decision_still_applies(self):
+        # seed-once: 업그레이드 설치본의 프로필은 구 문구 그대로 남는다(.new 없음) — 원판정 회귀 금지.
+        legacy = bytes.fromhex('443120ec9ea0eca09528ed858cec98a420eb8c80eab2b020c2b720eca3bcec9db8eb8b9820ed9995ec9db820eb8c80eab8b029').decode()
+        self.path.write_text(json.dumps({'schema_version': 1, 'decision': legacy,
+            'warnings': {cid: '잠정 제외' for cid in IDS}}), encoding='utf-8')
+        rows = self.measure_missing_tools()
+        self.assertEqual([r['status'] for r in rows], [pf.WARN] * 3)
+        self.assertFalse(any(r['id'] == 'C00.product-profile' for r in rows))
+        self.assertTrue(all(legacy not in r['detail'] for r in rows))
+        self.path.write_text(json.dumps({'schema_version': 1, 'decision': 'other',
+            'warnings': {cid: 'x' for cid in IDS}}), encoding='utf-8')
+        self.assertEqual([r['status'] for r in self.measure_missing_tools() if r['id'] in IDS], MISSING)
 
     def test_thread_sink_keeps_transformed_row(self):
         self.write_profile()

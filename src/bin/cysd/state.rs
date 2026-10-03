@@ -132,6 +132,9 @@ pub struct Surface {
     pub agent_status: Mutex<Option<AgentStatus>>,
     /// T2-5 에이전트 메타: launch-agent가 등록한 (agent 이름, 실행 바이너리)
     pub agent_meta: Mutex<Option<(String, String)>>,
+    /// 새 surface.create 응답을 받은 launch-agent만 보유하는 완료 토큰.
+    pub launch_token: Mutex<Option<String>>,
+    pub launch_complete: AtomicBool,
     /// T2-5 사망 감지 상태머신: 자식 트리에서 agent 바이너리를 처음 본 뒤 사라지면 발화
     pub agent_seen: AtomicBool,
     pub agent_exit_notified: AtomicBool,
@@ -1661,6 +1664,8 @@ impl Daemon {
             pending_queue: Mutex::new(std::collections::VecDeque::new()),
             agent_status: Mutex::new(None),
             agent_meta: Mutex::new(None),
+            launch_token: Mutex::new(None),
+            launch_complete: AtomicBool::new(false),
             agent_seen: AtomicBool::new(false),
             agent_exit_notified: AtomicBool::new(false),
             crash_notified: AtomicBool::new(false),

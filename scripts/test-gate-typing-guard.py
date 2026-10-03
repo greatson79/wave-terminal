@@ -56,7 +56,7 @@ def scenario(binary, name, *, gate=True, key=False, permanent=False, error='typi
                         result, refusal = {}, None
                         if method == 'surface.create':
                             state.update(alive=True, role=params['role'])
-                            result = {'surface_id': 2}
+                            result = {'surface_id': 2, 'launch_token': 'isolated-fixture-token'}
                         elif method == 'surface.read_text':
                             state['reads'] += 1
                             result = {'text': ('claude: command not found' if command_error else

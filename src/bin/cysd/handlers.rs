@@ -140,6 +140,34 @@ fn is_terminal_query_reply(text: &str) -> bool {
     .is_match(text)
 }
 
+/// launch-agent 완료 신호용 좌석별 토큰. PID 조회가 실패할 수 있는 Windows에서도
+/// 새 surface.create 응답을 받은 호출자만 완료를 기록하게 한다.
+fn launch_token_hex() -> Result<String, String> {
+    let mut bytes = [0u8; 32];
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        std::fs::File::open("/dev/urandom")
+            .map_err(|e| format!("open /dev/urandom failed: {e}"))?
+            .read_exact(&mut bytes)
+            .map_err(|e| format!("read /dev/urandom failed: {e}"))?;
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Security::Cryptography::{
+            BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        };
+        let status = unsafe { BCryptGenRandom(
+            std::ptr::null_mut(), bytes.as_mut_ptr(), bytes.len() as u32,
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        ) };
+        if status != 0 {
+            return Err(format!("BCryptGenRandom failed: NTSTATUS {status:#010x}"));
+        }
+    }
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 
 /// PTY 쓰기 채널 send 결과 → RPC 응답 (성공 시 None)
 fn try_write(
@@ -654,6 +682,47 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                 Ok(v) => v,
                 Err(e) => return Reply::Single(err_response(&id, "invalid_params", &e)),
             };
+            // 멱등 재사용은 새 역할 점유가 아니므로 특권 역할의 신규 생성 검사보다 먼저 처리한다.
+            // 요청 역할과 cwd도 기존 좌석과 일치해야 다른 요청의 키 충돌이 재사용되지 않는다.
+            let idem_key = param_str(&params, "idempotency_key");
+            if let Some(ref key) = idem_key {
+                let cached_sid = {
+                    let now = crate::state::now_epoch();
+                    let mut idem = daemon.create_idem.lock().unwrap();
+                    idem.retain(|_, (_, ts)| now - *ts < crate::state::CREATE_IDEM_TTL_SECS);
+                    idem.get(key).map(|&(sid, _)| sid)
+                };
+                if let Some(sid) = cached_sid {
+                    let reuse = {
+                        let surfaces = daemon.surfaces.lock().unwrap();
+                        surfaces.get(&sid).and_then(|s| {
+                            let requested_role = param_str(&params, "role");
+                            let actual_role = s.role.lock().unwrap().clone();
+                            let same_role = actual_role.as_deref() == requested_role.as_deref()
+                                || (requested_role.as_deref() == Some("worker")
+                                    && actual_role.as_deref().is_some_and(|r| {
+                                        r.strip_prefix("worker-")
+                                            .is_some_and(|n| n.parse::<u32>().is_ok_and(|v| v >= 2))
+                                    }));
+                            let launch_match = params.get("launch_agent").and_then(Value::as_bool)
+                                != Some(true) || (same_role
+                                    && Some(s.cwd.as_str()) == param_str(&params, "cwd").as_deref());
+                            if !s.exited.load(Ordering::Relaxed) && launch_match {
+                                Some(s.pid)
+                            } else {
+                                None
+                            }
+                        })
+                    };
+                    if let Some(pid) = reuse {
+                        return Reply::Single(ok_response(
+                            &id,
+                            json!({"surface_id": sid, "surface_ref": surface_ref(sid),
+                                   "pid": pid, "idempotent_reuse": true}),
+                        ));
+                    }
+                }
+            }
             // 특권 역할 탈취 차단(claim_role과 대칭): create_surface(state.rs)는 요청 role을
             // roles에 무조건 insert("최신 surface 승리")하므로, RPC로 role="master"|"cso"를
             // 지정하면 살아있는 보유자가 있어도 roles 매핑·deadman 감시·--to <role> 라우팅을
@@ -693,39 +762,7 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                 }
             }
             // ── 워커 기동 게이트 ② (cmux beginCreate 보상 트랜잭션 흡수) ──
-            // (1) idempotency: 같은 key 재시도면 기존 surface 재반환(추가 spawn 0).
-            let idem_key = param_str(&params, "idempotency_key");
-            if let Some(ref key) = idem_key {
-                // ★락 규약: create_idem 가드를 surfaces 락보다 먼저 닫는다(lock-ordering 오염 회피).
-                //   조회·lazy GC만 별도 스코프로 감싸 sid만 들고 나오고, surfaces 락은 그 다음에 잡는다.
-                let cached_sid = {
-                    let now = crate::state::now_epoch();
-                    let mut idem = daemon.create_idem.lock().unwrap();
-                    idem.retain(|_, (_, ts)| now - *ts < crate::state::CREATE_IDEM_TTL_SECS); // lazy GC
-                    idem.get(key).map(|&(sid, _)| sid)
-                };
-                if let Some(sid) = cached_sid {
-                    // 살아있는 surface면 재반환, 죽었으면 스루(아래서 새로 생성).
-                    let reuse = {
-                        let surfaces = daemon.surfaces.lock().unwrap();
-                        surfaces.get(&sid).and_then(|s| {
-                            if !s.exited.load(Ordering::Relaxed) {
-                                Some(s.pid)
-                            } else {
-                                None
-                            }
-                        })
-                    };
-                    if let Some(pid) = reuse {
-                        return Reply::Single(ok_response(
-                            &id,
-                            json!({"surface_id": sid, "surface_ref": surface_ref(sid),
-                                   "pid": pid, "idempotent_reuse": true}),
-                        ));
-                    }
-                }
-            }
-            // (2) active-limit: 살아있는 worker-* 수 한도. role=="worker" 요청에만 적용
+            // active-limit: 살아있는 worker-* 수 한도. role=="worker" 요청에만 적용
             //     (master/cso는 위 하이재킹 게이트가, reviewer-*는 단일 latest-wins가 커버).
             if param_str(&params, "role").as_deref() == Some("worker") {
                 let limit = daemon.config.max_active_workers;
@@ -773,6 +810,14 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
             // (W1) restore가 원 계정 dir을 넘기면 재해소 대신 그대로 고정한다(데몬 env 변동 시 오염 방지).
             // 부재 시 데몬이 자기 env로 결정론 해소해 기록한다(신규 기동). 응답에 기록값을 되돌려준다.
             let cfg_override = param_str(&params, "claude_config_dir");
+            let launch_token = if params.get("launch_agent").and_then(Value::as_bool) == Some(true) {
+                match launch_token_hex() {
+                    Ok(token) => Some(token),
+                    Err(e) => return Reply::Single(err_response(&id, "random_failed", &e)),
+                }
+            } else {
+                None
+            };
             match daemon.create_surface_with_env(
                 param_str(&params, "cwd"),
                 param_str(&params, "cmd"),
@@ -784,6 +829,7 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                 cfg_override,
             ) {
                 Ok(s) => {
+                    *s.launch_token.lock().unwrap() = launch_token.clone();
                     // (E-e) 멱등 캐시 기록 — 다음 동일 key 재시도가 이 surface를 재반환.
                     if let Some(key) = idem_key {
                         daemon
@@ -797,7 +843,8 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                         json!({"surface_id": s.id, "surface_ref": surface_ref(s.id), "pid": s.pid,
                                // (W1) 데몬이 기록한 권위 config_dir 반환 — 호출자(launch/restore)가
                                // resume 사전검증 게이트·restore 인라인 오버라이드의 결정론 소스로 쓴다.
-                               "claude_config_dir": s.claude_config_dir.lock().unwrap().clone()}),
+                               "claude_config_dir": s.claude_config_dir.lock().unwrap().clone(),
+                               "launch_token": launch_token}),
                     ))
                 }
                 Err(e) => Reply::Single(err_response(&id, "spawn_failed", &e)),
@@ -856,6 +903,7 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                         "claude_config_dir": s.claude_config_dir.lock().unwrap().clone(), // (W1) node-recover resume 게이트용
                         "agent": agent,
                         "agent_alive": agent_alive,
+                        "launch_complete": s.launch_complete.load(Ordering::Relaxed),
                         "model": s.agent_model.lock().unwrap().as_ref().map(|(m, _)| m.clone()),
                         "model_fallback": s.agent_model.lock().unwrap().as_ref().map(|(_, f)| *f),
                         "usage": s.observed_usage.lock().unwrap().clone()
@@ -865,6 +913,24 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                 .collect();
             list.sort_by_key(|v| v["surface_id"].as_u64().unwrap_or(0));
             Reply::Single(ok_response(&id, json!({"surfaces": list})))
+        }
+
+        "surface.launch_complete" => {
+            let Some(sid) = resolve_surface_id(&params) else {
+                return Reply::Single(err_response(&id, "invalid_params", "missing surface_id"));
+            };
+            let Some(surface) = daemon.get_surface(sid) else {
+                return Reply::Single(err_response(&id, "not_found", "surface not found"));
+            };
+            let token = params.get("launch_token").and_then(Value::as_str);
+            if token.is_none() || surface.launch_token.lock().unwrap().as_deref() != token {
+                return Reply::Single(err_response(&id, "owner_denied", "launch token does not match the creating launch-agent"));
+            }
+            if surface.exited.load(Ordering::Relaxed) {
+                return Reply::Single(err_response(&id, "process_exited", "surface process has exited"));
+            }
+            surface.launch_complete.store(true, Ordering::Release);
+            Reply::Single(ok_response(&id, json!({"surface_id": sid, "launch_complete": true})))
         }
 
         // ★양방향 소켓의 핵심: 다른 pane의 PTY stdin에 텍스트를 직접 주입한다.
@@ -4128,6 +4194,80 @@ mod tests {
             .insert(pid, (Some(sid), crate::state::now_epoch(), None));
     }
 
+    #[test]
+    fn privileged_idempotent_reuse_waits_for_token_completion() {
+        let daemon = isolated_daemon();
+        let sid = make_surface(&daemon, Some("master"));
+        let surface = daemon.get_surface(sid).unwrap();
+        *surface.launch_token.lock().unwrap() = Some("owner-only-token".into());
+        daemon.create_idem.lock().unwrap().insert(
+            "launch-key".into(), (sid, crate::state::now_epoch()),
+        );
+        let req = Request { id: json!(1), method: "surface.create".into(), params: json!({
+            "role": "master", "cwd": surface.cwd.clone(), "idempotency_key": "launch-key", "launch_agent": true
+        }) };
+        let Reply::Single(resp) = dispatch(&daemon, req, Some(91002)) else { panic!("single reply") };
+        assert_eq!(resp["result"]["idempotent_reuse"], json!(true), "{resp}");
+        assert_eq!(resp["result"]["surface_id"], json!(sid));
+        assert!(resp["result"].get("launch_token").is_none(), "reuse must not expose token");
+        assert!(!surface.launch_complete.load(Ordering::Acquire));
+
+        let complete = |token: &str, caller| {
+            let req = Request { id: json!(2), method: "surface.launch_complete".into(),
+                params: json!({"surface_id": sid, "launch_token": token}) };
+            let Reply::Single(resp) = dispatch(&daemon, req, Some(caller)) else { panic!("single reply") };
+            resp
+        };
+        assert_eq!(complete("wrong-token", 91002)["error"]["code"], json!("owner_denied"));
+        assert!(!surface.launch_complete.load(Ordering::Acquire));
+        // Windows peer_pid가 None이어도, 생성 응답의 토큰으로 완료된다.
+        let req = Request { id: json!(3), method: "surface.launch_complete".into(),
+            params: json!({"surface_id": sid, "launch_token": "owner-only-token"}) };
+        let Reply::Single(resp) = dispatch(&daemon, req, None) else { panic!("single reply") };
+        assert_eq!(resp["result"]["launch_complete"], json!(true));
+        assert!(surface.launch_complete.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn launch_token_completes_without_peer_pid() {
+        let daemon = isolated_daemon();
+        let req = Request { id: json!(1), method: "surface.create".into(), params: json!({
+            "cmd": "sleep 30", "launch_agent": true
+        }) };
+        let Reply::Single(created) = dispatch(&daemon, req, None) else { panic!("single reply") };
+        let sid = created["result"]["surface_id"].as_u64().expect("surface id");
+        let token = created["result"]["launch_token"].as_str().expect("launch token");
+        assert_eq!(token.len(), 64);
+        let missing = Request { id: json!(3), method: "surface.launch_complete".into(),
+            params: json!({"surface_id": sid}) };
+        let Reply::Single(denied) = dispatch(&daemon, missing, None) else { panic!("single reply") };
+        assert_eq!(denied["error"]["code"], json!("owner_denied"));
+        let req = Request { id: json!(2), method: "surface.launch_complete".into(),
+            params: json!({"surface_id": sid, "launch_token": token}) };
+        let Reply::Single(completed) = dispatch(&daemon, req, None) else { panic!("single reply") };
+        assert_eq!(completed["result"]["launch_complete"], json!(true), "{completed}");
+        let _ = daemon.get_surface(sid).unwrap().child.lock().unwrap().kill();
+    }
+
+    #[test]
+    fn launch_reuses_deduplicated_worker_role() {
+        let daemon = isolated_daemon();
+        let _first = make_surface(&daemon, Some("worker"));
+        let sid = make_surface(&daemon, Some("worker"));
+        let surface = daemon.get_surface(sid).unwrap();
+        assert_eq!(surface.role.lock().unwrap().as_deref(), Some("worker-2"));
+        daemon.create_idem.lock().unwrap().insert(
+            "worker-launch-key".into(), (sid, crate::state::now_epoch()),
+        );
+        let req = Request { id: json!(1), method: "surface.create".into(), params: json!({
+            "role": "worker", "cwd": surface.cwd.clone(), "idempotency_key": "worker-launch-key",
+            "launch_agent": true
+        }) };
+        let Reply::Single(resp) = dispatch(&daemon, req, Some(91002)) else { panic!("single reply") };
+        assert_eq!(resp["result"]["idempotent_reuse"], json!(true), "{resp}");
+        assert_eq!(resp["result"]["surface_id"], json!(sid));
+    }
+
     /// 게이트 박제: clear_first(원자 Ctrl-U 선정리)는 launch-agent 등록 pane 한정 —
     /// Ctrl-U 의미가 TUI별 상이하므로 agent_meta 없는 pane엔 거부, 있으면 통과.
     #[test]
@@ -4177,9 +4317,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// ★주인님 지시(2026-10-03): 첫기동 관문 화면(구 신뢰·2.1.261 신뢰·Bypass 면책)에는 프로그램
-    /// 경로가 키 0 — send_key(authoritative 포함)·비-human send_text 는 거부, --queued 는 큐에 남고
-    /// 배달자도 꺼내지 않는다. 사람 입력(human)은 통과(고르는 것은 사람). 정상 화면은 종전대로 배달.
     #[test]
     fn terminal_query_reply_does_not_mark_human_typing_but_real_key_does() {
         let _g = ACL_ENV_LOCK.lock().unwrap();

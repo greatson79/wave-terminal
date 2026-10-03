@@ -4232,6 +4232,7 @@ fn model_step(model_error: bool, fell_back: bool, fallback: Option<&str>) -> Mod
 enum LaunchError {
     Failed(String),
     GateTypingPending { sid: u64, operation: &'static str },
+    ReusedLaunchPending { sid: u64 },
 }
 
 impl From<String> for LaunchError {
@@ -4256,6 +4257,10 @@ impl std::fmt::Display for LaunchError {
                  — typing_guard still active after 30s. Wave 창의 입력을 확인해 주세요. \
                  send_text 대기면 지침이 아직 붙여넣어지지 않았고, send_key 대기면 붙여넣은 \
                  지침이 제출되지 않았습니다. 새 좌석을 만들지 말고 기존 좌석에서 이어가세요."
+            ),
+            Self::ReusedLaunchPending { sid } => write!(
+                f,
+                "surface:{sid} retained (role 유지): earlier launch-agent has not completed within 30s"
             ),
         }
     }
@@ -4657,6 +4662,32 @@ fn run_launch_agent(role: &str, agent: &str, cwd: Option<String>) -> i32 {
     run_launch_agent_opts(role, agent, cwd, false, None, false, None)
 }
 
+/// 멱등 create가 돌려준 좌석은 이 호출이 소유하지 않는다. 이전 launch-agent의 완료
+/// 신호를 확인하고, 미완료라면 살아 있는 좌석을 닫거나 중복 주입하지 않는다.
+fn wait_for_reused_launch(sid: u64, role: &str) -> Result<(), LaunchError> {
+    for _ in 0..30 {
+        let list = request("surface.list", json!({}))?;
+        let surface = list["surfaces"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["surface_id"].as_u64() == Some(sid)))
+            .ok_or_else(|| LaunchError::Failed(format!("reused surface:{sid} disappeared")))?;
+        let actual_role = surface["role"].as_str();
+        let same_role = actual_role == Some(role)
+            || (role == "worker" && actual_role.is_some_and(|r| {
+                r.strip_prefix("worker-")
+                    .is_some_and(|n| n.parse::<u32>().is_ok_and(|v| v >= 2))
+            }));
+        if !same_role || surface["exited"].as_bool() != Some(false) {
+            return Err(LaunchError::Failed(format!("reused surface:{sid} no longer holds role {role}")));
+        }
+        if surface["launch_complete"].as_bool() == Some(true) {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    Err(LaunchError::ReusedLaunchPending { sid })
+}
+
 /// 절대지침(앵커1-b): 탭(타이틀) = 워크플로우 폴더명 — "{role}-{agent} · {폴더}".
 /// 폴더를 알 수 없으면(루트 등) 역할-에이전트만. 순수 함수 — 회귀 핀.
 /// `/`·`\`를 모두 구분자로 취급해 플랫폼과 무관하게 마지막 컴포넌트를 폴더명으로 쓴다
@@ -4729,11 +4760,19 @@ fn run_launch_agent_opts(
             "surface.create",
             json!({"cwd": cwd, "title": workflow_title(role, agent, &cwd), "role": role,
                    "rows": 40, "cols": 140, "idempotency_key": idem, "env": env_obj,
+                   "launch_agent": true,
                    // (W1) restore 원값 전달(부재=신규는 데몬이 자기 env로 결정론 해소·기록).
                    "claude_config_dir": config_dir_override}),
         )?;
         let sid = r["surface_id"].as_u64().ok_or("create returned no id")?;
+        if r["idempotent_reuse"].as_bool() == Some(true) {
+            eprintln!("[launch-agent] {} reused (role={role}); waiting for original launch", surface_ref(sid));
+            wait_for_reused_launch(sid, role)?;
+            println!("{}", surface_ref(sid));
+            return Ok(());
+        }
         created = Some(sid);
+        let launch_token = r["launch_token"].as_str().ok_or("create returned no launch token")?;
         eprintln!("[launch-agent] {} created (role={role})", surface_ref(sid));
         // (W1) 데몬이 기록·반환한 권위 config_dir을 resume 게이트·restore 인라인의 결정론 소스로 쓴다.
         let recorded_cfg = r["claude_config_dir"].as_str().map(String::from);
@@ -4749,12 +4788,13 @@ fn run_launch_agent_opts(
             recorded_cfg.as_deref(),
             true,
         )?;
+        request("surface.launch_complete", json!({"surface_id": sid, "launch_token": launch_token}))?;
         println!("{}", surface_ref(sid));
         Ok(())
     })();
     match result {
         Ok(()) => 0,
-        Err(e @ LaunchError::GateTypingPending { .. }) => {
+        Err(e @ (LaunchError::GateTypingPending { .. } | LaunchError::ReusedLaunchPending { .. })) => {
             // 0이 아닌 종료값은 주입 미완료다. 살아 있는 에이전트와 역할은 보존한다.
             eprintln!("[launch-agent] warning: {e}");
             2

@@ -1,4 +1,4 @@
-//! 첫기동 관문(폴더신뢰 · Bypass Permissions 면책) 판별 — **키를 보내지 않기 위한** 술어.
+//! 첫기동 관문(폴더신뢰 · Bypass Permissions 면책 · fullscreen 안내) 판별 — **키를 보내지 않기 위한** 술어.
 //!
 //! 주인님 지시(2026-10-03): 관문 창이 화면에 있으면 우리 소프트웨어는 **어떤 키도** 보내지 않는다.
 //! 고르는 것은 사람이다(Wave 창). 2.1.261+ 폴더신뢰 창과 면책 창은 기본 선택이 `No, exit` 라
@@ -17,6 +17,7 @@ const GATES: &[(&str, &str)] = &[
     ("Do you trust this folder", "folder-trust"),
     ("WARNING: Claude Code running in Bypass Permissions mode", "bypass-permissions"),
     ("In Bypass Permissions mode, Claude Code will not ask for your approval", "bypass-permissions"),
+    ("Try the new fullscreen renderer?", "feature-announce-fullscreen"),
 ];
 
 fn flat(s: &str) -> String {
@@ -45,6 +46,10 @@ well-known open source project, or work from your team).\n\n Security guide\n\n 
 In Bypass Permissions mode, Claude Code will not ask for your approval before running\n \
 potentially dangerous commands.\n\n ❯ 1. No, exit\n   2. Yes, I accept\n\n \
 Enter to confirm · Esc to cancel\n";
+    /// 신기능 안내 · fullscreen renderer(기본 포커스 = Yes, try it — 원작 9f4fd80 고정본 문면).
+    pub const FULLSCREEN: &str = "Try the new fullscreen renderer?\n\
+· Flicker-free output  · Mouse support  · Selected text auto-copies\n\
+❯ 1. Yes, try it\n  2. Not now\n\nEnter to confirm · Esc to cancel\n";
     /// 정상 준비 화면(관문 통과 뒤 · 확인 에코 잔존).
     pub const READY: &str = " Yes, I trust this folder ✔\n\n ✻ Welcome to Claude Code!\n\n \
 ╭──────────────────────────────╮\n│ ❯ \n╰──────────────────────────────╯\n  ? for shortcuts\n";
@@ -59,13 +64,14 @@ mod tests {
         assert_eq!(identify(OLD_TRUST), Some("folder-trust"));
         assert_eq!(identify(TRUST_2_1_261), Some("folder-trust"));
         assert_eq!(identify(BYPASS), Some("bypass-permissions"));
+        assert_eq!(identify(FULLSCREEN), Some("feature-announce-fullscreen"));
         assert_eq!(identify(READY), None, "정상 화면·확인 에코는 관문이 아니다");
     }
 
     /// 선택지 라벨·확인 에코는 관문 근거가 아니다(2026-07-29 킬체인 형태).
     #[test]
     fn option_labels_alone_are_not_gates() {
-        for echo in ["Yes, I trust this folder ✔", "❯ 1. No, exit", "Yes, I accept", "Yes, proceed"] {
+        for echo in ["Yes, I trust this folder ✔", "❯ 1. No, exit", "Yes, I accept", "Yes, proceed", "Yes, try it", "Not now"] {
             assert_eq!(identify(echo), None, "{echo}");
         }
         for (q, _) in GATES {

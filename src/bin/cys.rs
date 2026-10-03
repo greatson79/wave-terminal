@@ -8895,7 +8895,7 @@ mod tests {
     #[test]
     fn readiness_holds_on_first_run_gates_without_keys() {
         use cys::first_run_gate::fixtures::*;
-        for (name, screen) in [("old-trust", OLD_TRUST), ("trust-2.1.261", TRUST_2_1_261), ("bypass", BYPASS)] {
+        for (name, screen) in [("old-trust", OLD_TRUST), ("trust-2.1.261", TRUST_2_1_261), ("bypass", BYPASS), ("fullscreen", FULLSCREEN)] {
             assert!(screen.contains('❯'), "{name}: 고정본에 marker 가 있어야 선행 판정이 증명된다");
             for marker in [Some("❯"), None] {
                 assert!(

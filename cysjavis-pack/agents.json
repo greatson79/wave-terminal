@@ -3,8 +3,9 @@
   "claude": {
     "cmd": "claude --dangerously-skip-permissions",
     "env": { "CLAUDE_CONFIG_DIR": "${CYS_ACCOUNT_DIR:-$HOME/.cys/claude}" },
+    "model_by_role": { "master": "claude-opus-5-5", "_default": "claude-sonnet-5-5" },
     "inject_delay_secs": 10,
-    "notes": "Claude Code. cys 전용 CLAUDE_CONFIG_DIR(~/.cys/claude)로 기동 — 사용자 ~/.claude(외부 터미널 체계·구 지침 오염 가능)와 격리(읽지도 지우지도 않음). RC-3(B′): cmd=순수 명령·env=맵 구조. unix launch-agent는 `KEY=\"val\" cmd` 인라인으로 재조립(셸이 ${:-}·$HOME 전개·기존과 byte-identical), Windows는 순수 cmd send + surface.create가 해소된 env를 builder.env 주입(powershell이 POSIX env-assign 미해석 회귀 차단). macOS 인증은 계정 단위 Keychain이라 격리해도 로그인 유지. ready_marker(❯) 감지 후 주입. 폴더 신뢰 프롬프트는 launch-agent가 자동 확인한다.",
+    "notes": "Claude Code. cys 전용 CLAUDE_CONFIG_DIR(~/.cys/claude)로 기동 — 사용자 ~/.claude(외부 터미널 체계·구 지침 오염 가능)와 격리(읽지도 지우지도 않음). RC-3(B′): cmd=순수 명령·env=맵 구조. unix launch-agent는 `KEY=\"val\" cmd` 인라인으로 재조립(셸이 ${:-}·$HOME 전개·기존과 byte-identical), Windows는 순수 cmd send + surface.create가 해소된 env를 builder.env 주입(powershell이 POSIX env-assign 미해석 회귀 차단). macOS 인증은 계정 단위 Keychain이라 격리해도 로그인 유지. ready_marker(❯) 감지 후 주입. 첫기동 관문(폴더 신뢰·Bypass 면책)은 앱이 키를 보내지 않는다 — 사람이 Wave 창에서 고른다. model_by_role=좌석 역할별 --model(역할 정확 일치 → _default).",
     "ready_marker": "❯",
     "clear_cmd": "/clear",
     "resume_arg": "--resume {session_id}",

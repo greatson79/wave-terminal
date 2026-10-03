@@ -4151,6 +4151,39 @@ fn apply_config_dir_override(
     }
 }
 
+/// 좌석 역할별 기본 모델(b-1): spec.model_by_role에서 역할 정확 일치 → `_default` 순으로 고른 슬러그.
+/// 표가 없으면 None(종전과 동일). 슬러그는 `[a-z0-9][a-z0-9.-]*`(≤64)만 허용 — 셸에 그대로 실리므로
+/// 그 밖의 문자는 오류로 거부한다(주입 차단).
+fn model_for_role(spec: &Value, role: &str) -> Result<Option<String>, String> {
+    let Some(table) = spec.get("model_by_role") else {
+        return Ok(None);
+    };
+    let Some(v) = table.get(role).or_else(|| table.get("_default")) else {
+        return Ok(None);
+    };
+    let slug = v.as_str().unwrap_or("");
+    let ok = !slug.is_empty()
+        && slug.len() <= 64
+        && slug.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && slug
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-');
+    if !ok {
+        return Err(format!("agents.json model_by_role: invalid model slug {v} (role={role})"));
+    }
+    Ok(Some(slug.to_string()))
+}
+
+/// spec.cmd + (있으면) ` --model <slug>`. resume 인자는 boot_agent_on_surface가 이 뒤에 붙인다.
+fn agent_cmd_for_role(spec: &Value, role: &str) -> Result<String, String> {
+    let mut cmd = spec["cmd"].as_str().ok_or("agent cmd missing")?.to_string();
+    if let Some(model) = model_for_role(spec, role)? {
+        cmd.push_str(" --model ");
+        cmd.push_str(&model);
+    }
+    Ok(cmd)
+}
+
 /// launch-agent(새 surface)와 node-recover(기존 surface 재기동)가 공유한다.
 fn boot_agent_on_surface(
     sid: u64,
@@ -4165,7 +4198,7 @@ fn boot_agent_on_surface(
     cwd: Option<&str>,
     config_dir: Option<&str>,
 ) -> Result<(), String> {
-    let mut cmd = spec["cmd"].as_str().ok_or("agent cmd missing")?.to_string();
+    let mut cmd = agent_cmd_for_role(spec, role)?;
     if resume {
         if let Some(arg) = spec["resume_arg"].as_str() {
             // T2-6 resume 어댑터: 대화 기억 복원 플래그 (예: claude --continue).
@@ -8677,6 +8710,59 @@ mod tests {
             assert!(!inject[0].1.contains("${"), "주입 값은 해소됨: {:?}", inject[0].1);
             assert!(!inject[0].1.contains("$HOME"), "HOME 전개됨: {:?}", inject[0].1);
         }
+    }
+
+    #[test]
+    fn model_by_role_seat_table_from_shipped_agents_json() {
+        // 주인님 지시: master=opus-5-5, 그 밖 좌석 전부 sonnet-5-5. 출하 팩 agents.json 그대로 읽는다.
+        let agents: Value =
+            serde_json::from_str(include_str!("../../cysjavis-pack/agents.json")).unwrap();
+        let claude = &agents["claude"];
+        for (role, model) in [
+            ("master", "claude-opus-5-5"),
+            ("cso", "claude-sonnet-5-5"),
+            ("worker", "claude-sonnet-5-5"),
+            ("worker-2", "claude-sonnet-5-5"),
+            ("reviewer-codex", "claude-sonnet-5-5"),
+            ("no-such-role", "claude-sonnet-5-5"),
+        ] {
+            let cmd = agent_cmd_for_role(claude, role).unwrap();
+            assert_eq!(cmd, format!("claude --dangerously-skip-permissions --model {model}"), "{role}");
+            let env = agent_env_pairs(claude);
+            let (send, _) = render_launch(&cmd, &env);
+            #[cfg(not(windows))]
+            assert_eq!(
+                send,
+                format!("CLAUDE_CONFIG_DIR=\"${{CYS_ACCOUNT_DIR:-$HOME/.cys/claude}}\" claude --dangerously-skip-permissions --model {model}")
+            );
+            #[cfg(windows)]
+            assert_eq!(send, format!("claude --dangerously-skip-permissions --model {model}"));
+        }
+        // model_by_role 없는 에이전트(codex·gemini·grok)는 cmd 그대로.
+        for a in ["codex", "gemini", "grok"] {
+            if let Some(spec) = agents.get(a) {
+                assert_eq!(agent_cmd_for_role(spec, "master").unwrap(), spec["cmd"].as_str().unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn model_by_role_rejects_unsafe_slugs() {
+        let spec = |m: Value| json!({"cmd": "claude", "model_by_role": {"master": m}});
+        for bad in [
+            json!("claude-opus; rm -rf ~"),
+            json!("$(id)"),
+            json!("Claude-Opus"),
+            json!("opus[1m]"),
+            json!(""),
+            json!("-x"),
+            json!("a b"),
+            json!(5),
+        ] {
+            assert!(agent_cmd_for_role(&spec(bad.clone()), "master").is_err(), "{bad}");
+        }
+        // 표는 있으나 역할·_default 둘 다 없으면 무변경.
+        assert_eq!(agent_cmd_for_role(&spec(json!("claude-opus-5-5")), "cso").unwrap(), "claude");
     }
 
     #[test]

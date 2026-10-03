@@ -10,6 +10,9 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 UPSTREAM = re.compile(r'(github\.com|api\.github\.com/repos)/idoforgod\b')
 OURS = 'https://github.com/greatson79/wave-terminal/releases/latest'
+# 설치기 판(wave-install steps.json version) — 문서의 한 줄 설치 태그가 이 판과 같아야 한다(v0.2.4 404 사고 · G8 rc030-final 노아 자리 blocking)
+INSTALLER_TAG = 'v0.3.0'
+INSTALL_TAG = re.compile(r'greatson79/wave-install/releases/download/(v[^/]+)/')
 
 
 def strip_credits(name, text):
@@ -30,6 +33,8 @@ class DocsDownloadChannel(unittest.TestCase):
             self.assertIsNone(UPSTREAM.search(rest), f'{name}: 출처 고지 밖 idoforgod 링크')
             self.assertIn(OURS, rest, f'{name}: releases/latest 링크 없음')
             self.assertIn('greatson79/wave-install', rest, f'{name}: 한 줄 설치 명령 없음')
+            tags = set(INSTALL_TAG.findall(rest))
+            self.assertEqual(tags, {INSTALLER_TAG}, f'{name}: 한 줄 설치 태그가 설치기 판과 다름 {tags}')
             self.assertIn('idoforgod/cys-terminal', credits, f'{name}: 원작 출처 누락')
             self.assertIn('MIT', credits, f'{name}: 라이선스 고지 누락')
 

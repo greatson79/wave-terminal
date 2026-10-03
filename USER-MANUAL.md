@@ -50,12 +50,12 @@
 
 macOS(터미널):
 ```bash
-curl -fsSL https://github.com/greatson79/wave-install/releases/download/v0.2.4/bootstrap.sh -o "$HOME/install-wave.sh" && bash "$HOME/install-wave.sh"
+curl -fsSL https://github.com/greatson79/wave-install/releases/download/v0.3.0/bootstrap.sh -o "$HOME/install-wave.sh" && bash "$HOME/install-wave.sh"
 ```
 
 Windows(PowerShell, 관리자 권한 불필요):
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/greatson79/wave-install/releases/download/v0.2.4/bootstrap.ps1 -OutFile ([Environment]::GetFolderPath('UserProfile')+'\install-wave.ps1'); powershell -NoProfile -ExecutionPolicy Bypass -File ([Environment]::GetFolderPath('UserProfile')+'\install-wave.ps1')"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/greatson79/wave-install/releases/download/v0.3.0/bootstrap.ps1 -OutFile ([Environment]::GetFolderPath('UserProfile')+'\install-wave.ps1'); powershell -NoProfile -ExecutionPolicy Bypass -File ([Environment]::GetFolderPath('UserProfile')+'\install-wave.ps1')"
 ```
 
 설치 파일을 직접 받으려면 [최신 릴리스](https://github.com/greatson79/wave-terminal/releases/latest)에서 받습니다.

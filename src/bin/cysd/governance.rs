@@ -3,7 +3,7 @@
 //! 핵심 기능: surface가 낳은 자식 프로세스 트리를 데몬이 직접 추적·강제 종료한다.
 
 use crate::state::{now_epoch, Daemon};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -20,6 +20,7 @@ pub fn spawn_watchdog(daemon: Arc<Daemon>) {
         let mut last_dup_alert: HashMap<String, f64> = HashMap::new();
         let mut last_proc_alert: HashMap<u64, f64> = HashMap::new();
         let mut restart_counts: HashMap<u64, u32> = HashMap::new();
+        let mut agent_unseen: HashMap<u64, (f64, bool)> = HashMap::new();
         let mut feed_reminded: HashMap<String, f64> = HashMap::new();
         let mut approval_debounce: HashMap<(u64, String), f64> = HashMap::new();
         let mut queue_depth_alerted: HashMap<u64, f64> = HashMap::new();
@@ -39,7 +40,7 @@ pub fn spawn_watchdog(daemon: Arc<Daemon>) {
             // 패닉 격리: 한 틱의 unwrap 패닉이 watchdog 태스크 전체를 죽여
             // 자원 거버넌스가 데몬 수명 내내 조용히 사라지는 것을 막는다.
             let tick = std::panic::AssertUnwindSafe(|| {
-                sys.refresh_processes(ProcessesToUpdate::All, true);
+                refresh_watchdog_processes(&mut sys);
                 check_load(&daemon, &mut last_load_alert);
                 check_surfaces(&daemon, &sys, &mut last_dup_alert, &mut last_proc_alert);
                 check_idle(&daemon);
@@ -47,7 +48,7 @@ pub fn spawn_watchdog(daemon: Arc<Daemon>) {
                 reap_orphan_ledger(&daemon, &sys);
                 reap_exited_surfaces(&daemon);
                 reap_zombie_surfaces(&daemon, &sys, &mut zombie_miss);
-                check_agent_death(&daemon, &sys, &mut restart_counts);
+                check_agent_death(&daemon, &sys, &mut restart_counts, &mut agent_unseen);
                 check_surface_crash(&daemon);
                 check_feed_aging(&daemon, &mut feed_reminded);
                 check_feed_backlog(&daemon, &mut feed_backlog_alerted);
@@ -80,6 +81,7 @@ pub fn spawn_watchdog(daemon: Arc<Daemon>) {
                 queue_depth_alerted.retain(|sid, _| live_surface_ids.contains(sid));
                 learn_stuck_debounce.retain(|sid, _| live_surface_ids.contains(sid));
                 zombie_miss.retain(|sid, _| live_surface_ids.contains(sid));
+                agent_unseen.retain(|sid, _| live_surface_ids.contains(sid));
                 launch_flag_warned.retain(|sid| live_surface_ids.contains(sid));
             });
             if std::panic::catch_unwind(tick).is_err() {
@@ -92,6 +94,44 @@ pub fn spawn_watchdog(daemon: Arc<Daemon>) {
             }
         }
     });
+}
+
+/// 워치독 프로세스 표 갱신 — 틱마다 호출. check_agent_death 등이 이 표에서 에이전트를 찾는다.
+/// 맥 sysinfo 0.33 은 name 을 처음 본 순간 고정하고 기본 갱신엔 cmd 가 없다 — fork~exec 사이에
+/// 본 에이전트가 영영 셸 이름으로 남아 agent_alive=false 가 고착됐다(rc.5 4회차). 그래서 맥·리눅스는
+/// 매 틱 cmd 를 Always 갱신해 exec 뒤 실제 명령줄을 본다(틱당 비용 차이 측정 불가 수준).
+/// 윈도우는 프로세스 이미지 이름이 생성 시점에 확정돼 해당 없고, cmd 읽기는 프로세스마다 PEB 를 읽어 비싸다.
+fn refresh_watchdog_processes(sys: &mut System) {
+    #[cfg(not(windows))]
+    {
+        use sysinfo::{ProcessRefreshKind, UpdateKind};
+        // 기본 갱신 항목(sysinfo 0.33 refresh_processes 와 동일) + cmd Always
+        let kind = ProcessRefreshKind::nothing()
+            .with_memory()
+            .with_cpu()
+            .with_disk_usage()
+            .with_exe(UpdateKind::OnlyIfNotSet)
+            .with_cmd(UpdateKind::Always);
+        sys.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
+    }
+    #[cfg(windows)]
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+}
+
+/// `agent.unseen` 발행 판정(좌석당 1회): 처음 미인식으로 관측한 시각부터 threshold 초가 지나면 true.
+/// 인식되면 호출부가 항목을 지워 재무장한다. 순수 상태 갱신이라 테스트로 핀한다.
+fn agent_unseen_due(
+    unseen: &mut HashMap<u64, (f64, bool)>,
+    surface_id: u64,
+    now: f64,
+    threshold: f64,
+) -> bool {
+    let e = unseen.entry(surface_id).or_insert((now, false));
+    if e.1 || now - e.0 < threshold {
+        return false;
+    }
+    e.1 = true;
+    true
 }
 
 fn env_u64(key: &str, default: u64) -> u64 {
@@ -272,6 +312,7 @@ fn check_agent_death(
     daemon: &Arc<Daemon>,
     sys: &System,
     restart_counts: &mut HashMap<u64, u32>,
+    agent_unseen: &mut HashMap<u64, (f64, bool)>,
 ) {
     let auto_restart = std::env::var("CYS_AGENT_AUTORESTART")
         .map(|v| v == "1")
@@ -293,6 +334,7 @@ fn check_agent_death(
             .any(|(_, cmdline)| cmdline_matches_agent(cmdline, &bin_base));
         if alive {
             s.agent_seen.store(true, Ordering::Relaxed);
+            agent_unseen.remove(&s.id);
             if s.agent_exit_notified.swap(false, Ordering::Relaxed) {
                 // 재기동 성공 — 카운터 유지(수명 내 상한 3회), 복귀 이벤트
                 daemon.bus.publish(
@@ -305,6 +347,30 @@ fn check_agent_death(
             continue;
         }
         if !s.agent_seen.load(Ordering::Relaxed) {
+            // 기동이 끝났다고 보고된 칸에서 에이전트를 끝내 못 알아보면 조용히 건너뛰지 않고 1회 알린다.
+            if s.launch_complete.load(Ordering::Acquire)
+                && agent_unseen_due(agent_unseen, s.id, now, env_u64("CYS_AGENT_UNSEEN_SECS", 30) as f64)
+            {
+                let role = s.role.lock().unwrap().clone();
+                let observed: Vec<Value> = descendants
+                    .iter()
+                    .take(16)
+                    .map(|(pid, cmdline)| {
+                        // 이름만(첫 토큰 basename) — 긴 인자(--settings JSON 등)는 싣지 않는다
+                        let first = cmdline.split_whitespace().next().unwrap_or("");
+                        let name = first.rsplit(['/', '\\']).next().unwrap_or(first);
+                        json!({"pid": pid, "name": name.chars().take(64).collect::<String>()})
+                    })
+                    .collect();
+                daemon.bus.publish(
+                    "agent.unseen",
+                    "surface",
+                    Some(s.id),
+                    json!({"agent": agent, "role": role, "surface_ref": cys::surface_ref(s.id),
+                           "bin": bin_base, "observed": observed,
+                           "note": "launch_complete=true 이후에도 에이전트 프로세스를 인식하지 못함 (agent_alive=false 지속)"}),
+                );
+            }
             continue; // 아직 기동 전 (launch-agent 진행 중)
         }
         if s.agent_exit_notified.swap(true, Ordering::Relaxed) {
@@ -1860,7 +1926,52 @@ pub(crate) fn deliver_queued(daemon: &Arc<Daemon>, depth_alerted: &mut HashMap<u
 
 #[cfg(test)]
 mod tests {
-    use super::{learn_stuck_candidates, plan_duplicate_kills};
+    use super::{agent_unseen_due, learn_stuck_candidates, plan_duplicate_kills};
+
+    /// agent.unseen 판정 핀: 임계 전 침묵 · 임계 후 1회 · 이후 침묵 · 인식돼 항목이 지워지면 재무장.
+    #[test]
+    fn agent_unseen_fires_once_after_threshold_and_rearms() {
+        let mut m = std::collections::HashMap::new();
+        assert!(!agent_unseen_due(&mut m, 7, 100.0, 30.0), "첫 관측은 시작점일 뿐");
+        assert!(!agent_unseen_due(&mut m, 7, 129.0, 30.0), "임계 전");
+        assert!(agent_unseen_due(&mut m, 7, 130.0, 30.0), "임계 도달 1회");
+        assert!(!agent_unseen_due(&mut m, 7, 500.0, 30.0), "좌석당 1회");
+        m.remove(&7); // 인식됨 → 호출부가 지움
+        assert!(!agent_unseen_due(&mut m, 7, 600.0, 30.0), "재무장 후 새 시작점");
+        assert!(agent_unseen_due(&mut m, 7, 631.0, 30.0));
+    }
+
+    /// 회귀 핀(rc.5 신호 4회차): fork~exec 사이에 워치독 틱이 걸려도, exec 뒤 실제 명령줄로
+    /// 에이전트가 인식돼야 한다(sysinfo 맥은 name 을 처음 본 순간 고정 — cmd 갱신 필요).
+    #[cfg(unix)]
+    #[test]
+    fn watchdog_sees_agent_after_late_exec() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("cys_late_exec_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let claude = dir.join("claude");
+        // 실행 가능한 가짜 claude — 시스템 바이너리 복사는 맥에서 서명 검증으로 즉사하므로 셸 스크립트.
+        std::fs::write(&claude, "#!/bin/sh\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script = dir.join("run.sh");
+        std::fs::write(&script, format!("sleep 0.6; exec {}\n", claude.display())).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut child = std::process::Command::new("/bin/bash").arg(&script).spawn().unwrap();
+        let root = std::process::id();
+        let mut sys = sysinfo::System::new();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        super::refresh_watchdog_processes(&mut sys); // exec 전: 이름 bash 로 처음 관측
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        super::refresh_watchdog_processes(&mut sys); // exec 후
+        let seen = super::collect_descendants(&sys, root);
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            seen.iter().any(|(_, c)| super::cmdline_matches_agent(c, "claude")),
+            "exec 뒤에도 claude 미인식 — 관측된 자손: {seen:?}"
+        );
+    }
 
     /// L3 재발방지 핀(2026-07-07 feed 189 폭주): 데몬 감지 항목의 surface 단위
     /// pending 판정·stale 스냅샷·멱등 해소 계약을 박제한다.

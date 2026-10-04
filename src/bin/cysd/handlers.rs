@@ -2694,6 +2694,7 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                         "queue_paused": queue_paused,
                         "agent": agent,
                         "agent_alive": agent_alive,
+                        "launch_complete": s.launch_complete.load(Ordering::Relaxed),
                         "model": s.agent_model.lock().unwrap().as_ref().map(|(m, _)| m.clone()),
                         "model_fallback": s.agent_model.lock().unwrap().as_ref().map(|(_, f)| *f),
                         "status": status,
@@ -4247,6 +4248,33 @@ mod tests {
         let Reply::Single(completed) = dispatch(&daemon, req, None) else { panic!("single reply") };
         assert_eq!(completed["result"]["launch_complete"], json!(true), "{completed}");
         let _ = daemon.get_surface(sid).unwrap().child.lock().unwrap().kill();
+    }
+
+    #[test]
+    fn org_status_exposes_launch_completion_without_token() {
+        let daemon = isolated_daemon();
+        let sid = make_surface(&daemon, Some("master"));
+        let surface = daemon.get_surface(sid).unwrap();
+        *surface.launch_token.lock().unwrap() = Some("status-test-token".into());
+        let status = || {
+            let req = Request { id: json!(1), method: "org.status".into(), params: json!({}) };
+            let Reply::Single(resp) = dispatch(&daemon, req, None) else { panic!("single reply") };
+            assert_eq!(resp["ok"], json!(true));
+            resp["result"]["surfaces"].as_array().unwrap().iter()
+                .find(|row| row["surface_id"] == json!(sid)).unwrap().clone()
+        };
+        let before = status();
+        let req = Request { id: json!(2), method: "surface.launch_complete".into(),
+            params: json!({"surface_id": sid, "launch_token": "status-test-token"}) };
+        let Reply::Single(completed) = dispatch(&daemon, req, None) else { panic!("single reply") };
+        let after = status();
+        let _ = surface.child.lock().unwrap().kill();
+        assert_eq!(completed["ok"], json!(true));
+        assert_eq!(before["launch_complete"], json!(false));
+        assert_eq!(after["launch_complete"], json!(true));
+        assert_eq!(after["surface_ref"], json!(format!("surface:{sid}")));
+        assert_eq!(after["role"], json!("master"));
+        assert!(after.get("launch_token").is_none(), "status must not expose completion capability");
     }
 
     #[test]

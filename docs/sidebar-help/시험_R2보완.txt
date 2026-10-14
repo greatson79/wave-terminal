@@ -1,0 +1,34 @@
+R2 보완 로컬 시험 원문 (2026-10-14, 설치·바깥 연결 없음)
+
+변경 전 (9445f9b 빌드): cd ui && bun test
+ 109 pass
+ 0 fail
+ 223 expect() calls
+
+실패 먼저: 기존 빌드에서 새 두 소켓 단언을 실행
+<local-home>/.pyenv/shims/python3 ui/e2e/sidebar_help_gate.py --output <local-home>/Desktop/Ai_works/<local-evidence-dir>/R3
+Traceback (most recent call last):
+  File "<local-home>/WAVE/install-help-work-20261013/rc5-sidebar/ui/e2e/sidebar_help_gate.py", line 249, in <module>
+    main()
+  File "<local-home>/WAVE/install-help-work-20261013/rc5-sidebar/ui/e2e/sidebar_help_gate.py", line 236, in main
+    assert first_heading != second_heading, f"two sockets share heading: {first_heading!r}"
+AssertionError: two sockets share heading: '1번 · 같은 작업'
+
+변경 후: cd ui && bun test
+ 111 pass
+ 0 fail
+ 228 expect() calls
+Ran 111 tests across 11 files. [88.00ms]
+
+변경 후: <local-home>/.pyenv/shims/python3 ui/e2e/sidebar_help_gate.py --output <local-home>/Desktop/Ai_works/<local-evidence-dir>/R3
+PASS C11: two surface IDs 7/8; closed 8 then 9; restored 7/9 keep IDs
+PASS C6: multiline paste, Enter, Ctrl-C -> PTY calls 0; pre-send network calls 0
+PASS 201: preview equals received JSON, receipt abcdefgh
+PASS 503: text and preview preserved; retry enabled; guidance matched
+PASS 429: text and preview preserved; retry enabled; guidance matched
+PASS 400: text and preview preserved; retry enabled; guidance matched
+PASS 404: text and preview preserved; retry enabled; guidance matched
+PASS refused: text and preview preserved; retry enabled; guidance matched
+PASS timeout: text and preview preserved; retry enabled; guidance matched
+PASS C11 two sockets: '본부 · 1번 · 같은 작업' != '교실 · 1번 · 같은 작업'
+PASS screenshots: 12 PNG at <local-home>/Desktop/Ai_works/<local-evidence-dir>/R3; outside requests 0

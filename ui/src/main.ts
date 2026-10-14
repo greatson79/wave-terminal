@@ -14,7 +14,7 @@ import { ccEffectiveZoom } from "./ccscale";
 import { clampWsbarWidth, clampWsbarFont, WSBAR_W_DEFAULT, WSBAR_FONT_STEP } from "./wsbar";
 import { composeFontFamily, FONT_CHOICES, ROLE_COLOR, roleDotColor } from "./appearance";
 import { safeHelpText } from "./help";
-import { paneHeading } from "./paneheading";
+import { paneHeading, paneHeadingPrefix, paneWorkspaceLabels } from "./paneheading";
 
 declare global {
   interface Window {
@@ -130,7 +130,8 @@ const LAYOUT_KEY = "cys-layout-v2";
 const paneKey = (sid: number, socket?: string): string => `${socket ?? ""}#${sid}`;
 const paneManualTask: Record<string, string> = JSON.parse(localStorage.getItem("cys-pane-tasks") || "{}");
 function displayPaneTask(sid: number, socket: string | undefined, reported: string | null): string {
-  return paneHeading(sid, paneManualTask[paneKey(sid, socket)], reported);
+  const label = paneWorkspaceLabels(workspaces).get(socket ?? "");
+  return paneHeading(sid, paneManualTask[paneKey(sid, socket)], reported, label);
 }
 
 interface PaneRuntime {
@@ -1355,6 +1356,7 @@ let groups: GroupMeta[] = []; // 06: 그룹 메타 배열(진실원=localStorage
 let groupCounter = 1; // 06: 그룹 id 발급(ws의 wsCounter와 분리)
 let focusedSid: number | null = null;
 const panes = new Map<string, PaneRuntime>(); // 키 = paneKey(sid, socket)
+const paneTitleState = new Map<string, { reported: string | null; exited: boolean }>();
 // 부서 데몬 socket_slug(F3 백엔드 단일진실) → socket 경로. launch_dept_daemon 반환·daemon-event로 채운다.
 const socketForSlug = new Map<string, string>();
 // 사이드바 노드 신호 캐시(B3) — org.status 응답을 워크스페이스 행 집계용으로 보관.
@@ -1533,6 +1535,7 @@ async function refreshPaneTitles() {
         if (!rt) continue;
         renderUsage(rt.usageEl, s.exited ? null : s.usage); // 종료 pane은 배지 제거 (혼동 방지)
         setRoleDot(rt.roleEl, s.exited ? null : s.role); // 역할 점도 동일 주기 갱신
+        paneTitleState.set(paneKey(s.surface_id, sk), { reported: tasks.get(s.surface_id) ?? null, exited: s.exited });
         if (rt.titleEl.isContentEditable) continue; // 이름 편집 중에는 덮어쓰지 않음
         rt.titleEl.textContent = displayPaneTask(s.surface_id, sk, tasks.get(s.surface_id) ?? null) + (s.exited ? " [종료]" : "");
         rt.titleEl.title = rt.titleEl.textContent;
@@ -1641,6 +1644,7 @@ async function makePane(sid: number, title: string, socket?: string): Promise<Pa
       {
         label: "이름 변경",
         action: () => {
+          const originalPrefix = paneHeadingPrefix(sid, paneWorkspaceLabels(workspaces).get(socket ?? ""));
           titleEl.contentEditable = "true";
           titleEl.focus();
           window.getSelection()?.selectAllChildren(titleEl);
@@ -1653,7 +1657,8 @@ async function makePane(sid: number, title: string, socket?: string): Promise<Pa
           const commit = () => {
             titleEl.removeEventListener("keydown", onKey); // rename마다 리스너 누적 방지
             titleEl.contentEditable = "false";
-            const name = (titleEl.textContent || "").trim().replace(/^\d+번\s*·\s*/, "");
+            const edited = (titleEl.textContent || "").trim();
+            const name = edited.startsWith(originalPrefix) ? edited.slice(originalPrefix.length).trim() : edited;
             // 사람의 작업 내용이 신고값보다 우선하며 빈 값은 신고값으로 돌아간다.
             if (name) paneManualTask[paneKey(sid, socket)] = name;
             else delete paneManualTask[paneKey(sid, socket)];
@@ -1903,6 +1908,7 @@ async function makePane(sid: number, title: string, socket?: string): Promise<Pa
 
   const rt: PaneRuntime = { sid, socket, el, termHost, roleEl, titleEl, usageEl, term, fit, unlisten: [un1, un2], observer, snapToBottom };
   panes.set(paneKey(sid, socket), rt);
+  paneTitleState.set(paneKey(sid, socket), { reported: null, exited: false });
   return rt;
 }
 
@@ -1922,6 +1928,7 @@ function destroyPaneRuntime(sid: number, socket?: string) {
   rt.term.dispose();
   rt.el.remove();
   panes.delete(paneKey(sid, socket));
+  paneTitleState.delete(paneKey(sid, socket));
 }
 
 // ---------- pane drag 이동 (탭을 끌어 자유 배치) ----------
@@ -2045,6 +2052,12 @@ function paneAtPhysicalPoint(pos?: { x: number; y: number }): PaneRuntime | unde
 // ---------- render ----------
 
 function render() {
+  for (const rt of panes.values()) {
+    if (rt.titleEl.isContentEditable) continue;
+    const state = paneTitleState.get(paneKey(rt.sid, rt.socket));
+    rt.titleEl.textContent = displayPaneTask(rt.sid, rt.socket, state?.reported ?? null) + (state?.exited ? " [종료]" : "");
+    rt.titleEl.title = rt.titleEl.textContent;
+  }
   for (const rt of panes.values()) rt.el.remove();
   root.innerHTML = "";
   const ws = current();

@@ -26,7 +26,7 @@ window.__TAURI__ = {
   core: { invoke: async (command, args = {}) => {
     window.__calls.push({command, args});
     if (command === 'daemon_status') return {daemon_pid: 123, socket_path: 'mock'};
-    if (command === 'list_depts') return {depts: {}};
+    if (command === 'list_depts') return JSON.parse(localStorage.getItem('mock-depts') || '{"depts":{}}');
     if (command === 'dept_tombstones') return [];
     if (command === 'ceo_pending') return false;
     if (command === 'create_surface') {
@@ -41,8 +41,15 @@ window.__TAURI__ = {
       return {};
     }
     if (command === 'attach_surface') return {output_event: 'mock-output', exited_event: 'mock-exit'};
-    if (command === 'list_surfaces') return {surfaces: window.__mockSurfaces};
-    if (command === 'org_status') return {surfaces: [{surface_id: 7, role: null, idle_secs: 0, agent_alive: true, status: {state: 'working', task: '홈페이지 글 고치는 중', context_pct: null}}], feed: {pending: 0}};
+    if (command === 'list_surfaces') {
+      const bySocket = JSON.parse(localStorage.getItem('mock-by-socket') || '{}');
+      return {surfaces: args.socket ? (bySocket[args.socket] || []) : window.__mockSurfaces};
+    }
+    if (command === 'org_status') return {surfaces: args.socket
+      ? [{surface_id: 1, role: null, idle_secs: 0, agent_alive: true, status: {state: 'working', task: '같은 작업', context_pct: null}}]
+      : JSON.parse(localStorage.getItem('mock-by-socket') || '{}').other
+        ? [{surface_id: 1, role: null, idle_secs: 0, agent_alive: true, status: {state: 'working', task: '같은 작업', context_pct: null}}]
+        : [{surface_id: 7, role: null, idle_secs: 0, agent_alive: true, status: {state: 'working', task: '홈페이지 글 고치는 중', context_pct: null}}], feed: {pending: 0}};
     if (command === 'feed_list') return {items: []};
     if (command === 'help_username') return 'alice';
     if (command === 'prepare_help') return {install_id: '0123456789abcdef0123456789abcdef', installer_version: 'app-0.2.0', os: 'mac', step: '0/0', notice_shown: true, code: 'J-APP-00', kind: args.kind, source: 'app', message: args.message};
@@ -206,6 +213,30 @@ def main():
                 assert expected in page.locator("#help-result").inner_text(), mode
                 page.screenshot(path=str(output / f"{index:02d}_{mode}_다시보내기.png"))
                 print(f"PASS {mode}: text and preview preserved; retry enabled; guidance matched")
+            assert not blocked, f"outside request attempted: {blocked}"
+            page.evaluate("""() => {
+              const surface = {surface_id: 1, title: 'surface 1', role: null, live_cwd: null, exited: false, usage: null};
+              localStorage.setItem('mock-surfaces', JSON.stringify([surface]));
+              localStorage.setItem('mock-by-socket', JSON.stringify({other: [surface]}));
+              localStorage.setItem('mock-depts', JSON.stringify({depts: {classroom: {socket: 'other', display_name: '교실'}}}));
+              localStorage.setItem('cys-layout-v2', JSON.stringify({workspaces: [
+                {id: 1, name: '본부', tree: {type: 'pane', sid: 1}},
+                {id: 2, name: '교실', socket: 'other', tree: {type: 'pane', sid: 1}}
+              ], groups: [], active: 0, counter: 3, groupCounter: 1}));
+            }""")
+            page.reload()
+            page.locator(".pane-title-text").first.wait_for()
+            page.wait_for_timeout(100)
+            first_heading = page.locator(".pane-title-text").first.inner_text()
+            page.locator("[data-ws-id='2']").click()
+            page.locator(".pane-title-text").first.wait_for()
+            page.wait_for_timeout(100)
+            second_heading = page.locator(".pane-title-text").first.inner_text()
+            assert first_heading != second_heading, f"two sockets share heading: {first_heading!r}"
+            assert "1번" in first_heading and "1번" in second_heading
+            assert "other" not in second_heading
+            page.screenshot(path=str(output / "12_두데몬_같은번호_구분.png"))
+            print(f"PASS C11 two sockets: {first_heading!r} != {second_heading!r}")
             assert not blocked, f"outside request attempted: {blocked}"
             print(f"PASS screenshots: {len(list(output.glob('*.png')))} PNG at {output}; outside requests 0")
             browser.close()

@@ -1212,9 +1212,8 @@ async fn start_surface_stream(
         let mut tries = 0;
         let mut continue_without_attach = false;
         loop {
-            // ponytail: pid 확인~attach 사이 수 ms 경합은 남는다(데몬 교체는 최소 5초 유예라 실사용 무해).
             if !std::mem::take(&mut continue_without_attach) {
-                attach_and_pump(&app, &sock, surface_id, &en).await;
+                attach_and_pump(&sock, surface_id, start_pid, |b64| app.emit(&en, b64).is_ok()).await;
             }
             let now_pid = daemon_pid_of(&sock).await;
             let surface = match now_pid {
@@ -1303,7 +1302,12 @@ async fn surface_entry(sock: &std::path::Path, surface_id: u64) -> Option<Value>
 }
 
 /// connect + surface.attach + ack 검증 + 출력 중계. 어떤 이유로든 끝나면 돌아온다(판정은 호출자).
-async fn attach_and_pump(app: &AppHandle, sock: &std::path::Path, surface_id: u64, en: &str) {
+async fn attach_and_pump(
+    sock: &std::path::Path,
+    surface_id: u64,
+    expected_pid: Option<u64>,
+    mut emit: impl FnMut(String) -> bool,
+) {
     let Ok(mut stream) = connect_to(sock).await else {
         return;
     };
@@ -1323,13 +1327,18 @@ async fn attach_and_pump(app: &AppHandle, sock: &std::path::Path, surface_id: u6
     if ack_v["ok"].as_bool() != Some(true) {
         return;
     }
+    // 확인 뒤·attach 전에 데몬이 바뀌었으면(번호 재사용 → 남의 패인) 첫 출력 전에 버린다 —
+    // 호출자가 다시 판정해 안내 문구로 간다. ack 를 받은 뒤라 이 스트림의 데몬이 지금 소켓 주인이다.
+    if expected_pid.is_some() && daemon_pid_of(sock).await != expected_pid {
+        return;
+    }
     let mut buf = [0u8; 8192];
     loop {
         match reader.read(&mut buf).await {
             Ok(0) | Err(_) => return,
             Ok(n) => {
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
-                if app.emit(en, b64).is_err() {
+                if !emit(b64) {
                     return;
                 }
             }
@@ -2524,6 +2533,51 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 순서 경쟁(노아 R1 C3): pid 확인 뒤·attach 전에 데몬이 바뀌고 새 데몬에 같은 번호가 있으면
+    /// 남의 패인 출력이 붙으면 안 된다. 가짜 데몬 소켓: 첫 identify = 10(확인 시점), 그 뒤 = 11(교체됨),
+    /// attach 는 ok + 「OTHER_PANE」 출력. 대조군(계속 10) 은 출력이 그대로 와야 한다(빈 통과 방지).
+    #[cfg(unix)]
+    #[test]
+    fn attach_drops_output_when_daemon_swapped_between_check_and_attach() {
+        fn run(swap: bool) -> Vec<String> {
+            let sock = std::env::temp_dir().join(format!("cys-race-{}-{swap}.sock", std::process::id()));
+            let _ = std::fs::remove_file(&sock);
+            tauri::async_runtime::block_on(async {
+                let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+                tauri::async_runtime::spawn(async move {
+                    let mut identifies = 0;
+                    while let Ok((s, _)) = listener.accept().await {
+                        let mut r = BufReader::new(s);
+                        let mut req = String::new();
+                        r.read_line(&mut req).await.unwrap();
+                        let mut s = r.into_inner();
+                        if req.contains("system.identify") {
+                            identifies += 1;
+                            let pid = if swap && identifies > 1 { 11 } else { 10 };
+                            let resp = json!({"id": 1, "ok": true, "result": {"daemon_pid": pid}});
+                            let _ = s.write_all(format!("{resp}\n").as_bytes()).await;
+                        } else {
+                            let _ = s.write_all(b"{\"id\":1,\"ok\":true,\"result\":{\"attached\":12}}\n").await;
+                            let _ = s.write_all(b"OTHER_PANE").await;
+                        }
+                    }
+                });
+                let start_pid = daemon_pid_of(&sock).await; // 확인 시점
+                assert_eq!(start_pid, Some(10));
+                let mut got = Vec::new();
+                attach_and_pump(&sock, 12, start_pid, |b64| {
+                    got.push(b64);
+                    true
+                })
+                .await;
+                let _ = std::fs::remove_file(&sock);
+                got
+            })
+        }
+        assert!(!run(false).is_empty(), "대조군: 같은 데몬이면 출력이 와야 한다");
+        assert!(run(true).is_empty(), "데몬이 바뀐 뒤 붙은 스트림의 출력이 화면으로 나갔다(남의 패인)");
+    }
 
     /// 끊긴 스트림 판정: 같은 데몬·살아 있는 패인만 다시 붙고, 진짜 종료·데몬 교체는 가리지 않는다.
     #[test]

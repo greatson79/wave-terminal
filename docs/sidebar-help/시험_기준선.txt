@@ -1,0 +1,128 @@
+bun test v1.3.11 (af24e281)
+
+src/deptlabel.test.ts:
+(pass) deptPlaceholderLabel — 부서 제작 중 표시 > pending 부서 탭은 '부서 제작 중' 표시 [0.50ms]
+(pass) deptPlaceholderLabel — 부서 제작 중 표시 > 확정된 부서는 실제 표시명 [0.16ms]
+(pass) deptPlaceholderLabel — 부서 제작 중 표시 > pending 미지정(undefined)은 실제 이름 취급(확정 탭 회귀) [0.04ms]
+(pass) deptPlaceholderLabel — 부서 제작 중 표시 > pending 라벨은 상수 DEPT_PENDING_LABEL 과 일치 [0.01ms]
+
+src/ime.test.ts:
+(pass) Profile C — 혼성(신규 버그): insertText 자모 커밋 후 표준 composition 진행 > insertText 'ㄴ' → compositionstart → onData '너' ⇒ 정확히 '너'만 전송(자모 유출 없음) [1.55ms]
+(pass) Profile C — 혼성(신규 버그): insertText 자모 커밋 후 표준 composition 진행 > 어절 연쇄: 'ㄴ'+compositionstart+onData '너' 다음 음절 '는'은 유출 없음 [0.16ms]
+(pass) Profile C — 혼성(신규 버그): insertText 자모 커밋 후 표준 composition 진행 > composition inputType(insertCompositionText) 관측 시에도 pending drop [0.17ms]
+(pass) Profile B — 구형: 음절 단위 insertText → insertReplacementText 재조합 → keydown flush > insertText '너' → insertReplacementText '넌' → keydown(Space) ⇒ '넌'
+(pass) Profile A — 표준: composition 이벤트 + onData만 > compositionstart/update/end → onData '한' ⇒ onData 그대로 1회 전송, pending 무관여
+(pass) 병합 커밋 — 고속 입력 2음절 한 insertText > insertText '안녕' ⇒ '안' 즉시 전송 + pending '녕', 이후 blur flush로 '녕'
+(pass) 병합 커밋 — 고속 입력 2음절 한 insertText > insertText '안녕' 직후 pending은 '녕'(flush 전)
+(pass) repl-sync — pending 없이 이미 전송된 음절 교정 > insertReplacementText '한' (pending 비어있음) ⇒ '\x7f한' 전송 [0.18ms]
+(pass) deleteContentBackward — pending 감소 > 멀티 pending '간다' → deleteContentBackward ⇒ '간'
+(pass) keydown/blur flush · 229 무전송 · onData 순서 보존 > Enter(비229) keydown ⇒ pending flush
+(pass) keydown/blur flush · 229 무전송 · onData 순서 보존 > keyCode 229 keydown ⇒ flush 안 함(조합 유지)
+(pass) keydown/blur flush · 229 무전송 · onData 순서 보존 > blur ⇒ pending flush
+(pass) keydown/blur flush · 229 무전송 · onData 순서 보존 > onData 시 잔여 pending 먼저 전송 후 data (순서 보존)
+(pass) 구멍① — keydown keyCode≠229 프로필(자모 유출 방어) > insertText 'ㄴ' → keydown(74,'ㅓ')(비229 글자 키) → compositionstart → onData '너' ⇒ '너'(유출 없음)
+(pass) 구멍① — keydown keyCode≠229 프로필(자모 유출 방어) > 229 인터리빙: insertText 'ㄴ' → keydown(229,'Process') → compositionstart → onData '너' ⇒ '너' [0.35ms]
+(pass) 구멍① — keydown keyCode≠229 프로필(자모 유출 방어) > 허용목록 flush 유지: pending 'ㅋ' + keydown(32,' ') ⇒ 'ㅋ' flush(단독 자모+Space 무손상) [0.01ms]
+(pass) 구멍① — keydown keyCode≠229 프로필(자모 유출 방어) > keydown 계측: keydown(229,'Process')가 debug 라인을 남긴다
+(pass) Profile D — cys-neo(신규 실기기 버그): xterm _inputEvent insertText 자모 유출(이중 전송) > 실기기 트레이스: 이중 전송 없이 정확히 '한들이 깨진다 '만 전송(선행 자모 유출 0) [0.05ms]
+(pass) Profile D — cys-neo(신규 실기기 버그): xterm _inputEvent insertText 자모 유출(이중 전송) > duplicate onData는 잔여 pending을 순서 보존 flush하고 유출 data는 폐기 [0.03ms]
+(pass) Profile D — cys-neo(신규 실기기 버그): xterm _inputEvent insertText 자모 유출(이중 전송) > 비-duplicate onData는 기존대로 pending flush 후 data 전송(회귀 방지 — Profile A/#순서보존)
+(pass) isHangulText — 자모·완성형만 참 > 자모/완성형 참, 그 외 거짓 [0.04ms]
+
+src/appearance.test.ts:
+(pass) composeFontFamily > null·공백 = 기본 스택 그대로 [0.77ms]
+(pass) composeFontFamily > 선택 폰트를 기본 스택 앞에 합성 — CJK 폴백 보존 [0.04ms]
+(pass) composeFontFamily > 따옴표 섞인 입력은 소거 후 인용 — CSS 리스트 파손 방지
+(pass) composeFontFamily > FONT_CHOICES 전 선택지가 유효 합성값을 낸다(기본값 포함) [0.03ms]
+(pass) roleDotColor > 무역할(일반 셸) = null → 점 숨김 [0.22ms]
+(pass) roleDotColor > 정식 역할 5종은 CC 색상표와 일치 [0.05ms]
+(pass) roleDotColor > 변형 역할은 접두 매칭 — 데몬 역할 변형 계약(overrides.rs·pack.rs)과 정합
+(pass) roleDotColor > 미지 역할은 회색 폴백
+(pass) roleDotColor > 4대 역할군 색이 서로 구별된다(오너 요구)
+
+src/updateplan.test.ts:
+(pass) updatePlan — 옵션 2 분기 판정(문자열 핀 = 회귀 0 증명) > ★신설: 본체+팩 동시 + 호환 → 팩 무중단을 가리지 않는다 [0.04ms]
+(pass) updatePlan — 옵션 2 분기 판정(문자열 핀 = 회귀 0 증명) > 본체+팩 동시 + 비호환 → 종전대로 본체 필요(가림이 정당한 케이스)
+(pass) updatePlan — 옵션 2 분기 판정(문자열 핀 = 회귀 0 증명) > 본체만 → 패치 설치 문구(T5 개정 — 오너 2026-07-15) [0.07ms]
+(pass) updatePlan — 옵션 2 분기 판정(문자열 핀 = 회귀 0 증명) > 팩만 + 호환 → 종전 무중단 문구 그대로(회귀 0)
+(pass) updatePlan — 옵션 2 분기 판정(문자열 핀 = 회귀 0 증명) > 팩만 + 비호환 → 종전 본체 필요 문구 그대로(회귀 0)
+(pass) updatePlan — 옵션 2 분기 판정(문자열 핀 = 회귀 0 증명) > 업데이트 없음 + 양쪽 체크 성공 → '0' 배지(종전) [0.01ms]
+(pass) updatePlan — 옵션 2 분기 판정(문자열 핀 = 회귀 0 증명) > 업데이트 없음 + 체크 실패 → unknown = 배지 유지(fail-safe 종전) [0.02ms]
+(pass) updatePlan — 옵션 2 분기 판정(문자열 핀 = 회귀 0 증명) > 체크 실패여도 보존 상태가 있으면 그 상태로 판정(fail-safe 보존 종전)
+
+src/shellquote.test.ts:
+(pass) shellQuotePosix — 작은따옴표 감싸기 > 공백 경로 [0.17ms]
+(pass) shellQuotePosix — 작은따옴표 감싸기 > 작은따옴표 포함 경로는 '\'' 로 끊어 이스케이프
+(pass) shellQuotePosix — 작은따옴표 감싸기 > 한글 경로는 그대로 리터럴
+(pass) shellQuotePosix — 작은따옴표 감싸기 > 빈 문자열도 유효한 빈 인자
+(pass) shellQuotePosix — 작은따옴표 감싸기 > $·"·\ 등 특수문자는 작은따옴표 안에서 리터럴
+(pass) shellQuoteWindows — 큰따옴표 감싸기 > 공백 경로 [0.05ms]
+(pass) shellQuoteWindows — 큰따옴표 감싸기 > 큰따옴표 포함은 "" 로 이스케이프
+(pass) shellQuoteWindows — 큰따옴표 감싸기 > 한글 경로
+(pass) shellQuote — 플랫폼 분기 > isWindows=false → POSIX [0.02ms]
+(pass) shellQuote — 플랫폼 분기 > isWindows=true → Windows
+(pass) shellQuoteJoin — 다중 파일 공백 연결 > 여러 경로 각각 인용 후 공백 연결(POSIX) [0.04ms]
+(pass) shellQuoteJoin — 다중 파일 공백 연결 > 빈 배열은 빈 문자열
+(pass) shellQuoteJoin — 다중 파일 공백 연결 > Windows 다중
+
+src/ccscale.test.ts:
+(pass) ccAutoScale — 창 비율 자동 배율 > 기준 창(820×760)은 정확히 1.0 [0.47ms]
+(pass) ccAutoScale — 창 비율 자동 배율 > 가로·세로 중 작은 비율을 채택 — 세로가 병목 [0.15ms]
+(pass) ccAutoScale — 창 비율 자동 배율 > 가로·세로 중 작은 비율을 채택 — 가로가 병목
+(pass) ccAutoScale — 창 비율 자동 배율 > 작은 창은 하한 클램프
+(pass) ccAutoScale — 창 비율 자동 배율 > 거대 창은 상한 클램프
+(pass) ccAutoScale — 창 비율 자동 배율 > 클램프 경계 정확값 — 상한 진입 직전 [0.04ms]
+(pass) ccAutoScale — 창 비율 자동 배율 > 비정상 치수(0·NaN·Infinity)는 1.0 폴백
+(pass) ccEffectiveZoom — 수동×자동 합성 > 수동 1.0 × 기준 창 = 1.0
+(pass) ccEffectiveZoom — 수동×자동 합성 > 수동 zoom은 자동 배율에 곱으로 합성
+(pass) ccEffectiveZoom — 수동×자동 합성 > 극단 조합(수동 2.0 × 자동 2.2 = 4.4)은 CC_ZOOM_CAP으로 봉인
+(pass) ccEffectiveZoom — 수동×자동 합성 > 축소 방향 합성(수동 0.6 × 자동 0.7)은 상한 미달 — 곱 그대로
+(pass) ccEffectiveZoom — 수동×자동 합성 > 비정상 수동값(NaN·0·음수)은 1.0 취급 [0.02ms]
+
+src/wsbar.test.ts:
+(pass) clampWsbarWidth — 사이드바 폭 > 범위 내 값은 정수 반올림 통과
+(pass) clampWsbarWidth — 사이드바 폭 > 하한 클램프
+(pass) clampWsbarWidth — 사이드바 폭 > 상한 클램프
+(pass) clampWsbarWidth — 사이드바 폭 > 비정상(NaN·Infinity)은 기본폭
+(pass) clampWsbarFont — 글자 배율 > 범위 내 값은 소수 2자리 통과 [0.29ms]
+(pass) clampWsbarFont — 글자 배율 > 하한·상한 클램프
+(pass) clampWsbarFont — 글자 배율 > 비정상(NaN·0·음수)은 1.0 [0.01ms]
+(pass) clampWsbarFont — 글자 배율 > 부동소수 잔여 자릿수 절사(0.1 step 누적 안전)
+
+src/theme.test.ts:
+(pass) hexToRgb — 파싱 > # 있는 6자리
+(pass) hexToRgb — 파싱 > # 없는 6자리도 허용
+(pass) hexToRgb — 파싱 > 검정·빨강·초록·파랑 채널 분해
+(pass) hexToRgb — 파싱 > 잘못된 형식은 null
+(pass) relativeLuminance — 0~1 정규화 > 검정=0, 흰색=1
+(pass) relativeLuminance — 0~1 정규화 > 기본 다크 배경은 매우 어둡다 [0.15ms]
+(pass) relativeLuminance — 0~1 정규화 > 파싱 실패는 0(어둡다고 간주)
+(pass) readableForeground — 휘도>0.5 경계 전환 > 어두운 배경 → 밝은 글자(DARK_FG)
+(pass) readableForeground — 휘도>0.5 경계 전환 > 밝은 배경 → 어두운 글자(LIGHT_FG)
+(pass) readableForeground — 휘도>0.5 경계 전환 > 경계: #808080(L≈0.502)>0.5 → 어두운 글자, #7f7f7f(L≈0.498)≤0.5 → 밝은 글자
+(pass) readableForeground — 휘도>0.5 경계 전환 > 파싱 실패는 밝은 글자(기본 다크 전제)
+
+src/reorder.test.ts:
+(pass) reorderWorkspace — 같은 컨테이너 내 순서 변경 > ungrouped 리스트에서 뒤 항목을 앞 항목 앞으로 [0.41ms]
+(pass) reorderWorkspace — 같은 컨테이너 내 순서 변경 > 앞 항목을 뒤 항목 뒤로(before=false) [0.05ms]
+(pass) reorderWorkspace — 같은 컨테이너 내 순서 변경 > 그룹 body 안 재정렬은 groupId를 유지한다 [0.02ms]
+(pass) reorderWorkspace — 같은 컨테이너 내 순서 변경 > 원본 배열을 변형하지 않는다(순수)
+(pass) reorderWorkspace — 자기 자신 위 드롭 no-op > srcId === anchorId면 순서 불변
+(pass) reorderWorkspace — 자기 자신 위 드롭 no-op > 없는 소스는 무변경
+(pass) reorderWorkspace — 그룹 간 이동 > ungrouped ws를 그룹 멤버 뒤로 넣으면 groupId가 바뀐다 [0.29ms]
+(pass) reorderWorkspace — 그룹 간 이동 > 그룹 멤버를 ungrouped 끝으로 빼면 groupId=undefined
+(pass) reorderWorkspace — 그룹 간 이동 > 마지막 멤버가 그룹을 탈출하면 그 멤버 groupId만 풀린다(그룹 해체는 상위 normalizeGroups 담당)
+(pass) reorderWorkspace — 그룹 간 이동 > ungrouped↔group 왕복은 원래 위치로 복원 가능 [0.09ms]
+(pass) reorderWorkspace — 그룹 간 이동 > anchor=null이면 대상 그룹 끝(마지막 동일그룹 멤버 뒤)에 삽입 [0.03ms]
+(pass) reorderWorkspace — pending 불변 > pending ws의 pending·groupId 속성은 이동에 영향받지 않는다 [0.02ms]
+(pass) reorderGroup — 같은 tier 순서 변경 > unpinned tier 안에서 순서 교체 [0.05ms]
+(pass) reorderGroup — 같은 tier 순서 변경 > pinned tier 안에서 뒤로 이동(before=false)
+(pass) reorderGroup — 같은 tier 순서 변경 > 자기 위 드롭 no-op [0.03ms]
+(pass) reorderGroup — 다른 tier 드롭 시 pinned 플래그 불변 + tier 클램프 > unpinned 그룹을 pinned 앵커에 드롭 → unpinned tier 맨 위로 클램프(플래그 불변) [0.02ms]
+(pass) reorderGroup — 다른 tier 드롭 시 pinned 플래그 불변 + tier 클램프 > pinned 그룹을 unpinned 앵커에 드롭 → pinned tier 맨 아래로 클램프(플래그 불변)
+(pass) reorderGroup — 다른 tier 드롭 시 pinned 플래그 불변 + tier 클램프 > anchor=null이면 자기 tier 끝에 추가
+
+ 104 pass
+ 0 fail
+ 213 expect() calls
+Ran 104 tests across 9 files. [109.00ms]

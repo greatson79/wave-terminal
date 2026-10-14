@@ -1,0 +1,4 @@
+PASS C6: multiline paste, Enter, Ctrl-C -> PTY calls 0; pre-send network calls 0
+PASS 201: preview equals received JSON, receipt abcdefgh
+PASS 503: text preserved, retry visible
+PASS screenshots: 6 PNG; outside requests 0

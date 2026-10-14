@@ -1,0 +1,23 @@
+127.0.0.1 - - [14/Oct/2026 18:51:56] "GET /index.html HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 18:51:56] "GET /xterm.css HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 18:51:56] "GET /main.js HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 18:51:56] "GET /style.css HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 18:51:58] "GET /index.html HTTP/1.1" 304 -
+127.0.0.1 - - [14/Oct/2026 18:51:58] "GET /xterm.css HTTP/1.1" 304 -
+127.0.0.1 - - [14/Oct/2026 18:51:58] "GET /style.css HTTP/1.1" 304 -
+127.0.0.1 - - [14/Oct/2026 18:51:58] "GET /main.js HTTP/1.1" 304 -
+  [PASS] 기본폭 216px (got 216)
+  [PASS] 드래그 핸들 존재
+  [PASS] 최소폭 클램프 176px (got 176)
+  [PASS] 최소폭에서 헤더 1줄 유지 ≤40px (got 33)
+  [PASS] 드래그 후 폭 216+140≈356
+  [PASS] 폭 영속 (localStorage=356)
+  [PASS] 리로드 후 폭 복원 (356)
+  [PASS] 더블클릭 기본폭 복귀 (216)
+  [PASS] A＋×3 → --wsbar-font=1.3 (got 1.3)
+  [PASS] 배율 영속
+  [PASS] 상한 클램프 2.2 (got 2.2)
+  [PASS] 하한 클램프 0.8 (got 0.8)
+  [PASS] 콘솔 pageerror 0건 (got [])
+
+PASS — 실패 0건

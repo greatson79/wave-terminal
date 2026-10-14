@@ -13,6 +13,8 @@ import { deptPlaceholderLabel } from "./deptlabel";
 import { ccEffectiveZoom } from "./ccscale";
 import { clampWsbarWidth, clampWsbarFont, WSBAR_W_DEFAULT, WSBAR_FONT_STEP } from "./wsbar";
 import { composeFontFamily, FONT_CHOICES, ROLE_COLOR, roleDotColor } from "./appearance";
+import { safeHelpText } from "./help";
+import { ensurePaneNumber, paneHeading } from "./paneheading";
 
 declare global {
   interface Window {
@@ -30,6 +32,61 @@ declare global {
 const invoke = (cmd: string, args?: Record<string, unknown>) => window.__TAURI__.core.invoke(cmd, args);
 const listen = (name: string, handler: (e: { payload: unknown }) => void) =>
   window.__TAURI__.event.listen(name, handler);
+
+const helpBox = document.getElementById("sidebar-help")!;
+const helpMessage = document.getElementById("help-message") as HTMLTextAreaElement;
+const helpKind = document.getElementById("help-kind") as HTMLSelectElement;
+const helpPreview = document.getElementById("help-preview")!;
+const helpSend = document.getElementById("help-send") as HTMLButtonElement;
+const helpResult = document.getElementById("help-result")!;
+let previewedHelp: Record<string, unknown> | null = null;
+let helpEditRevision = 0;
+helpBox.addEventListener("keydown", (e) => e.stopPropagation());
+helpBox.addEventListener("paste", (e) => e.stopPropagation());
+function invalidateHelpPreview() {
+  helpEditRevision++;
+  previewedHelp = null;
+  helpPreview.hidden = true;
+  helpSend.disabled = true;
+  helpSend.textContent = "보내기";
+  helpResult.textContent = "";
+  document.getElementById("help-limit")!.hidden = helpMessage.value.length <= 500;
+}
+helpMessage.addEventListener("input", invalidateHelpPreview);
+helpKind.addEventListener("change", invalidateHelpPreview);
+document.getElementById("help-preview-button")!.addEventListener("click", async () => {
+  const revision = helpEditRevision;
+  const rawMessage = helpMessage.value;
+  const code = helpKind.value;
+  const username = await invoke("help_username").catch(() => "") as string;
+  if (revision !== helpEditRevision) return;
+  const message = safeHelpText(rawMessage, username);
+  if (!message) { helpResult.textContent = "글을 입력해 주세요"; return; }
+  try {
+    const payload = await invoke("prepare_help", { code, message }) as Record<string, unknown>;
+    if (revision !== helpEditRevision) return;
+    previewedHelp = payload;
+  } catch {
+    helpResult.textContent = "보내는 내용을 준비하지 못했습니다. 잠시 뒤 다시 시도해 주세요.";
+    return;
+  }
+  helpPreview.textContent = JSON.stringify(previewedHelp, null, 2);
+  helpPreview.hidden = false;
+  helpSend.disabled = false;
+  helpResult.textContent = "";
+});
+helpSend.addEventListener("click", async () => {
+  if (!previewedHelp) return;
+  helpSend.disabled = true;
+  try {
+    const result = await invoke("send_help", { payload: previewedHelp }) as { id: string };
+    helpResult.textContent = `접수됨 · 접수 번호 ${result.id}`;
+  } catch (e) {
+    helpResult.textContent = `${String(e)} · 잠시 뒤 다시 보내 주세요. 계속 안 되면 카카오톡으로 문의해 주세요.`;
+    helpSend.textContent = "다시 보내기";
+    helpSend.disabled = false;
+  }
+});
 
 // ---------- layout model (v2: multiple workspaces, splits with ratio) ----------
 
@@ -65,6 +122,17 @@ const LAYOUT_KEY = "cys-layout-v2";
 
 // pane 식별 복합키 — 서로 다른 데몬이 같은 surface_id를 독립 발급하므로 (socket, sid)로 구분한다.
 const paneKey = (sid: number, socket?: string): string => `${socket ?? ""}#${sid}`;
+const paneNumbers: Record<string, number> = JSON.parse(localStorage.getItem("cys-pane-numbers") || "{}");
+function paneNumber(sid: number, socket?: string): number {
+  const key = paneKey(sid, socket);
+  const number = ensurePaneNumber(paneNumbers, key);
+  localStorage.setItem("cys-pane-numbers", JSON.stringify(paneNumbers));
+  return number;
+}
+const paneManualTask: Record<string, string> = JSON.parse(localStorage.getItem("cys-pane-tasks") || "{}");
+function displayPaneTask(sid: number, socket: string | undefined, reported: string | null): string {
+  return paneHeading(paneNumber(sid, socket), paneManualTask[paneKey(sid, socket)], reported);
+}
 
 interface PaneRuntime {
   sid: number;
@@ -1449,6 +1517,8 @@ async function refreshPaneTitles() {
     const sockets = [...new Set(workspaces.map((w) => w.socket))];
     let adopted = false;
     for (const sk of sockets) {
+      const org = (await invoke("org_status", { socket: sk }).catch(() => ({ surfaces: [] }))) as { surfaces?: { surface_id: number; status?: { task?: string | null } }[] };
+      const tasks = new Map((org.surfaces || []).map((s) => [s.surface_id, s.status?.task ?? null]));
       const r = (await invoke("list_surfaces", { socket: sk })) as {
         surfaces: {
           surface_id: number;
@@ -1465,7 +1535,8 @@ async function refreshPaneTitles() {
         renderUsage(rt.usageEl, s.exited ? null : s.usage); // 종료 pane은 배지 제거 (혼동 방지)
         setRoleDot(rt.roleEl, s.exited ? null : s.role); // 역할 점도 동일 주기 갱신
         if (rt.titleEl.isContentEditable) continue; // 이름 편집 중에는 덮어쓰지 않음
-        rt.titleEl.textContent = paneTitle(s.title, s.live_cwd) + (s.exited ? " [exited]" : "");
+        rt.titleEl.textContent = displayPaneTask(s.surface_id, sk, tasks.get(s.surface_id) ?? null) + (s.exited ? " [종료]" : "");
+        rt.titleEl.title = rt.titleEl.textContent;
       }
       // 자동 입양: 그 소켓의 role surface 중 UI에 없는 것 → '같은 소켓을 가진 ws'에만 표출.
       // ★소켓 일치 가드 — 부서A 노드가 부서B 탭에 잘못 입양되는 격리 누수 차단(검증 mustFix).
@@ -1533,7 +1604,7 @@ async function makePane(sid: number, title: string, socket?: string): Promise<Pa
   roleEl.style.display = "none";
   const titleEl = document.createElement("span");
   titleEl.className = "pane-title-text";
-  titleEl.textContent = paneTitle(title);
+  titleEl.textContent = displayPaneTask(sid, socket, null);
   const usageEl = document.createElement("span");
   usageEl.className = "pane-usage";
   // 배지 위 mousedown이 pane 드래그로 번지지 않게 — tooltip(hover) 확인 중 오발 방지
@@ -1583,8 +1654,11 @@ async function makePane(sid: number, title: string, socket?: string): Promise<Pa
           const commit = () => {
             titleEl.removeEventListener("keydown", onKey); // rename마다 리스너 누적 방지
             titleEl.contentEditable = "false";
-            const name = (titleEl.textContent || "").trim();
-            // 빈 이름 = 자동 제목(경로)으로 복귀 — 데몬에 ""를 저장하면 isAutoTitle이 잡는다
+            const name = (titleEl.textContent || "").trim().replace(/^\d+번\s*·\s*/, "");
+            // 사람의 작업 내용이 신고값보다 우선하며 빈 값은 신고값으로 돌아간다.
+            if (name) paneManualTask[paneKey(sid, socket)] = name;
+            else delete paneManualTask[paneKey(sid, socket)];
+            localStorage.setItem("cys-pane-tasks", JSON.stringify(paneManualTask));
             invoke("rename_surface", { socket, surfaceId: sid, title: name })
               .catch(() => {})
               .then(() => refreshPaneTitles());
@@ -4629,6 +4703,7 @@ deptBtn?.addEventListener("click", async () => {
 });
 
 window.addEventListener("keydown", (e) => {
+  if ((e.target as HTMLElement)?.closest("#sidebar-help")) return;
   if (e.isComposing || e.keyCode === 229) return; // IME 조합 중 무시
   if (paletteOpen) return; // 07: 팔레트 열림 중 전역 단축키 누수 차단(검색 타이핑이 ⌘W/T/D/G 발화 방지 · 적대검증 교정)
   const mod = e.metaKey || e.ctrlKey;

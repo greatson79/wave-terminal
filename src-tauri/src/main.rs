@@ -195,6 +195,73 @@ async fn org_status(socket: Option<String>) -> Result<Value, String> {
     rpc_on(&resolve_socket(&socket), "org.status", json!({})).await
 }
 
+const HELP_URL: &str = "https://waveainetworks.com/api/help";
+
+#[tauri::command]
+fn help_username() -> String {
+    std::env::var(if cfg!(windows) { "USERNAME" } else { "USER" }).unwrap_or_default()
+}
+
+fn help_install_id(app: &AppHandle) -> Result<String, String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join("help-install-id");
+    if let Ok(id) = std::fs::read_to_string(&path) {
+        if id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()) { return Ok(id); }
+    }
+    let mut bytes = [0u8; 16];
+    getrandom::getrandom(&mut bytes).map_err(|e| e.to_string())?;
+    let id: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    std::fs::write(&path, &id).map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
+#[tauri::command]
+fn prepare_help(app: AppHandle, code: String, message: String) -> Result<Value, String> {
+    if !matches!(code.as_str(), "J-APP-01" | "J-APP-02") || message.is_empty() || message.chars().count() > 500 {
+        return Err("보내는 내용을 확인해 주세요".into());
+    }
+    Ok(json!({
+        "install_id": help_install_id(&app)?, "installer_version": "app-0.2.0",
+        "os": if cfg!(windows) { "win" } else { "mac" }, "step": "0/0",
+        "notice_shown": true, "code": code, "message": message
+    }))
+}
+
+#[tauri::command]
+async fn send_help(payload: Value) -> Result<Value, String> {
+    if payload["notice_shown"] != true || !matches!(payload["code"].as_str(), Some("J-APP-01" | "J-APP-02"))
+        || payload["message"].as_str().is_none_or(|s| s.is_empty() || s.chars().count() > 500) {
+        return Err("보내는 내용을 확인해 주세요".into());
+    }
+    let url = std::env::var("WAVE_HELP_TEST_URL").ok()
+        .filter(|s| s.starts_with("http://127.0.0.1:"))
+        .unwrap_or_else(|| HELP_URL.to_owned());
+    post_help(&url, &payload).await
+}
+
+async fn post_help(url: &str, payload: &Value) -> Result<Value, String> {
+    let mut cmd = if cfg!(windows) { tokio::process::Command::new("curl.exe") } else { tokio::process::Command::new("/usr/bin/curl") };
+    let mut child = cmd.args(["--silent", "--show-error", "--max-time", "10", "--request", "POST",
+        "--header", "Content-Type: application/json", "--data-binary", "@-", "--write-out", "\n%{http_code}", &url])
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null()).spawn().map_err(|_| "연결할 수 없습니다".to_string())?;
+    let body = serde_json::to_vec(&payload).map_err(|_| "본문을 만들 수 없습니다".to_string())?;
+    child.stdin.take().ok_or("전송할 수 없습니다")?.write_all(&body).await.map_err(|_| "연결할 수 없습니다".to_string())?;
+    let output = child.wait_with_output().await.map_err(|_| "연결할 수 없습니다".to_string())?;
+    if !output.status.success() { return Err("연결할 수 없습니다".into()); }
+    let response = String::from_utf8_lossy(&output.stdout);
+    let (json_body, status) = response.rsplit_once('\n').ok_or("응답을 읽을 수 없습니다")?;
+    let status: u16 = status.trim().parse().map_err(|_| "응답을 읽을 수 없습니다".to_string())?;
+    let parsed: Value = serde_json::from_str(json_body).unwrap_or(Value::Null);
+    if (200..300).contains(&status) {
+        let id = parsed.get("id").and_then(Value::as_str).ok_or("접수 번호가 없습니다")?;
+        return Ok(json!({"id": id.chars().take(8).collect::<String>()}));
+    }
+    Err(if status == 404 && parsed["error"] == "not_configured" { "아직 접수 준비 중입니다".into() }
+        else { format!("전송 실패 ({status})") })
+}
+
 /// 풀 비경유 일회성 RPC — org_fleet fan-out 전용. timeout 취소가 발생해도 이 연결만 드롭(폐기)되어
 /// 공유 풀(conn_cell)을 desync로 오염시키지 않는다(같은 부서로 가는 send_key/org_status 응답 귀속 보호).
 /// 적대검증 R-1 교정: rpc_on을 timeout으로 감싸면 취소 시 풀 연결이 미수신 응답을 남겨 후속 RPC가
@@ -2398,6 +2465,9 @@ fn main() {
             daemon_status,
             list_surfaces,
             org_status,
+            help_username,
+            prepare_help,
+            send_help,
             org_fleet,
             ensure_dept_forwarders,
             control_analytics,
@@ -2541,6 +2611,47 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn help_local_receiver_paths_and_exact_body() {
+        use std::io::{Read, Write};
+        let payload = serde_json::json!({"install_id":"0123456789abcdef0123456789abcdef", "installer_version":"app-0.2.0", "os":"mac", "step":"0/0", "code":"J-APP-01", "notice_shown":true, "message":"ls\\n; $(echo hello)"});
+        for (status, answer, success) in [
+            (201, r#"{"id":"abcdefgh12345678"}"#, true),
+            (503, r#"{"error":"busy"}"#, false),
+            (429, r#"{"error":"rate_limited"}"#, false),
+            (400, r#"{"error":"bad_request"}"#, false),
+            (404, r#"{"error":"not_configured"}"#, false),
+        ] {
+            let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = server.local_addr().unwrap();
+            let thread = std::thread::spawn(move || {
+                let (mut stream, _) = server.accept().unwrap();
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+                let mut buf = Vec::new();
+                let mut temp = [0u8; 4096];
+                loop {
+                    let n = stream.read(&mut temp).unwrap();
+                    buf.extend_from_slice(&temp[..n]);
+                    if let Some(head_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&buf[..head_end]);
+                        let len: usize = head.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length: ").and_then(|x| x.trim().parse().ok())).unwrap();
+                        if buf.len() >= head_end + 4 + len {
+                            let received: Value = serde_json::from_slice(&buf[head_end + 4..head_end + 4 + len]).unwrap();
+                            let response = format!("HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}", answer.len());
+                            stream.write_all(response.as_bytes()).unwrap();
+                            return received;
+                        }
+                    }
+                }
+            });
+            let result = super::post_help(&format!("http://{addr}/api/help"), &payload).await;
+            assert_eq!(result.is_ok(), success, "status {status}: {result:?}");
+            if success { assert_eq!(result.unwrap()["id"], "abcdefgh"); }
+            assert_eq!(thread.join().unwrap(), payload);
+        }
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        assert!(super::post_help(&format!("http://127.0.0.1:{port}/api/help"), &payload).await.is_err());
+    }
     use super::*;
 
     /// 순서 경쟁(노아 R1 C3): pid 확인 뒤·attach 전에 데몬이 바뀌고 새 데몬에 같은 번호가 있으면

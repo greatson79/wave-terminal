@@ -788,6 +788,7 @@ version = "0.2.1"
 dependencies = [
  "base64 0.22.1",
  "cys-terminal",
+ "getrandom 0.2.17",
  "libc",
  "serde",
  "serde_json",

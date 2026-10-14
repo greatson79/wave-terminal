@@ -76,9 +76,14 @@ body.wsbar-resizing { cursor: col-resize; -webkit-user-select: none; user-select
 #wsbar-head > span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #wsbar-head button { flex: none; }
 #ws-tabs {
-  flex: 1; display: flex; flex-direction: column; gap: 2px;
+  flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 2px;
   overflow-y: auto; padding: 2px 8px 10px;
 }
+#sidebar-help { flex: none; display: flex; flex-direction: column; gap: 6px; padding: 9px; border-top: 1px solid var(--hairline); font-size: 12px; }
+#sidebar-help textarea { min-height: 76px; max-height: 22vh; resize: vertical; }
+#sidebar-help textarea, #sidebar-help select { min-width: 0; width: 100%; box-sizing: border-box; background: var(--bar); color: var(--text); border: 1px solid var(--hairline); border-radius: 4px; user-select: text; -webkit-user-select: text; }
+#sidebar-help pre { max-height: 18vh; overflow: auto; white-space: pre-wrap; word-break: break-word; user-select: text; -webkit-user-select: text; }
+#help-limit { color: var(--error); }
 .ws-tab {
   display: flex; flex-direction: column; gap: 2px;
   padding: 7px 10px 8px; border-radius: 7px;

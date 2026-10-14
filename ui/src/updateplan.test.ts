@@ -69,4 +69,16 @@ describe("updatePlan — 옵션 2 분기 판정(문자열 핀 = 회귀 0 증명)
     const p = updatePlan({ ...base, binCheckFailed: true, binVersion: "0.12.57", packVersion: null });
     expect(p.kind).toBe("binary");
   });
+  // 판정_빨간느낌표_정적 상태표 · 팩 주소 404(첫 판은 팩을 안 올림): 수리(main.rs is_http_404) 전에는 팩 확인이
+  // 실패(packCheckFailed)로 잡혀 unknown = 배지를 안 건드림 → 처음부터 보이던 빨간 ! 가 남았다. 수리 뒤에는
+  // 404 = 확인 성공·팩 없음 → none = 회색 0 으로 바뀐다(main.ts checkForUpdate 가 unknown 아닐 때만 배지 갱신).
+  test("팩 404 수리: 본체 최신 + 팩 없음 → 회색 0 (수리 전 = unknown 으로 빨간 ! 유지)", () => {
+    const after = updatePlan({ ...base, binVersion: null, packVersion: null });
+    expect(after.kind).toBe("none");
+    expect(after.badge).toBe("0");
+    expect(after.ok).toBe(true);
+    const before = updatePlan({ ...base, binVersion: null, packVersion: null, packCheckFailed: true });
+    expect(before.kind).toBe("unknown");
+    expect(before.badge).toBe("");
+  });
 });

@@ -2625,17 +2625,57 @@ fn main() {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn help_test_url_requires_loopback_without_credentials_and_explicit_port() {
-        for bad in [
-            "http://127.0.0.1:80@external.example/path",
-            "http://127.0.0.1.evil.com:80/",
-            "https://127.0.0.1:1/",
-            "http://[::1]:8765/",
-            "http://127.0.0.1:/",
-            "http://127.0.0.1:99999/",
-        ] {
-            assert_eq!(super::help_test_url(bad), None, "{bad}");
-        }
+    fn help_test_url_rejects_userinfo_external_host() {
+        assert_eq!(super::help_test_url("http://127.0.0.1:80@external.example/"), None);
+    }
+
+    #[test]
+    fn help_test_url_rejects_ipv6_loopback() {
+        assert_eq!(super::help_test_url("http://[::1]:8765/"), None);
+    }
+
+    #[test]
+    fn help_test_url_rejects_localhost_name() {
+        assert_eq!(super::help_test_url("http://localhost:8765/"), None);
+    }
+
+    #[test]
+    fn help_test_url_rejects_other_loopback_ip() {
+        assert_eq!(super::help_test_url("http://127.0.0.2:8765/"), None);
+    }
+
+    #[test]
+    fn help_test_url_rejects_no_port() {
+        assert_eq!(super::help_test_url("http://127.0.0.1/"), None);
+    }
+
+    #[test]
+    fn help_test_url_rejects_empty_port() {
+        assert_eq!(super::help_test_url("http://127.0.0.1:/"), None);
+    }
+
+    #[test]
+    fn help_test_url_rejects_zero_port() {
+        assert_eq!(super::help_test_url("http://127.0.0.1:0/"), None);
+    }
+
+    #[test]
+    fn help_test_url_rejects_out_of_range_port() {
+        assert_eq!(super::help_test_url("http://127.0.0.1:99999/"), None);
+    }
+
+    #[test]
+    fn help_test_url_rejects_subdomain() {
+        assert_eq!(super::help_test_url("http://127.0.0.1.evil.com:80/"), None);
+    }
+
+    #[test]
+    fn help_test_url_rejects_https() {
+        assert_eq!(super::help_test_url("https://127.0.0.1:1/"), None);
+    }
+
+    #[test]
+    fn help_test_url_accepts_ipv4_loopback_with_port() {
         assert_eq!(super::help_test_url("http://127.0.0.1:8765/"), Some("http://127.0.0.1:8765/".into()));
     }
 

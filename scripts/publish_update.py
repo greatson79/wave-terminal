@@ -56,19 +56,28 @@ def cdhash(app):
 
 
 def install_side(a, art, V, tag):
+    win = "windows-x86_64" in NEED  # 이번 판에 윈도우가 들어가는가(첫 판 = 아니오 · /win 은 rc.4 그대로)
     steps_raw = (art / "steps.json").read_bytes()
     steps = json.loads(steps_raw)
     rel = steps["release"]
     (ok if rel.get("version") == V else bad)(f"steps.json release.version = {V}(버튼과 같은 판)")
+    (ok if rel.get("repository") == REPO else bad)(f"steps.json release.repository = {REPO}")
     for plat, name in rel["asset_name"].items():
+        url = rel["asset_url"].get(plat, "")
+        if plat.startswith("windows") and not win:
+            c = get(url)[0]  # GET 만 · 이번 판 밖 자산이 살아 있는지
+            (ok if c in (200, 206) and not url.startswith(DL) else bad)(f"asset_url.{plat} = 이번 판 아님(rc.4 그대로) · GET {c}")
+            continue
         f = art / name
-        if rel["asset_url"].get(plat) != f"{DL}/{tag}/{name}":
-            bad(f"asset_url.{plat} 가 같은 릴리스({DL}/{tag}/)가 아님")
-        if not f.is_file() or rel["sha256"].get(plat) != sha(f):
-            bad(f"sha256.{plat} != 실제 {name}")
-    cmd = json.dumps(steps.get("reinstall", {}), ensure_ascii=False)
-    (ok if f"{LATEST}/bootstrap.sh" in cmd and f"{LATEST}/bootstrap.ps1" in cmd and "wave-install/releases" not in cmd else bad)(
-        "함정3: reinstall.command = releases/latest/download/bootstrap.sh·ps1")
+        (ok if url == f"{DL}/{tag}/{name}" else bad)(f"asset_url.{plat} = 같은 릴리스 {DL}/{tag}/{name}")
+        (ok if f.is_file() and rel["sha256"].get(plat) == sha(f) else bad)(f"sha256.{plat} = 실제 {name}")
+    (ok if rel.get("sha256sums_url") == f"{DL}/{tag}/SHA256SUMS" else bad)("sha256sums_url = 같은 릴리스 SHA256SUMS")
+    cmd = steps.get("reinstall", {}).get("command", {})
+    mac_ok = cmd.get("macos") in ("curl -fsSL https://waveainetworks.com/mac | bash -s -- --reinstall",) or f"{LATEST}/bootstrap.sh" in cmd.get("macos", "")
+    (ok if mac_ok else bad)(f"함정3 맥: reinstall.macos = waveainetworks.com/mac --reinstall 또는 latest bootstrap.sh")
+    wurl = (re.search(r"https://\S+?bootstrap\.ps1", cmd.get("windows", "")) or [""])[0]
+    wc = get(wurl)[0] if wurl else 0
+    (ok if wc in (200, 206) and (not win or wurl == f"{LATEST}/bootstrap.ps1") else bad)(f"함정3 윈도우: reinstall.windows 주소 GET {wc} {wurl}")
     tgz = next(art.glob("wave-install-*.tar.gz"), None)
     boot = (art / "bootstrap.sh").read_text()
     if not tgz:
@@ -80,13 +89,17 @@ def install_side(a, art, V, tag):
         (ok if f"{DL}/{tag}/{tgz.name}" in boot and sha(tgz) in boot else bad)("bootstrap.sh 가 같은 릴리스 설치팩 주소·sha256 고정(make-release.sh 주입)")
     (ok if f"{LATEST}/steps.json" in boot and "raw.githubusercontent.com/greatson79/wave-install" not in boot else bad)(
         "함정1: bootstrap.sh WAVE_INSTALL_STEPS_URL 기본값 = releases/latest/download/steps.json")
-    ws = (art / "win-start.ps1").read_text()
-    (ok if f"{DL}/{tag}/bootstrap.ps1" in ws and sha(art / "bootstrap.ps1") in ws else bad)(
-        "함정2: win-start.ps1 = 같은 릴리스 bootstrap.ps1 주소(태그 고정)+sha256 고정(render_win_start.py) → /win 은 latest 로 가도 해시 사슬 유지")
+    if win:
+        ws = (art / "win-start.ps1").read_text()
+        (ok if f"{DL}/{tag}/bootstrap.ps1" in ws and sha(art / "bootstrap.ps1") in ws else bad)(
+            "함정2: win-start.ps1 = 같은 릴리스 bootstrap.ps1 주소(태그 고정)+sha256 고정(render_win_start.py) → /win 은 latest 로 가도 해시 사슬 유지")
+    else:
+        print("  · 함정2(win-start) 검사 안 함 — 이번 판 윈도우 제외(/win = rc.4 그대로)")
     sums = dict(reversed(l.split()) for l in (art / "SHA256SUMS").read_text().splitlines() if l.strip())
-    need = ["bootstrap.sh", "bootstrap.ps1", "win-start.ps1", "steps.json", *rel["asset_name"].values()] + ([tgz.name] if tgz else [])
-    miss = [n for n in dict.fromkeys(need) if sums.get(n) != (sha(art / n) if (art / n).is_file() else None)]
-    (ok if not miss else bad)(f"SHA256SUMS 가 실제 파일과 일치{'' if not miss else ' — 어긋남: ' + ', '.join(miss)}")
+    files = sorted(p.name for p in art.iterdir() if p.is_file() and p.name != "SHA256SUMS")
+    miss = [n for n in files if sums.get(n) != sha(art / n)] + [n for n in sums if n not in files]
+    (ok if not miss else bad)(f"SHA256SUMS = 릴리스 전 자산 {len(files)}개와 일치{'' if not miss else ' — 어긋남: ' + ', '.join(miss)}")
+    print("  ■ 릴리스 하나에 다 있다: " + " · ".join(files) + " · SHA256SUMS")
     return rel
 
 
@@ -193,7 +206,7 @@ def get(url, follow=True):
     args = ["curl", "-sS", "-r", "0-65535", "-o", "-", "-w", "\n%{http_code} %{redirect_url}", url]
     if follow:
         args.insert(1, "-L")
-    out = subprocess.run(args, text=True, capture_output=True).stdout
+    out = subprocess.run(args, capture_output=True).stdout.decode("utf-8", "replace")  # 바이너리 자산도 GET 함
     body, _, tail = out.rpartition("\n")
     code, _, loc = tail.partition(" ")
     return int(code or 0), body, loc

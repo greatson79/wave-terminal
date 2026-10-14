@@ -98,6 +98,17 @@ pub fn probe_holder(socket_path: &Path, timeout: Duration) -> bool {
 pub const LIVE_PANES_UNRESPONSIVE: Duration = Duration::from_secs(30);
 
 /// 홀더에 직계 자식(=패인 셸)이 있는가. 확인 자체가 실패하면 「있다」로 본다(보수 — 기다리는 쪽).
+/// 맥은 프로세스를 띄우지 않고 커널에 직접 묻는다 — pgrep 을 띄우면 fork~exec 사이에 이 프로세스가
+/// 연 잠금 fd(CLOEXEC 여도)가 자식에 잠깐 붙어, 같은 순간 그 잠금을 풀고 다시 잡는 쪽이 실패한다.
+#[cfg(target_os = "macos")]
+pub fn holder_has_panes(pid: u32) -> bool {
+    let mut buf = vec![0 as libc::pid_t; 4096];
+    let size = (buf.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+    let n = unsafe { libc::proc_listchildpids(pid as libc::pid_t, buf.as_mut_ptr().cast(), size) };
+    n != 0 // -1(확인 실패)도 「있다」
+}
+
+#[cfg(not(target_os = "macos"))]
 pub fn holder_has_panes(pid: u32) -> bool {
     std::process::Command::new("pgrep")
         .args(["-P", &pid.to_string()])
@@ -245,13 +256,13 @@ mod tests {
         assert!(unresponsive_for(Duration::from_millis(20), tick, || false));
     }
 
+    /// 자식을 띄우지 않는다 — 띄우면 그 순간 같은 시험 프로세스의 다른 시험이 연 잠금 fd 가 자식에
+    /// 붙어 flock_reacquire_after_holder_release 가 가끔 실패했다(병렬 2/9 · 원본 0/21).
+    #[cfg(target_os = "macos")]
     #[test]
     fn holder_has_panes_sees_direct_children() {
-        let mut child = std::process::Command::new("sleep").arg("5").spawn().unwrap();
-        assert!(holder_has_panes(std::process::id()));
-        child.kill().unwrap();
-        child.wait().unwrap();
-        assert!(!holder_has_panes(child.id())); // 끝난 프로세스엔 자식 없음
+        assert!(holder_has_panes(1)); // launchd 는 늘 직계 자식이 있다
+        assert!(!holder_has_panes(999_999)); // 맥 pid 상한(99999) 밖 = 없는 프로세스 → 자식 없음
     }
 
     fn tmp_dir() -> PathBuf {

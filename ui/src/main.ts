@@ -14,7 +14,7 @@ import { ccEffectiveZoom } from "./ccscale";
 import { clampWsbarWidth, clampWsbarFont, WSBAR_W_DEFAULT, WSBAR_FONT_STEP } from "./wsbar";
 import { composeFontFamily, FONT_CHOICES, ROLE_COLOR, roleDotColor } from "./appearance";
 import { safeHelpText } from "./help";
-import { ensurePaneNumber, paneHeading } from "./paneheading";
+import { paneHeading } from "./paneheading";
 
 declare global {
   interface Window {
@@ -82,7 +82,13 @@ helpSend.addEventListener("click", async () => {
     const result = await invoke("send_help", { payload: previewedHelp }) as { id: string };
     helpResult.textContent = `접수됨 · 접수 번호 ${result.id}`;
   } catch (e) {
-    helpResult.textContent = `${String(e)} · 잠시 뒤 다시 보내 주세요. 계속 안 되면 카카오톡으로 문의해 주세요.`;
+    const error = String(e);
+    const advice = error.includes("429") ? "요청이 많습니다. 잠시 뒤 다시 보내 주세요."
+      : error.includes("400") ? "보내는 내용을 확인한 뒤 다시 보내 주세요."
+      : error.includes("아직 접수 준비 중") || error.includes("404") ? "접수 기능이 아직 준비 중입니다."
+      : error.includes("연결") ? "연결을 확인한 뒤 다시 보내 주세요."
+      : "잠시 뒤 다시 보내 주세요.";
+    helpResult.textContent = `${error} · ${advice} 계속 안 되면 카카오톡으로 문의해 주세요.`;
     helpSend.textContent = "다시 보내기";
     helpSend.disabled = false;
   }
@@ -122,16 +128,9 @@ const LAYOUT_KEY = "cys-layout-v2";
 
 // pane 식별 복합키 — 서로 다른 데몬이 같은 surface_id를 독립 발급하므로 (socket, sid)로 구분한다.
 const paneKey = (sid: number, socket?: string): string => `${socket ?? ""}#${sid}`;
-const paneNumbers: Record<string, number> = JSON.parse(localStorage.getItem("cys-pane-numbers") || "{}");
-function paneNumber(sid: number, socket?: string): number {
-  const key = paneKey(sid, socket);
-  const number = ensurePaneNumber(paneNumbers, key);
-  localStorage.setItem("cys-pane-numbers", JSON.stringify(paneNumbers));
-  return number;
-}
 const paneManualTask: Record<string, string> = JSON.parse(localStorage.getItem("cys-pane-tasks") || "{}");
 function displayPaneTask(sid: number, socket: string | undefined, reported: string | null): string {
-  return paneHeading(paneNumber(sid, socket), paneManualTask[paneKey(sid, socket)], reported);
+  return paneHeading(sid, paneManualTask[paneKey(sid, socket)], reported);
 }
 
 interface PaneRuntime {

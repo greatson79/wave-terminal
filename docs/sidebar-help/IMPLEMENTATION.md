@@ -23,7 +23,13 @@
 
 `ui/index.html`에 `btn-master-start`, `btn-dept-master`, `btn-ws-dept`는 없다. `ui/src/main.ts` 4519, 4527, 4606줄의 선택적 조회는 null일 때 실행되지 않는다. `addDeptWorkspace`는 명령 팔레트(3780줄)에서도 호출되므로 남긴다. `start_master`와 `start_dept_master`는 이 UI에서 버튼 이외 호출처가 없지만 이번 변경에서 지우지 않았다.
 
-원본 naming 근거: 운영 줄 `src/bin/cysd/state.rs` 850줄의 `naming_cap`은 좌석 제목의 정본화 1회권이고, `src/bin/cys.rs` 7008–7010줄은 `{name}`·`{label}`·`{surface}` 템플릿과 `s번호` 확장을 설명한다. 이 사본의 패인 표시는 `ui/src/main.ts`의 `org_status`에서 같은 surface 식별자와 `status.task`를 읽는다. 전역 번호는 `(socket,surface_id)` 키에 저장한 단조 증가값이어서 화면 순서나 닫기/열기로 재번호하지 않는다. 사람이 고친 작업 내용은 `localStorage`에 저장하며 좌석의 `status.task`보다 우선한다. 빈 값으로 편집하면 좌석 신고값으로 복귀한다.
+| 운영 원본에서 옮긴 규칙 | 수강생 화면에서 보이는 형태 |
+| --- | --- |
+| 운영 `~/cys-workspace/src/cys-terminal-wave/src/bin/cys.rs:6652–6674`의 `compose_title`: 시스템이 `s{surface_id}`를 붙임 | 데몬의 `list_surfaces.surface_id`를 그대로 `{surface_id}번`으로 표시. 화면 전용 번호 발급·저장 없음 |
+| 같은 함수의 작업명은 사람이 주는 정체성 자리 | 사람이 고친 작업 내용 → `org_status.status.task` → `대기 중` 순서 |
+| 원본 `TITLE_SEP`는 공백 없는 `·`; 제목에는 본부·작업명·번호·모델이 올 수 있음 | 읽기 쉽게 `번 · 작업 내용`으로 표시하며 본부·모델 조각은 넣지 않음 |
+
+이 사본의 데몬은 `src/bin/cysd/state.rs:1214–1216,1505`에서 기록된 최대 ID 다음 번호를 발급한다. 같은 데몬에서 닫은 패인의 번호를 재사용하지 않는다. 세션 복원에서 같은 `surface_id`를 다시 붙이면 같은 번호다. 운영 원본도 복원 과정에서 새 surface를 발급하면 새 번호가 붙는다. 사람 수정 작업은 `(socket,surface_id)` 키로 `localStorage`에 저장하고 빈 값으로 편집하면 좌석 신고값으로 돌아간다.
 
 ## 현재 검증 범위
 
@@ -48,6 +54,10 @@
 - 기존 `ui/e2e/wsbar_gate.py`: ac37e79 빌드 13/13, HEAD 빌드 13/13. 원문은 `e2e_기준선.txt`, `e2e_HEAD.txt`. 이미 설치된 Python 3.12.2의 Playwright와 Chromium 캐시를 사용했다.
 - 새 `ui/e2e/sidebar_help_gate.py`: 활성 가짜 패인이 있는 화면에서 `ls\npwd\n` 붙여넣기·Enter·Ctrl-C 후 `send_input` 등 PTY 쓰기 0건, 보내기 전 네트워크 호출 0건. 127.0.0.1 가짜 수신기의 201에서 미리 보기 JSON과 수신 본문 동일·접수 번호 표시, 503에서 글 보존·다시 보내기 표시. 바깥 URL 요청 시 차단하도록 설정했고 차단 시도 0건. 원문은 `시험_화면_통과.txt`.
 - PNG 6장: `<local-evidence-dir>/`의 `01_버튼없는_사이드바.png`, `02_빈입력창.png`, `03_미리보기.png`, `04_접수번호.png`, `05_실패_다시보내기.png`, `06_패인번호_작업내용.png`. 모두 Python Playwright `page.screenshot(path=…)`로 저장했다.
+
+### R1 보완 검증
+
+화면 번호는 `surface_id`를 그대로 표시한다. Python Playwright에서 같은 데몬의 7·8번, 8번 닫은 뒤 새 9번, 세션 복원 후 7·9번 유지를 확인했다. 데몬 재시작의 ID 시드는 `cargo test --offline --bin cysd max_surface_id_survives_full_surface_prune_via_chains`로 확인했다. 화면 실패 길 503·429·400·404(`not_configured`)·연결 거부·시한 초과마다 글과 미리 보기 보존, 다시 보내기 활성, 맞는 안내 문구를 확인했다. 새 PNG 11장은 `<local-evidence-dir>/R2/`에, 시험 원문은 `시험_R1보완.txt`에 있다. 기존 PNG는 덮어쓰지 않았다.
 - 타입 검사: `ui/node_modules/.bin/tsc`가 없어 실행하지 않았다. `bunx`·`npx`로 대체하지 않았다.
 
 아직 못 잰 것: 실제 데몬에 연결한 패인/PTY 실기 바이트, Windows 실기, 서버 실수신(의도적으로 금지), 사이드바 외 기존 e2e 전체. 화면 시험의 패인·수신기는 가짜다. 이 문서는 C1–C13 전체 완료 보고가 아니다.

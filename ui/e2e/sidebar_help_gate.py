@@ -52,7 +52,7 @@ window.__TAURI__ = {
         : [{surface_id: 7, role: null, idle_secs: 0, agent_alive: true, status: {state: 'working', task: '홈페이지 글 고치는 중', context_pct: null}}], feed: {pending: 0}};
     if (command === 'feed_list') return {items: []};
     if (command === 'help_username') return 'alice';
-    if (command === 'prepare_help') return {install_id: '0123456789abcdef0123456789abcdef', installer_version: 'app-0.2.0', os: 'mac', step: '0/0', notice_shown: true, code: 'J-APP-00', kind: args.kind, source: 'app', message: args.message};
+    if (command === 'prepare_help') return {install_id: '0123456789abcdef0123456789abcdef', installer_version: 'app-0.2.1', os: 'mac', step: '0/0', notice_shown: true, code: 'J-APP-00', kind: args.kind, source: 'app', message: args.message};
     if (command === 'send_help') {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 250);

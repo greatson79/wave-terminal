@@ -196,6 +196,7 @@ async fn org_status(socket: Option<String>) -> Result<Value, String> {
 }
 
 const HELP_URL: &str = "https://waveainetworks.com/api/help";
+const HELP_APP_VERSION: &str = concat!("app-", env!("CARGO_PKG_VERSION"));
 
 #[tauri::command]
 fn help_username() -> String {
@@ -222,7 +223,7 @@ fn prepare_help(app: AppHandle, kind: String, message: String) -> Result<Value, 
         return Err("보내는 내용을 확인해 주세요".into());
     }
     Ok(json!({
-        "install_id": help_install_id(&app)?, "installer_version": "app-0.2.0",
+        "install_id": help_install_id(&app)?, "installer_version": HELP_APP_VERSION,
         "os": if cfg!(windows) { "win" } else { "mac" }, "step": "0/0",
         "notice_shown": true, "code": "J-APP-00", "kind": kind, "source": "app", "message": message
     }))
@@ -2612,10 +2613,15 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn help_reports_current_app_version() {
+        assert_eq!(super::HELP_APP_VERSION, "app-0.2.1");
+    }
+
     #[tokio::test]
     async fn help_local_receiver_paths_and_exact_body() {
         use std::io::{Read, Write};
-        let payload = serde_json::json!({"install_id":"0123456789abcdef0123456789abcdef", "installer_version":"app-0.2.0", "os":"mac", "step":"0/0", "code":"J-APP-00", "kind":"feedback", "source":"app", "notice_shown":true, "message":"ls\\n; $(echo hello)"});
+        let payload = serde_json::json!({"install_id":"0123456789abcdef0123456789abcdef", "installer_version":super::HELP_APP_VERSION, "os":"mac", "step":"0/0", "code":"J-APP-00", "kind":"feedback", "source":"app", "notice_shown":true, "message":"ls\\n; $(echo hello)"});
         for (status, answer, success) in [
             (201, r#"{"id":"abcdefgh12345678"}"#, true),
             (503, r#"{"error":"busy"}"#, false),

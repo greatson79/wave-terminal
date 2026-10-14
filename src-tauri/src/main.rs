@@ -1960,6 +1960,9 @@ async fn check_pack_update(manifest_url: Option<String>) -> Result<Option<Value>
     .await;
     let out = match joined {
         Ok(Ok(out)) if out.status.success() => out,
+        // 릴리스에 pack-manifest.json 자산이 아직 없음(404) = 확인된 '새 팩 없음'. Err로 두면 UI가
+        //   unknown에 머물러 배지가 영영 안 바뀐다. 5xx·네트워크 장애는 아래 Err(상태보존) 그대로.
+        Ok(Ok(out)) if is_http_404(&out.stderr) => return Ok(None),
         Ok(Ok(out)) => return Err(format!("pack-manifest HTTP 실패(code {:?})", out.status.code())),
         Ok(Err(e)) => return Err(format!("curl 실행 실패: {e}")),
         Err(e) => return Err(format!("curl join 실패: {e}")),
@@ -1986,6 +1989,12 @@ async fn check_pack_update(manifest_url: Option<String>) -> Result<Option<Value>
         "manifest_url": url,
         "binary_too_old": binary_too_old,
     })))
+}
+
+/// curl -f 의 HTTP 404 판정. 종료 코드는 22 또는 56(HTTP/2 · 실측 curl 8.7.1)으로 갈려
+/// 오류문으로 본다: "The requested URL returned error: 404"(구판은 뒤에 " Not Found").
+fn is_http_404(stderr: &[u8]) -> bool {
+    String::from_utf8_lossy(stderr).contains("returned error: 404")
 }
 
 /// 무중단 호환 게이트(DESIGN §7-④ 축2) 순수 판정 — min_binary_version > 실행 바이너리면 true(무중단
@@ -2533,6 +2542,15 @@ mod tests {
             parse_reinject_counts("PACK_UPDATE_RESULT pack_version=1.2.3 injected=0 skipped=0 deferred=2 failed=0"),
             (0, 2)
         );
+    }
+
+    #[test]
+    fn pack_manifest_404_is_no_update_but_other_errors_are_not() {
+        assert!(is_http_404(b"curl: (56) The requested URL returned error: 404\n"));
+        assert!(is_http_404(b"curl: (22) The requested URL returned error: 404 Not Found\n"));
+        assert!(!is_http_404(b"curl: (22) The requested URL returned error: 503\n"));
+        assert!(!is_http_404(b"curl: (6) Could not resolve host: github.com\n"));
+        assert!(!is_http_404(b""));
     }
 
     // check_pack_update 호환 게이트(DESIGN §7-④ 축2): min_binary_version > 실행 바이너리 = 무중단 거부.

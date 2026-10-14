@@ -91,6 +91,37 @@ pub fn probe_holder(socket_path: &Path, timeout: Duration) -> bool {
     matches!(stream.read(&mut buf), Ok(n) if n > 0)
 }
 
+/// 살아 있는 패인(셸 = 데몬의 직계 자식)이 있는 홀더는 이 시간 동안 끊김 없이 무응답이어야 회수한다
+/// (승인 기록 2152 승인 · 문턱 상수는 이것 하나). 패인 없는 홀더는 종전대로 즉시 판정.
+/// 이유: heartbeat 는 벽시계 mtime 이라 쉬기·절전만으로도 낡는다 — 그때 ping 한 번 놓치면 수업 중
+/// 작업 전체(셸·클로드)를 잃는다. 진짜 멈춘 데몬은 30초 뒤에도 회수된다.
+pub const LIVE_PANES_UNRESPONSIVE: Duration = Duration::from_secs(30);
+
+/// 홀더에 직계 자식(=패인 셸)이 있는가. 확인 자체가 실패하면 「있다」로 본다(보수 — 기다리는 쪽).
+pub fn holder_has_panes(pid: u32) -> bool {
+    std::process::Command::new("pgrep")
+        .args(["-P", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(true)
+}
+
+/// `window` 동안 무응답이 끊김 없이 이어졌는가 — 중간에 한 번이라도 응답하면 false(건강).
+/// 기다리는 동안 호출자는 소켓을 만들지 않는다(락 획득 전 단계) — 두 데몬 동시 서비스 0.
+pub fn unresponsive_for(window: Duration, interval: Duration, mut responded: impl FnMut() -> bool) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        if responded() {
+            return false;
+        }
+        if start.elapsed() >= window {
+            return true;
+        }
+        std::thread::sleep(interval);
+    }
+}
+
 /// pid 생존 프로브(unix=kill(pid,0)).
 pub fn pid_alive(pid: u32) -> bool {
     pid != 0 && unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
@@ -201,6 +232,27 @@ pub fn dedupe_loss_log(prev: Option<&str>, reason: &str, every_n: u64) -> (bool,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 패인 있는 홀더: 기다리는 중 한 번이라도 응답하면 회수 안 함 · 끝까지 무응답이면 회수.
+    #[test]
+    fn unresponsive_for_needs_unbroken_silence() {
+        let tick = Duration::from_millis(1);
+        let mut n = 0;
+        assert!(!unresponsive_for(Duration::from_millis(50), tick, || {
+            n += 1;
+            n == 3 // 세 번째 확인에서 응답(되살아남)
+        }));
+        assert!(unresponsive_for(Duration::from_millis(20), tick, || false));
+    }
+
+    #[test]
+    fn holder_has_panes_sees_direct_children() {
+        let mut child = std::process::Command::new("sleep").arg("5").spawn().unwrap();
+        assert!(holder_has_panes(std::process::id()));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!holder_has_panes(child.id())); // 끝난 프로세스엔 자식 없음
+    }
 
     fn tmp_dir() -> PathBuf {
         let d = std::env::temp_dir().join(format!(

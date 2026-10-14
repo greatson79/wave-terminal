@@ -364,6 +364,18 @@ fn acquire_startup_lock(
         deadman::HolderVerdict::Dead => {
             // 홀더 hung 확정 → 회수(SIGTERM→SIGKILL, cysd 검증 후) → 락 1회 재획득 시도.
             let pid = holder_pid.expect("Dead 판정은 pid 존재를 함의");
+            if deadman::holder_has_panes(pid) {
+                eprintln!(
+                    "[cysd] deadman: holder pid {pid} has live panes — waiting up to {}s of continuous no-response",
+                    deadman::LIVE_PANES_UNRESPONSIVE.as_secs()
+                );
+                if !deadman::unresponsive_for(deadman::LIVE_PANES_UNRESPONSIVE, deadman::PROBE_TIMEOUT, || {
+                    deadman::probe_holder(socket_path, deadman::PROBE_TIMEOUT)
+                }) {
+                    log_lock_loss(state_dir, lock_path, "holder-recovered-while-waiting");
+                    std::process::exit(1);
+                }
+            }
             if deadman::reclaim_from_dead_holder(pid, deadman::RECLAIM_GRACE, deadman::pid_is_cysd)
                 && try_flock(&file)
             {

@@ -1504,6 +1504,14 @@ setInterval(refreshPaneTitles, 3000);
 const TRASH_SVG =
   '<svg viewBox="0 0 24 24"><path d="M9 3h6l1 1h4v2H4V4h4l1-1zM6 8h12l-1 13a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L6 8z"/></svg>';
 
+// 끊긴 조각 이어 하기 안내 — 정본 문구 = 개발본부 안내_끊겼을때_이어하기_1쪽(같은 말 유지).
+const RESTARTED_NOTICE =
+  "\r\n이 조각(패인)이 끝났어요. 대화 내용은 컴퓨터에 남아 있으니 놀라지 않아도 됩니다.\r\n" +
+  "1. 새 조각 열기 — 왼쪽 위 + New 버튼 (맥 ⌘T · 윈도우 Ctrl+T)\r\n" +
+  "2. 원래 작업하던 폴더로 가기 — cd (끝에 한 칸) 를 치고 폴더를 창으로 끌어다 놓은 뒤 Enter\r\n" +
+  "3. claude --continue 를 입력하고 Enter — 그 폴더에서 하던 마지막 대화가 그대로 열려요\r\n" +
+  "4. 대화가 안 보이면 claude --resume\r\n";
+
 async function makePane(sid: number, title: string, socket?: string): Promise<PaneRuntime> {
   // 멱등 보장 — 같은 (소켓,surface)에 pane 런타임·리스너가 이중 생성되지 않게
   const existing = panes.get(paneKey(sid, socket));
@@ -1804,8 +1812,10 @@ async function makePane(sid: number, title: string, socket?: string): Promise<Pa
   const un1 = await listen(ev.output_event, (e) => {
     term.write(b64ToBytes(e.payload as string), snapToBottom);
   });
-  const un2 = await listen(ev.exited_event, () => {
+  const un2 = await listen(ev.exited_event, (e) => {
     term.write("\r\n\x1b[31m[surface exited]\x1b[0m\r\n", snapToBottom);
+    // 백그라운드 프로그램이 다시 시작돼 이 조각의 작업이 끝난 경우 — 이어 하기 안내 1쪽과 같은 말.
+    if (e.payload === "restarted") term.write(RESTARTED_NOTICE, snapToBottom);
   });
   // listen 등록을 마친 뒤에 스트림을 시작해야 초기 화면 snapshot(프롬프트)이 유실되지 않는다
   // (런치 시 첫 pane 빈 화면 버그 — snapshot이 listen 전에 emit되던 race 차단).

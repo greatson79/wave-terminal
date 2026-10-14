@@ -580,6 +580,61 @@ fn process_chunk_isolated(
     }
 }
 
+/// PTY 읽기 1회 — 일시 오류(Interrupted·WouldBlock)는 패인 종료가 아니므로 다시 읽는다.
+/// 돌려주는 Err 는 진짜 끝(그때만 exited). WouldBlock 은 잠깐 쉬고 다시 읽어 헛돌기를 막는다.
+fn read_pty(reader: &mut impl std::io::Read, buf: &mut [u8]) -> std::io::Result<usize> {
+    loop {
+        match reader.read(buf) {
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            r => return r,
+        }
+    }
+}
+
+#[cfg(test)]
+mod read_pty_tests {
+    use super::read_pty;
+    use std::io::{Error, ErrorKind, Read};
+
+    /// 정해진 순서로 결과를 내는 가짜 PTY.
+    struct Scripted(Vec<std::io::Result<&'static [u8]>>);
+    impl Read for Scripted {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match self.0.remove(0) {
+                Ok(b) => {
+                    buf[..b.len()].copy_from_slice(b);
+                    Ok(b.len())
+                }
+                Err(e) => Err(e),
+            }
+        }
+    }
+
+    #[test]
+    fn transient_errors_are_retried_not_exit() {
+        let mut r = Scripted(vec![
+            Err(Error::from(ErrorKind::Interrupted)),
+            Err(Error::from(ErrorKind::WouldBlock)),
+            Ok(b"still alive"),
+            Ok(b""),
+        ]);
+        let mut buf = [0u8; 64];
+        assert_eq!(read_pty(&mut r, &mut buf).unwrap(), 11); // 일시 오류 두 번 뒤 데이터
+        assert_eq!(&buf[..11], b"still alive");
+        assert_eq!(read_pty(&mut r, &mut buf).unwrap(), 0); // EOF = 셸 종료(종전 그대로)
+    }
+
+    #[test]
+    fn other_errors_still_end_the_pane() {
+        let mut r = Scripted(vec![Err(Error::from(ErrorKind::BrokenPipe))]);
+        let e = read_pty(&mut r, &mut [0u8; 8]).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::BrokenPipe);
+    }
+}
+
 #[cfg(test)]
 mod dedup_tests {
     use super::{dedup_worker_role, live_worker_count};
@@ -1764,7 +1819,7 @@ impl Daemon {
                 );
             }
             loop {
-                match std::io::Read::read(&mut reader, &mut buf) {
+                match read_pty(&mut reader, &mut buf) {
                     Ok(0) => {
                         if debug {
                             eprintln!("[debug] surface {} reader EOF", surf.id);
@@ -1772,9 +1827,12 @@ impl Daemon {
                         break;
                     }
                     Err(e) => {
-                        if debug {
-                            eprintln!("[debug] surface {} reader error: {e}", surf.id);
-                        }
+                        // 상시 1줄 — 「완료 전 exited」 사례에서 셸 종료(EOF)와 읽기 오류를 가르는 단서.
+                        eprintln!(
+                            "[cysd] surface {} PTY 읽기 오류로 종료 처리 (kind={:?}): {e}",
+                            surf.id,
+                            e.kind()
+                        );
                         break;
                     }
                     Ok(n) => {

@@ -237,9 +237,20 @@ async fn send_help(payload: Value) -> Result<Value, String> {
         return Err("보내는 내용을 확인해 주세요".into());
     }
     let url = std::env::var("WAVE_HELP_TEST_URL").ok()
-        .filter(|s| s.starts_with("http://127.0.0.1:"))
+        .and_then(|s| help_test_url(&s))
         .unwrap_or_else(|| HELP_URL.to_owned());
     post_help(&url, &payload).await
+}
+
+fn help_test_url(raw: &str) -> Option<String> {
+    let port = raw.strip_prefix("http://")?.split(['/', '?', '#']).next()?
+        .strip_prefix("127.0.0.1:")?;
+    if !port.bytes().all(|b| b.is_ascii_digit()) || port.parse::<u16>().ok()? == 0 {
+        return None;
+    }
+    let url = tauri::Url::parse(raw).ok()?;
+    (url.scheme() == "http" && url.host_str() == Some("127.0.0.1")
+        && url.username().is_empty() && url.password().is_none()).then(|| url.to_string())
 }
 
 async fn post_help(url: &str, payload: &Value) -> Result<Value, String> {
@@ -2613,6 +2624,21 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn help_test_url_requires_loopback_without_credentials_and_explicit_port() {
+        for bad in [
+            "http://127.0.0.1:80@external.example/path",
+            "http://127.0.0.1.evil.com:80/",
+            "https://127.0.0.1:1/",
+            "http://[::1]:8765/",
+            "http://127.0.0.1:/",
+            "http://127.0.0.1:99999/",
+        ] {
+            assert_eq!(super::help_test_url(bad), None, "{bad}");
+        }
+        assert_eq!(super::help_test_url("http://127.0.0.1:8765/"), Some("http://127.0.0.1:8765/".into()));
+    }
+
     #[test]
     fn help_reports_current_app_version() {
         assert_eq!(super::HELP_APP_VERSION, "app-0.2.1");

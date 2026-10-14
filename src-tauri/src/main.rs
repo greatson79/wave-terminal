@@ -1206,46 +1206,144 @@ async fn start_surface_stream(
     let event_exited = format!("surface-exited-{slug}-{surface_id}");
     let (en, ee) = (event_name.clone(), event_exited.clone());
     let handle = tauri::async_runtime::spawn(async move {
-        let Ok(mut stream) = connect_to(&sock).await else {
-            let _ = app.emit(&ee, ());
-            return;
-        };
-        let req =
-            json!({"id": 1, "method": "surface.attach", "params": {"surface_id": surface_id}});
-        let mut line = serde_json::to_vec(&req).unwrap_or_default();
-        line.push(b'\n');
-        if stream.write_all(&line).await.is_err() {
-            let _ = app.emit(&ee, ());
-            return;
-        }
-        let mut reader = BufReader::new(stream);
-        let mut ack = String::new();
-        // ack 검증 — not_found 등 에러 ack에서 read 블록·무신호 죽은 pane이 되지 않게
-        if reader.read_line(&mut ack).await.unwrap_or(0) == 0 {
-            let _ = app.emit(&ee, ());
-            return;
-        }
-        let ack_v: Value = serde_json::from_str(ack.trim()).unwrap_or(Value::Null);
-        if ack_v["ok"].as_bool() != Some(true) {
-            let _ = app.emit(&ee, ());
-            return;
-        }
-        let mut buf = [0u8; 8192];
+        // 스트림이 끝나도 바로 exited 를 쏘지 않는다 — 데몬이 그대로이고 패인이 살아 있으면
+        // 같은 패인에 다시 붙는다(연결만 끊긴 경우). 데몬이 바뀌었으면 번호가 재사용되므로 붙지 않는다.
+        let start_pid = daemon_pid_of(&sock).await;
+        let mut tries = 0;
+        let mut continue_without_attach = false;
         loop {
-            match reader.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    let b64 = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
-                    if app.emit(&en, b64).is_err() {
-                        break;
-                    }
+            if !std::mem::take(&mut continue_without_attach) {
+                attach_and_pump(&sock, surface_id, start_pid, |b64| app.emit(&en, b64).is_ok()).await;
+            }
+            let now_pid = daemon_pid_of(&sock).await;
+            let surface = match now_pid {
+                Some(_) => surface_entry(&sock, surface_id).await,
+                None => None,
+            };
+            match stream_end_action(start_pid, now_pid, surface.as_ref(), tries) {
+                StreamEnd::Reattach => {
+                    tries += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(REATTACH_DELAY_MS)).await;
+                }
+                // 데몬 무응답 — 붙지 않고 기다렸다 다시 판정(그사이 새 데몬이 같은 번호를 쓰면 남의 패인).
+                StreamEnd::Wait => {
+                    tries += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(REATTACH_DELAY_MS)).await;
+                    continue_without_attach = true;
+                }
+                StreamEnd::Exited => {
+                    let _ = app.emit(&ee, "");
+                    return;
+                }
+                StreamEnd::DaemonRestarted => {
+                    let _ = app.emit(&ee, "restarted");
+                    return;
                 }
             }
         }
-        let _ = app.emit(&ee, ());
     });
     state.0.lock().unwrap().insert(key, handle);
     Ok(())
+}
+
+/// 연결이 끊긴 패인에 다시 붙는 횟수 상한·간격(이 둘만 바꾸면 된다).
+const REATTACH_MAX: u32 = 5;
+const REATTACH_DELAY_MS: u64 = 500;
+
+#[derive(Debug, PartialEq)]
+enum StreamEnd {
+    Reattach,
+    Wait,
+    Exited,
+    DaemonRestarted,
+}
+
+/// 스트림이 끝났을 때 할 일(순수함수 — 시험 핀).
+/// 다시 붙기는 「같은 데몬(daemon_pid 동일) + 그 패인이 아직 살아 있음」일 때만 — 셸이 끝났거나
+/// (exited/정리됨) 데몬이 바뀌었으면(번호 재사용 → 남의 패인) 절대 다시 붙지 않는다.
+fn stream_end_action(
+    start_pid: Option<u64>,
+    now_pid: Option<u64>,
+    surface: Option<&Value>,
+    tries: u32,
+) -> StreamEnd {
+    match (start_pid, now_pid) {
+        (Some(s), Some(n)) if s != n => StreamEnd::DaemonRestarted,
+        (Some(_), Some(_)) => {
+            let alive = surface.is_some_and(|v| v["exited"].as_bool() == Some(false));
+            if alive && tries < REATTACH_MAX {
+                StreamEnd::Reattach
+            } else {
+                StreamEnd::Exited
+            }
+        }
+        // 데몬 응답 없음 — 잠깐 바쁜 것일 수 있으니 상한까지 기다린 뒤, 그래도 없으면 데몬이 끝난 것.
+        (Some(_), None) if tries < REATTACH_MAX => StreamEnd::Wait,
+        (Some(_), None) => StreamEnd::DaemonRestarted,
+        // 시작 때 데몬을 못 확인했으면 같은 데몬인지 알 수 없다 — 다시 붙지 않는다(종전 동작).
+        (None, _) => StreamEnd::Exited,
+    }
+}
+
+async fn daemon_pid_of(sock: &std::path::Path) -> Option<u64> {
+    rpc_oneshot(sock, "system.identify", json!({"caller": "ui"}))
+        .await
+        .ok()
+        .and_then(|v| v["daemon_pid"].as_u64())
+}
+
+async fn surface_entry(sock: &std::path::Path, surface_id: u64) -> Option<Value> {
+    let r = rpc_oneshot(sock, "surface.list", json!({})).await.ok()?;
+    r["surfaces"]
+        .as_array()?
+        .iter()
+        .find(|s| s["surface_id"].as_u64() == Some(surface_id))
+        .cloned()
+}
+
+/// connect + surface.attach + ack 검증 + 출력 중계. 어떤 이유로든 끝나면 돌아온다(판정은 호출자).
+async fn attach_and_pump(
+    sock: &std::path::Path,
+    surface_id: u64,
+    expected_pid: Option<u64>,
+    mut emit: impl FnMut(String) -> bool,
+) {
+    let Ok(mut stream) = connect_to(sock).await else {
+        return;
+    };
+    let req = json!({"id": 1, "method": "surface.attach", "params": {"surface_id": surface_id}});
+    let mut line = serde_json::to_vec(&req).unwrap_or_default();
+    line.push(b'\n');
+    if stream.write_all(&line).await.is_err() {
+        return;
+    }
+    let mut reader = BufReader::new(stream);
+    let mut ack = String::new();
+    // ack 검증 — not_found 등 에러 ack에서 read 블록·무신호 죽은 pane이 되지 않게
+    if reader.read_line(&mut ack).await.unwrap_or(0) == 0 {
+        return;
+    }
+    let ack_v: Value = serde_json::from_str(ack.trim()).unwrap_or(Value::Null);
+    if ack_v["ok"].as_bool() != Some(true) {
+        return;
+    }
+    // 확인 뒤·attach 전에 데몬이 바뀌었으면(번호 재사용 → 남의 패인) 첫 출력 전에 버린다 —
+    // 호출자가 다시 판정해 안내 문구로 간다. ack 를 받은 뒤라 이 스트림의 데몬이 지금 소켓 주인이다.
+    if expected_pid.is_some() && daemon_pid_of(sock).await != expected_pid {
+        return;
+    }
+    let mut buf = [0u8; 8192];
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) | Err(_) => return,
+            Ok(n) => {
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
+                if !emit(b64) {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 /// 데몬 소켓이 준비될 때까지 connect를 폴링(수동 spawn 없음). `attempts`×100ms.
@@ -2444,6 +2542,71 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 순서 경쟁(노아 R1 C3): pid 확인 뒤·attach 전에 데몬이 바뀌고 새 데몬에 같은 번호가 있으면
+    /// 남의 패인 출력이 붙으면 안 된다. 가짜 데몬 소켓: 첫 identify = 10(확인 시점), 그 뒤 = 11(교체됨),
+    /// attach 는 ok + 「OTHER_PANE」 출력. 대조군(계속 10) 은 출력이 그대로 와야 한다(빈 통과 방지).
+    #[cfg(unix)]
+    #[test]
+    fn attach_drops_output_when_daemon_swapped_between_check_and_attach() {
+        fn run(swap: bool) -> Vec<String> {
+            let sock = std::env::temp_dir().join(format!("cys-race-{}-{swap}.sock", std::process::id()));
+            let _ = std::fs::remove_file(&sock);
+            tauri::async_runtime::block_on(async {
+                let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+                tauri::async_runtime::spawn(async move {
+                    let mut identifies = 0;
+                    while let Ok((s, _)) = listener.accept().await {
+                        let mut r = BufReader::new(s);
+                        let mut req = String::new();
+                        r.read_line(&mut req).await.unwrap();
+                        let mut s = r.into_inner();
+                        if req.contains("system.identify") {
+                            identifies += 1;
+                            let pid = if swap && identifies > 1 { 11 } else { 10 };
+                            let resp = json!({"id": 1, "ok": true, "result": {"daemon_pid": pid}});
+                            let _ = s.write_all(format!("{resp}\n").as_bytes()).await;
+                        } else {
+                            let _ = s.write_all(b"{\"id\":1,\"ok\":true,\"result\":{\"attached\":12}}\n").await;
+                            let _ = s.write_all(b"OTHER_PANE").await;
+                        }
+                    }
+                });
+                let start_pid = daemon_pid_of(&sock).await; // 확인 시점
+                assert_eq!(start_pid, Some(10));
+                let mut got = Vec::new();
+                attach_and_pump(&sock, 12, start_pid, |b64| {
+                    got.push(b64);
+                    true
+                })
+                .await;
+                let _ = std::fs::remove_file(&sock);
+                got
+            })
+        }
+        assert!(!run(false).is_empty(), "대조군: 같은 데몬이면 출력이 와야 한다");
+        assert!(run(true).is_empty(), "데몬이 바뀐 뒤 붙은 스트림의 출력이 화면으로 나갔다(남의 패인)");
+    }
+
+    /// 끊긴 스트림 판정: 같은 데몬·살아 있는 패인만 다시 붙고, 진짜 종료·데몬 교체는 가리지 않는다.
+    #[test]
+    fn stream_end_reattaches_only_live_pane_on_same_daemon() {
+        let live = json!({"surface_id": 2, "exited": false});
+        let ended = json!({"surface_id": 2, "exited": true});
+        // 연결만 끊김 → 다시 붙기, 상한에서 멈춤
+        assert_eq!(stream_end_action(Some(10), Some(10), Some(&live), 0), StreamEnd::Reattach);
+        assert_eq!(stream_end_action(Some(10), Some(10), Some(&live), REATTACH_MAX), StreamEnd::Exited);
+        // 셸 exit(R4) · 정리돼 없음 → exited
+        assert_eq!(stream_end_action(Some(10), Some(10), Some(&ended), 0), StreamEnd::Exited);
+        assert_eq!(stream_end_action(Some(10), Some(10), None, 0), StreamEnd::Exited);
+        // 데몬 교체(R2) → 같은 번호가 살아 있어도 붙지 않음
+        assert_eq!(stream_end_action(Some(10), Some(11), Some(&live), 0), StreamEnd::DaemonRestarted);
+        // 데몬 무응답 → 상한까지 기다린 뒤 끝난 것으로
+        assert_eq!(stream_end_action(Some(10), None, None, 0), StreamEnd::Wait);
+        assert_eq!(stream_end_action(Some(10), None, None, REATTACH_MAX), StreamEnd::DaemonRestarted);
+        // 시작 때 데몬 미확인 → 종전처럼 exited
+        assert_eq!(stream_end_action(None, Some(11), Some(&live), 0), StreamEnd::Exited);
+    }
 
     /// A안 회귀 박제(2026-07-11 오너 승인): 교대 게이트는 role/agent 붙은 세션만 지킨다.
     /// 맨 셸 pane(role·agent 없음)이 다시 게이트에 잡히면 기본 pane 1개만으로 자동 교대가

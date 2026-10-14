@@ -10,14 +10,14 @@
 | 기기 종류 | `os`: `mac` 또는 `win` |
 | 판 | `installer_version`: `app-0.2.0` |
 | 단계 | `step`: `0/0` |
-| 진단 코드 | 도움 요청 `J-APP-01`, 피드백 `J-APP-02` |
+| 진단 코드 | `J-APP-00` 고정 |
 | 오류 요지 | 빈 값 (`env_report`·`log_tail` 미전송) |
 | 수강생 메시지 | 가린 `message`, 최대 500자 |
 | 로그 주소 | 빈 값 |
 | 접수 번호 | 서버 생성 `id` |
-| 종류 | 기존 `help` |
+| 종류 | `kind`(`help`/`feedback`)와 `source: app`을 보내 시트에 `도움 요청 · 앱`/`피드백 · 앱` |
 
-원문 근거: `repo/api/_lib/handlers.js` 57, 97–116줄의 검사와 변환, `repo/intake/apps-script/Code.gs` 30, 41–49줄의 시트 헤더와 행 조립(둘 다 사본 밖 읽기 전용).
+원문 근거: 서버 사본 `repo/api/_lib/handlers.js`의 검사와 변환, `repo/intake/apps-script/Code.gs`의 시트 헤더와 행 조립.
 
 ## 기존 버튼과 패인
 

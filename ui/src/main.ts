@@ -57,13 +57,13 @@ helpKind.addEventListener("change", invalidateHelpPreview);
 document.getElementById("help-preview-button")!.addEventListener("click", async () => {
   const revision = helpEditRevision;
   const rawMessage = helpMessage.value;
-  const code = helpKind.value;
+  const kind = helpKind.value;
   const username = await invoke("help_username").catch(() => "") as string;
   if (revision !== helpEditRevision) return;
   const message = safeHelpText(rawMessage, username);
   if (!message) { helpResult.textContent = "글을 입력해 주세요"; return; }
   try {
-    const payload = await invoke("prepare_help", { code, message }) as Record<string, unknown>;
+    const payload = await invoke("prepare_help", { kind, message }) as Record<string, unknown>;
     if (revision !== helpEditRevision) return;
     previewedHelp = payload;
   } catch {

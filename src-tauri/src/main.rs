@@ -217,20 +217,21 @@ fn help_install_id(app: &AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn prepare_help(app: AppHandle, code: String, message: String) -> Result<Value, String> {
-    if !matches!(code.as_str(), "J-APP-01" | "J-APP-02") || message.is_empty() || message.chars().count() > 500 {
+fn prepare_help(app: AppHandle, kind: String, message: String) -> Result<Value, String> {
+    if !matches!(kind.as_str(), "help" | "feedback") || message.is_empty() || message.chars().count() > 500 {
         return Err("보내는 내용을 확인해 주세요".into());
     }
     Ok(json!({
         "install_id": help_install_id(&app)?, "installer_version": "app-0.2.0",
         "os": if cfg!(windows) { "win" } else { "mac" }, "step": "0/0",
-        "notice_shown": true, "code": code, "message": message
+        "notice_shown": true, "code": "J-APP-00", "kind": kind, "source": "app", "message": message
     }))
 }
 
 #[tauri::command]
 async fn send_help(payload: Value) -> Result<Value, String> {
-    if payload["notice_shown"] != true || !matches!(payload["code"].as_str(), Some("J-APP-01" | "J-APP-02"))
+    if payload["notice_shown"] != true || payload["code"] != "J-APP-00"
+        || !matches!(payload["kind"].as_str(), Some("help" | "feedback")) || payload["source"] != "app"
         || payload["message"].as_str().is_none_or(|s| s.is_empty() || s.chars().count() > 500) {
         return Err("보내는 내용을 확인해 주세요".into());
     }
@@ -2614,7 +2615,7 @@ mod tests {
     #[tokio::test]
     async fn help_local_receiver_paths_and_exact_body() {
         use std::io::{Read, Write};
-        let payload = serde_json::json!({"install_id":"0123456789abcdef0123456789abcdef", "installer_version":"app-0.2.0", "os":"mac", "step":"0/0", "code":"J-APP-01", "notice_shown":true, "message":"ls\\n; $(echo hello)"});
+        let payload = serde_json::json!({"install_id":"0123456789abcdef0123456789abcdef", "installer_version":"app-0.2.0", "os":"mac", "step":"0/0", "code":"J-APP-00", "kind":"feedback", "source":"app", "notice_shown":true, "message":"ls\\n; $(echo hello)"});
         for (status, answer, success) in [
             (201, r#"{"id":"abcdefgh12345678"}"#, true),
             (503, r#"{"error":"busy"}"#, false),

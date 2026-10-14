@@ -30,7 +30,7 @@ window.__TAURI__ = {
     if (command === 'org_status') return {surfaces: [{surface_id: 7, role: null, idle_secs: 0, agent_alive: true, status: {state: 'working', task: '홈페이지 글 고치는 중', context_pct: null}}], feed: {pending: 0}};
     if (command === 'feed_list') return {items: []};
     if (command === 'help_username') return 'alice';
-    if (command === 'prepare_help') return {install_id: '0123456789abcdef0123456789abcdef', installer_version: 'app-0.2.0', os: 'mac', step: '0/0', notice_shown: true, code: args.code, message: args.message};
+    if (command === 'prepare_help') return {install_id: '0123456789abcdef0123456789abcdef', installer_version: 'app-0.2.0', os: 'mac', step: '0/0', notice_shown: true, code: 'J-APP-00', kind: args.kind, source: 'app', message: args.message};
     if (command === 'send_help') {
       const response = await fetch('/api/help', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(args.payload)});
       if (!response.ok) throw `전송 실패 (${response.status})`;
@@ -123,6 +123,13 @@ def main():
             page.locator("#help-send").click()
             page.get_by_text("접수됨 · 접수 번호 abcdefgh").wait_for()
             assert received[-1] == json.loads(preview)
+            assert received[-1]["kind"] == "help" and received[-1]["source"] == "app" and received[-1]["code"] == "J-APP-00"
+            page.locator("#help-kind").select_option("feedback")
+            page.locator("#help-preview-button").click()
+            page.locator("#help-send").click()
+            page.wait_for_function("window.__calls.filter(x => x.command === 'send_help').length === 2")
+            page.get_by_text("접수됨 · 접수 번호 abcdefgh").wait_for()
+            assert received[-1]["kind"] == "feedback" and received[-1]["source"] == "app" and received[-1]["code"] == "J-APP-00"
             page.screenshot(path=str(OUTPUT / "04_접수번호.png"))
             print("PASS 201: preview equals received JSON, receipt abcdefgh")
 

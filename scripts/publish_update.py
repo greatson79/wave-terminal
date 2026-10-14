@@ -172,7 +172,7 @@ def dryrun(a):
             u = cdhash(next(Path(x).glob("*.app")))
         pin = d if a.button_only else rel["cdhash"]["macos_arm64"]
         (ok if d and d == u == pin else bad)(
-            f"DMG 앱 {d} = 업데이트 묶음 앱 {u} = steps.json 핀 — 다르면 버튼으로 받은 앱이 설치기 재실행 때 '핀 불일치'(bootstrap.sh installed_app_matches_pin)")
+            f"DMG 앱 {d} = 업데이트 묶음 앱 {u}{'' if a.button_only else ' = steps.json 핀'} — 다르면 버튼으로 받은 앱이 설치기 재실행 때 '핀 불일치'(bootstrap.sh installed_app_matches_pin)")
     os.unlink(pub.name)
 
     files = sorted(p for p in art.iterdir() if p.is_file())
@@ -183,7 +183,7 @@ def dryrun(a):
     print(f"  1) 초안 조립:  gh release create {tag} -R {REPO} --draft --title 'Wave Terminal {V}' --notes-file NOTES.md {art}/*")
     print(f"  2) 초안 자산 대조:  gh release view {tag} -R {REPO} --json assets --jq '.assets[]|[.name,.size]|@tsv'")
     print(f"  3) 발행(한 동작):  gh release edit {tag} -R {REPO} --draft=false --latest")
-    print(f"  4) 끝 검사:  python3 {Path(__file__).name} --check --version {V}")
+    print(f"  4) 끝 검사:  python3 {Path(__file__).name} --check --version {V} --repo {REPO}{' --button-only' if a.button_only else ''}")
     print(f"  되돌리기:  gh release edit {tag} -R {REPO} --draft=true   (Latest 가 직전 판으로 — 이미 받은 수강생은 그대로)")
     print("\n" + ("드라이런 PASS — 업로드 0" if not fails else f"드라이런 FAIL {len(fails)}건 — 업로드 0"))
     return not fails
@@ -212,6 +212,11 @@ def check(a):
             (ok if cc in (200, 206) else bad)(f"{key} 묶음 {cc} {url}")
     c, _, _ = get(f"{LATEST}/pack-manifest.json")
     print(f"  · pack-manifest.json {c} (404 = 팩 없음 · 수리판 앱은 '팩 업데이트 없음')")
+    if a.button_only:  # 시험 저장소 = 버튼 경로만(설치 링크·홈페이지 연결 0 · 승인 기록 2250 판정 4)
+        if a.version:
+            (ok if bv == a.version else bad)(f"기대 판 {a.version}")
+        print("\n" + ("CHECK PASS(버튼만)" if not fails else f"CHECK FAIL {len(fails)}건"))
+        return not fails
     print("■ 설치 링크 입구")
     c, body, _ = get(f"{LATEST}/steps.json")
     sv = json.loads(body)["release"]["version"] if c == 200 else None

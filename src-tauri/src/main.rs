@@ -2544,6 +2544,20 @@ mod tests {
         );
     }
 
+    // 학생 rc.4 앱(0.2.0)이 이 판을 Update 버튼에 띄우는지 — tauri-plugin-updater 와 같은 해석·비교
+    // (RemoteRelease 역직렬화 · updater.rs:532 `release.version > self.current_version`).
+    #[test]
+    fn this_build_is_newer_than_student_020_by_updater_rule() {
+        let rel = |v: &str| -> tauri_plugin_updater::RemoteRelease {
+            serde_json::from_value(json!({"version": v, "platforms": {
+                "darwin-aarch64": {"signature": "s", "url": "https://example.invalid/a.tar.gz"}}}))
+            .unwrap()
+        };
+        let student = rel("0.2.0").version;
+        assert!(rel(env!("CARGO_PKG_VERSION")).version > student, "이 판이 0.2.0 보다 커야 버튼에 뜬다");
+        assert!(!(rel("0.2.0").version > student), "같은 판이면 안 뜬다");
+    }
+
     #[test]
     fn pack_manifest_404_is_no_update_but_other_errors_are_not() {
         assert!(is_http_404(b"curl: (56) The requested URL returned error: 404\n"));

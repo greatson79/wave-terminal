@@ -216,9 +216,10 @@ def check(a):
     """GET 만. 지금처럼 버튼 쪽만 404(또는 두 입구 판이 다름)이면 FAIL 로 잡힌다."""
     print("■ Update 버튼 입구")
     c, body, _ = get(f"{LATEST}/latest.json")
-    bv = json.loads(body).get("version") if c == 200 else None
-    (ok if c == 200 else bad)(f"latest.json {c} version={bv}")
-    if c == 200:
+    up = c in (200, 206)  # get() 는 범위 요청이라 206 도 정상(작은 파일은 본문 전부)
+    bv = json.loads(body).get("version") if up else None
+    (ok if up else bad)(f"latest.json {c} version={bv}")
+    if up:
         for key in NEED:
             url = (json.loads(body).get("platforms", {}).get(key) or {}).get("url", "")
             cc = get(url)[0] if url else 0
@@ -232,9 +233,12 @@ def check(a):
         return not fails
     print("■ 설치 링크 입구")
     c, body, _ = get(f"{LATEST}/steps.json")
-    sv = json.loads(body)["release"]["version"] if c == 200 else None
-    (ok if c == 200 else bad)(f"steps.json {c} release.version={sv}")
-    for path, asset in HOME.items():
+    sv = json.loads(body)["release"]["version"] if c in (200, 206) else None
+    (ok if c in (200, 206) else bad)(f"steps.json {c} release.version={sv}")
+    if REPO != "greatson79/wave-terminal":  # 시험 저장소 = 홈페이지 연결 0(승인 기록 2250 ④) → 그 저장소 입구만
+        c3 = get(f"{LATEST}/bootstrap.sh")[0]
+        (ok if c3 in (200, 206) else bad)(f"시험 입구 {LATEST}/bootstrap.sh {c3} (홈페이지 /mac·/win 은 일부러 안 봄)")
+    for path, asset in (HOME.items() if REPO == "greatson79/wave-terminal" else []):
         c, _, loc = get(f"https://waveainetworks.com{path}", follow=False)
         (ok if loc == f"{LATEST}/{asset}" else bad)(f"waveainetworks.com{path} → {loc or c}")
         c2 = get(f"https://waveainetworks.com{path}")[0]

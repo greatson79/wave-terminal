@@ -19,7 +19,8 @@ DL = f"https://github.com/{REPO}/releases/download"
 LATEST = f"https://github.com/{REPO}/releases/latest/download"
 HOME = {"/mac": "bootstrap.sh", "/win": "win-start.ps1"}
 # rc.4 앱이 찾는 키(tauri-plugin-updater 2.10.1 updater.rs:568-600 get_urls "{os}-{arch}") → 묶음 이름 꼬리
-NEED = {"darwin-aarch64": "macos-arm64.app.tar.gz", "windows-x86_64": "windows-x64-setup.exe"}
+ALL_PLATFORMS = {"darwin-aarch64": "macos-arm64.app.tar.gz", "windows-x86_64": "windows-x64-setup.exe"}
+NEED = dict(ALL_PLATFORMS)  # main() 에서 --platforms 로 좁힘
 fails = []
 
 
@@ -54,6 +55,41 @@ def cdhash(app):
     return m.group(1) if m else None
 
 
+def install_side(a, art, V, tag):
+    steps_raw = (art / "steps.json").read_bytes()
+    steps = json.loads(steps_raw)
+    rel = steps["release"]
+    (ok if rel.get("version") == V else bad)(f"steps.json release.version = {V}(버튼과 같은 판)")
+    for plat, name in rel["asset_name"].items():
+        f = art / name
+        if rel["asset_url"].get(plat) != f"{DL}/{tag}/{name}":
+            bad(f"asset_url.{plat} 가 같은 릴리스({DL}/{tag}/)가 아님")
+        if not f.is_file() or rel["sha256"].get(plat) != sha(f):
+            bad(f"sha256.{plat} != 실제 {name}")
+    cmd = json.dumps(steps.get("reinstall", {}), ensure_ascii=False)
+    (ok if f"{LATEST}/bootstrap.sh" in cmd and f"{LATEST}/bootstrap.ps1" in cmd and "wave-install/releases" not in cmd else bad)(
+        "함정3: reinstall.command = releases/latest/download/bootstrap.sh·ps1")
+    tgz = next(art.glob("wave-install-*.tar.gz"), None)
+    boot = (art / "bootstrap.sh").read_text()
+    if not tgz:
+        bad("설치팩 tar.gz 없음")
+    else:
+        with tarfile.open(tgz) as t:
+            inner = next((t.extractfile(x).read() for x in t if x.name.endswith("/steps.json") and x.name.count("/") == 1), None)
+        (ok if inner == steps_raw else bad)("설치팩 안 steps.json = 릴리스 자산 steps.json(rc.4 bootstrap 은 설치팩 안 것을 읽는다: bootstrap.sh:1186-1187)")
+        (ok if f"{DL}/{tag}/{tgz.name}" in boot and sha(tgz) in boot else bad)("bootstrap.sh 가 같은 릴리스 설치팩 주소·sha256 고정(make-release.sh 주입)")
+    (ok if f"{LATEST}/steps.json" in boot and "raw.githubusercontent.com/greatson79/wave-install" not in boot else bad)(
+        "함정1: bootstrap.sh WAVE_INSTALL_STEPS_URL 기본값 = releases/latest/download/steps.json")
+    ws = (art / "win-start.ps1").read_text()
+    (ok if f"{DL}/{tag}/bootstrap.ps1" in ws and sha(art / "bootstrap.ps1") in ws else bad)(
+        "함정2: win-start.ps1 = 같은 릴리스 bootstrap.ps1 주소(태그 고정)+sha256 고정(render_win_start.py) → /win 은 latest 로 가도 해시 사슬 유지")
+    sums = dict(reversed(l.split()) for l in (art / "SHA256SUMS").read_text().splitlines() if l.strip())
+    need = ["bootstrap.sh", "bootstrap.ps1", "win-start.ps1", "steps.json", *rel["asset_name"].values()] + ([tgz.name] if tgz else [])
+    miss = [n for n in dict.fromkeys(need) if sums.get(n) != (sha(art / n) if (art / n).is_file() else None)]
+    (ok if not miss else bad)(f"SHA256SUMS 가 실제 파일과 일치{'' if not miss else ' — 어긋남: ' + ', '.join(miss)}")
+    return rel
+
+
 def dryrun(a):
     art, V = Path(a.art), a.version
     tag = f"v{V}"
@@ -78,6 +114,8 @@ def dryrun(a):
     lj = json.loads((art / "latest.json").read_text())
     if lj.get("version") != V:
         bad(f"latest.json version {lj.get('version')} != {V}")
+    extra = sorted(set(lj.get("platforms") or {}) - set(NEED))
+    (ok if not extra else bad)(f"platforms = {sorted(NEED)} 만{'' if not extra else ' — 여분: ' + ', '.join(extra)}")
     for key, tail in NEED.items():
         p = (lj.get("platforms") or {}).get(key)
         name = f"wave-terminal-{V}-{tail}"
@@ -113,37 +151,11 @@ def dryrun(a):
         (ok if m["signed_at"] <= time.time() <= m["expires_at"] else bad)("서명 유효창 안")
 
     print("■ 설치 링크 쪽(steps.json·설치기)")
-    steps_raw = (art / "steps.json").read_bytes()
-    steps = json.loads(steps_raw)
-    rel = steps["release"]
-    (ok if rel.get("version") == V else bad)(f"steps.json release.version = {V}(버튼과 같은 판)")
-    for plat, name in rel["asset_name"].items():
-        f = art / name
-        if rel["asset_url"].get(plat) != f"{DL}/{tag}/{name}":
-            bad(f"asset_url.{plat} 가 같은 릴리스({DL}/{tag}/)가 아님")
-        if not f.is_file() or rel["sha256"].get(plat) != sha(f):
-            bad(f"sha256.{plat} != 실제 {name}")
-    cmd = json.dumps(steps.get("reinstall", {}), ensure_ascii=False)
-    (ok if f"{LATEST}/bootstrap.sh" in cmd and f"{LATEST}/bootstrap.ps1" in cmd and "wave-install/releases" not in cmd else bad)(
-        "함정3: reinstall.command = releases/latest/download/bootstrap.sh·ps1")
-    tgz = next(art.glob("wave-install-*.tar.gz"), None)
-    boot = (art / "bootstrap.sh").read_text()
-    if not tgz:
-        bad("설치팩 tar.gz 없음")
+    if a.button_only:
+        print("  · 검사 안 함(--button-only) — 설치기 산출물은 이 폴더에 없다. 발행 전엔 빼고 다시 돌린다")
+        rel = {"asset_name": {"macos_arm64": f"wave-terminal-{V}-macos-arm64.dmg"}, "cdhash": {}}
     else:
-        with tarfile.open(tgz) as t:
-            inner = next((t.extractfile(x).read() for x in t if x.name.endswith("/steps.json") and x.name.count("/") == 1), None)
-        (ok if inner == steps_raw else bad)("설치팩 안 steps.json = 릴리스 자산 steps.json(rc.4 bootstrap 은 설치팩 안 것을 읽는다: bootstrap.sh:1186-1187)")
-        (ok if f"{DL}/{tag}/{tgz.name}" in boot and sha(tgz) in boot else bad)("bootstrap.sh 가 같은 릴리스 설치팩 주소·sha256 고정(make-release.sh 주입)")
-    (ok if f"{LATEST}/steps.json" in boot and "raw.githubusercontent.com/greatson79/wave-install" not in boot else bad)(
-        "함정1: bootstrap.sh WAVE_INSTALL_STEPS_URL 기본값 = releases/latest/download/steps.json")
-    ws = (art / "win-start.ps1").read_text()
-    (ok if f"{DL}/{tag}/bootstrap.ps1" in ws and sha(art / "bootstrap.ps1") in ws else bad)(
-        "함정2: win-start.ps1 = 같은 릴리스 bootstrap.ps1 주소(태그 고정)+sha256 고정(render_win_start.py) → /win 은 latest 로 가도 해시 사슬 유지")
-    sums = dict(reversed(l.split()) for l in (art / "SHA256SUMS").read_text().splitlines() if l.strip())
-    need = ["bootstrap.sh", "bootstrap.ps1", "win-start.ps1", "steps.json", *rel["asset_name"].values()] + ([tgz.name] if tgz else [])
-    miss = [n for n in dict.fromkeys(need) if sums.get(n) != (sha(art / n) if (art / n).is_file() else None)]
-    (ok if not miss else bad)(f"SHA256SUMS 가 실제 파일과 일치{'' if not miss else ' — 어긋남: ' + ', '.join(miss)}")
+        rel = install_side(a, art, V, tag)
 
     print("■ 맥 앱 정합(cdhash)")
     if a.skip_cdhash:
@@ -158,7 +170,8 @@ def dryrun(a):
                 subprocess.run(["hdiutil", "detach", mnt], capture_output=True)
             subprocess.run(["tar", "-xzf", str(tar_gz), "-C", x], check=True)
             u = cdhash(next(Path(x).glob("*.app")))
-        (ok if d and d == u == rel["cdhash"]["macos_arm64"] else bad)(
+        pin = d if a.button_only else rel["cdhash"]["macos_arm64"]
+        (ok if d and d == u == pin else bad)(
             f"DMG 앱 {d} = 업데이트 묶음 앱 {u} = steps.json 핀 — 다르면 버튼으로 받은 앱이 설치기 재실행 때 '핀 불일치'(bootstrap.sh installed_app_matches_pin)")
     os.unlink(pub.name)
 
@@ -217,7 +230,11 @@ def check(a):
 
 
 def main():
+    global REPO, DL, LATEST, NEED
     ap = argparse.ArgumentParser()
+    ap.add_argument("--repo", default=REPO, help="대상 릴리스 저장소(시험 = greatson79/wave-terminal-test)")
+    ap.add_argument("--platforms", default="darwin-aarch64", help="latest.json 에 있어야 할 키(쉼표) · 이외 키 = FAIL(첫 판 = 맥만)")
+    ap.add_argument("--button-only", action="store_true", help="설치기 쪽 검사 생략(버튼 경로 시험용 산출물)")
     ap.add_argument("--version")
     ap.add_argument("--art", help="릴리스에 올릴 파일만 담은 폴더")
     ap.add_argument("--current", default="0.2.0", help="수강생에게 깔린 앱 판(rc.4)")
@@ -226,6 +243,9 @@ def main():
     ap.add_argument("--with-pack", action="store_true", help="팩 3종도 올림(기본 = 팩 제외 · 첫 판 판정)")
     ap.add_argument("--check", action="store_true")
     a = ap.parse_args()
+    REPO = a.repo
+    DL, LATEST = f"https://github.com/{REPO}/releases/download", f"https://github.com/{REPO}/releases/latest/download"
+    NEED = {k: ALL_PLATFORMS[k] for k in a.platforms.split(",")}
     if a.check:
         sys.exit(0 if check(a) else 1)
     if not (a.version and a.art):

@@ -79,3 +79,9 @@ jobs:
           $line = '{"model":{"id":"claude-opus-5-5","display_name":"Opus 5.5"},"context_window":{"context_window_size":200000,"used_percentage":41.6,"current_usage":{"input_tokens":1000,"cache_creation_input_tokens":2000,"cache_read_input_tokens":80000}},"rate_limits":{"five_hour":{"used_percentage":41,"resets_at":1781314865},"seven_day":{"used_percentage":12,"resets_at":1781781650}}}' | & $cys usage-report-stdin
           if ($LASTEXITCODE -ne 0 -or $line -ne 'Opus 5.5 · CTX 42% · 5h 남음 59% · 7d 남음 88%') { throw "installed cys status line mismatch: $line" }
           Write-Host "PASS: signature valid; silent install; installed app $version"
+      - name: G9 Windows single daemon owner
+        shell: pwsh
+        run: ./scripts/gates-v024/win-g9-single-owner.ps1
+      - name: G5 Windows typing guard
+        shell: pwsh
+        run: ./scripts/gates-v024/win-g5-guard.ps1

@@ -1577,7 +1577,7 @@ setInterval(refreshPaneTitles, 3000);
 const TRASH_SVG =
   '<svg viewBox="0 0 24 24"><path d="M9 3h6l1 1h4v2H4V4h4l1-1zM6 8h12l-1 13a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L6 8z"/></svg>';
 
-// 끊긴 조각 이어 하기 안내 — 정본 문구 = 개발본부 안내_끊겼을때_이어하기_1쪽(같은 말 유지).
+// 끊긴 조각 이어 하기 안내 — 정본 문구 = 끊김 안내 문구(같은 말 유지).
 const RESTARTED_NOTICE =
   "\r\n이 조각(패인)이 끝났어요. 대화 내용은 컴퓨터에 남아 있으니 놀라지 않아도 됩니다.\r\n" +
   "1. 새 조각 열기 — 왼쪽 위 + New 버튼 (맥 ⌘T · 윈도우 Ctrl+T)\r\n" +

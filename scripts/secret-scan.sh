@@ -18,9 +18,9 @@ cd "$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "git repo 아님"; e
 mode="${1:-staged}"
 files=()
 case "$mode" in
-  --all)      while IFS= read -r f; do files+=("$f"); done < <(git ls-files) ;;
-  --staged|staged|"") while IFS= read -r f; do files+=("$f"); done \
-                  < <(git diff --cached --name-only --diff-filter=ACM) ;;
+  --all)      while IFS= read -r -d '' f; do files+=("$f"); done < <(git ls-files -z) ;;
+  --staged|staged|"") while IFS= read -r -d '' f; do files+=("$f"); done \
+                  < <(git diff --cached --name-only -z --diff-filter=ACM) ;;
   *)          files=("$@") ;;
 esac
 [ "${#files[@]}" -gt 0 ] || { echo "✓ secret-scan: 스캔 대상 없음"; exit 0; }

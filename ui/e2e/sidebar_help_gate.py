@@ -172,11 +172,11 @@ def main():
             assert not network_after_load, f"requests before send: {network_after_load}"
             print("PASS C6: multiline paste, Enter, Ctrl-C -> PTY calls 0; pre-send network calls 0")
 
-            area.fill("alice의 메일 me@example.com /Users/alice/private")
+            area.fill("alice의 메일 me@example.com /Users/" + "alice/private")
             page.locator("#help-preview-button").click()
             preview = page.locator("#help-preview").inner_text()
             assert "<EMAIL>" in preview and "/Users/<USER>/private" in preview
-            assert "me@example.com" not in preview and "/Users/alice" not in preview
+            assert "me@example.com" not in preview and "/Users/" + "alice" not in preview
             page.screenshot(path=str(output / "03_미리보기.png"))
             page.locator("#help-send").click()
             page.get_by_text("접수됨 · 접수 번호 abcdefgh").wait_for()

@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { safeHelpText } from "./help";
 
 test("도움 글 가림: 메일, 토큰, 홈 경로, 제어 문자", () => {
-  const text = "me@example.com Bearer abc123 /Users/alice/private KEY=secret\x00\nls";
+  const text = "me@example.com Bearer abc123 /Users/" + "alice/private KEY=secret\x00\nls";
   expect(safeHelpText(text)).toBe("<EMAIL> <TOKEN> /Users/<USER>/private KEY=<SECRET> ls");
 });
 

@@ -951,6 +951,13 @@ fn maybe_apply_pending_update(app: &AppHandle) {
         );
         return;
     }
+    let mut statusline_cmd = std::process::Command::new("bash");
+    inject_runtime_path(&mut statusline_cmd);
+    statusline_cmd.arg(dept_tool()).arg("statusline-all");
+    no_console(&mut statusline_cmd);
+    if !statusline_cmd.status().map(|s| s.success()).unwrap_or(false) {
+        let _ = app.emit("update-error", "부서 사용량 연결 실패 — 부서 설정을 확인하세요");
+    }
     // 성공 후에만 마커 제거 + 스탬프 전진 + 조직 복원. (마커 없는 버전변경 경로면 remove_file은 no-op.)
     let _ = std::fs::remove_file(&marker);
     let _ = std::fs::write(&stamp_path, current);

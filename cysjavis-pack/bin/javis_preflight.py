@@ -1023,6 +1023,8 @@ class Preflight:
             data = json.load(open(settings_path, encoding="utf-8"))
         except (OSError, ValueError):
             return False
+        if not isinstance(data, dict):
+            return False
         sl = data.get("statusLine")
         if not (isinstance(sl, dict) and "cys-statusline.sh" in sl.get("command", "")):
             return False
@@ -3895,6 +3897,8 @@ class Preflight:
 
 def main():
     ap = argparse.ArgumentParser(description="CYSJavis 결정론 부트 프리플라이트")
+    ap.add_argument("--statusline-account", metavar="DIR", help="한 부서 계정의 statusLine만 등록")
+    ap.add_argument("--statusline-depts", action="store_true", help="등록된 부서 계정의 statusLine만 소급 등록")
     ap.add_argument("--fix", action="store_true", help="수리 가능한 항목 자동 수리")
     # OPP-17: --fix 의 시스템 변경을 단일 Mutation 게이트로 수렴.
     ap.add_argument("--dry-run", action="store_true",
@@ -3907,6 +3911,37 @@ def main():
     ap.add_argument("--skip", action="append", default=[], metavar="ID",
                     help="해당 검사 건너뜀 (예: --skip C12.daemon)")
     args = ap.parse_args()
+
+    if args.statusline_account or args.statusline_depts:
+        if args.statusline_account and args.statusline_depts:
+            ap.error("statusLine 대상은 하나만 지정")
+        if args.statusline_depts:
+            reg = os.environ.get("CYS_DEPTS_JSON", os.path.join(os.path.expanduser("~"), ".cys", "depts.json"))
+            try:
+                registry = json.load(open(reg, encoding="utf-8")) if os.path.isfile(reg) else {}
+                if not isinstance(registry, dict) or not isinstance(registry.get("depts", {}), dict):
+                    raise ValueError("부서 등록부 루트/목록은 객체여야 합니다")
+                depts = registry.get("depts", {})
+                targets = [m["account_dir"] for m in depts.values() if isinstance(m, dict) and m.get("account_dir")]
+            except (OSError, ValueError, TypeError, KeyError) as e:
+                print("statusLine 부서 목록 읽기 실패: %s" % e, file=sys.stderr)
+                return 1
+        else:
+            targets = [args.statusline_account]
+        pf = Preflight(fix=True, skips=[], mode="fix", allow_irreversible=False)
+        failed = False
+        for target in set(targets):
+            if not os.path.isabs(target) or not os.path.isdir(target):
+                print("statusLine 계정 폴더 없음: %s" % target, file=sys.stderr)
+                failed = True
+                continue
+            settings = os.path.join(target, "settings.json")
+            if not pf._statusline_registered(settings):
+                error = pf._register_statusline(settings)
+                if error:
+                    print(error, file=sys.stderr)
+                    failed = True
+        return 1 if failed else 0
 
     if args.safe and (args.dry_run or args.fix):
         ap.error("--safe 는 --dry-run/--fix 와 동시 사용 불가")

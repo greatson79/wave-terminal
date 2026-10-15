@@ -406,7 +406,7 @@ cmd="${1:?usage: cys-dept launch|allocate|create|down|down-sock|rotate|reap|prom
 # 차단해 다중주체 churn(빈 dept-N·중복·레이스)을 기술적으로 방지. (defense-in-depth — 의도적 unset 우회는
 # 거버넌스 영역이나, 정상 다중 노드 churn은 차단). 읽기 전용(list/sock/<name> --)은 무제한.
 case "$cmd" in
-  launch|allocate|create|down|down-sock|rotate|reap|promote-ceo)
+  launch|allocate|create|down|down-sock|rotate|reap|promote-ceo|statusline-all)
     if [ -n "${CYS_ROLE:-}" ] && [ "${CYS_ROLE}" != "cso" ]; then
       echo "[cys-dept] ★단일소유 강제: 부서 lifecycle mutation은 CSO/GUI 전용(CYS_ROLE=$CYS_ROLE 차단·다중 churn 방지). CSO에 요청하라." >&2
       exit 7
@@ -420,6 +420,9 @@ case "$cmd" in
     fi ;;
 esac
 case "$cmd" in
+  statusline-all)
+    python3 "${CYS_PACK_DIR:-$PACK_DEFAULT}/bin/javis_preflight.py" --statusline-depts
+    ;;
   launch)
     name="${2:?usage: cys-dept launch <name>}"
     sock="$(dept_sock "$name")"; pack="$(dept_pack "$name")"
@@ -661,6 +664,9 @@ PY
       echo "[cys-dept] ERROR: $name agents.json 계정시드 실패 — fail-closed: 부트 중단·teardown" >&2
       "$0" down "$name" >/dev/null 2>&1 || true
       exit 6
+    fi
+    if ! python3 "${CYS_PACK_DIR:-$PACK_DEFAULT}/bin/javis_preflight.py" --statusline-account "$acctdir"; then
+      echo "[cys-dept] WARN: 사용량 상태줄 등록 실패 — 부서 생성은 계속" >&2
     fi
     trap - EXIT   # 격리 확정 — 이후 빈 셸 생성
     # ★WP-11(오너 2026-06-29 결정 일원화): create도 allocate와 동일하게 role=master '빈 셸'만 띄운다.

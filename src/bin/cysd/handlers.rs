@@ -2527,10 +2527,12 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                 .unwrap_or_else(|| "claude".into());
             *surface.observed_usage.lock().unwrap() = Some(crate::usage::ObservedUsage {
                 agent: agent.clone(),
+                model: param_str(&params, "model"),
                 ctx_tokens,
                 ctx_window,
                 ctx_pct,
                 rate: rate.clone(),
+                rate_updated_at: Some(crate::state::now_epoch()),
                 source: "statusline".into(),
                 session_file: param_str(&params, "session_file").unwrap_or_default(),
                 updated_at: crate::state::now_epoch(),
@@ -5454,6 +5456,7 @@ mod tests {
             &daemon,
             own,
             json!({
+                "model": "claude-sonnet-5-5",
                 "ctx_pct": 41.6, "ctx_tokens": 82000, "ctx_window": 200000,
                 "rate": [
                     {"label": "5h", "used_pct": 41.0, "resets_at": 1781314865.0},
@@ -5468,6 +5471,7 @@ mod tests {
             .observed_usage.lock().unwrap().clone()
             .expect("usage가 저장되지 않았다");
         assert_eq!(u.source, "statusline");
+        assert_eq!(u.model.as_deref(), Some("claude-sonnet-5-5"));
         assert_eq!(u.ctx_pct, Some(42), "41.6은 42로 반올림돼야 한다");
         assert_eq!(u.ctx_tokens, Some(82000));
         assert_eq!(u.rate.len(), 2);

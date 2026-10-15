@@ -59,10 +59,12 @@ pub struct RateWindow {
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct ObservedUsage {
     pub agent: String,
+    pub model: Option<String>,
     pub ctx_tokens: Option<u64>,
     pub ctx_window: Option<u64>,
     pub ctx_pct: Option<u8>,
     pub rate: Vec<RateWindow>,
+    pub rate_updated_at: Option<f64>,
     /// "transcript[:heuristic]"(claude tail) | "rollout[:heuristic]"(codex tail) |
     /// "statusline"(usage.report 서버 진실 — 신선하면 tail 관측보다 우선)
     pub source: String,
@@ -275,6 +277,7 @@ fn collect_for(
                     let window = state.server_ctx_window.unwrap_or_else(|| claude_ctx_window(&model));
                     next = Some(ObservedUsage {
                         agent: agent.into(),
+                        model: if model.is_empty() { None } else { Some(model.clone()) },
                         ctx_tokens: Some(ctx_tokens),
                         ctx_window: Some(window),
                         ctx_pct: pct(ctx_tokens, window),
@@ -283,6 +286,8 @@ fn collect_for(
                             .map(|n| n.rate.clone())
                             .or_else(|| prev.as_ref().map(|p| p.rate.clone()))
                             .unwrap_or_default(),
+                        rate_updated_at: next.as_ref().and_then(|n| n.rate_updated_at)
+                            .or_else(|| prev.as_ref().and_then(|p| p.rate_updated_at)),
                         source: source_label("transcript", state.heuristic),
                         session_file: state.path.to_string_lossy().into_owned(),
                         updated_at: now,
@@ -295,18 +300,21 @@ fn collect_for(
                     let base = next.as_ref().or(prev.as_ref());
                     let ctx_tokens = obs.ctx_tokens.or(base.and_then(|b| b.ctx_tokens));
                     let ctx_window = obs.ctx_window.or(base.and_then(|b| b.ctx_window));
+                    let rate_updated_at = if obs.rate.is_some() { Some(now) } else { base.and_then(|b| b.rate_updated_at) };
                     let rate = obs
                         .rate
                         .or_else(|| base.map(|b| b.rate.clone()))
                         .unwrap_or_default();
                     next = Some(ObservedUsage {
                         agent: agent.into(),
+                        model: None,
                         ctx_tokens,
                         ctx_window,
                         ctx_pct: ctx_tokens
                             .zip(ctx_window)
                             .and_then(|(t, w)| pct(t, w)),
                         rate,
+                        rate_updated_at,
                         source: source_label("rollout", state.heuristic),
                         session_file: state.path.to_string_lossy().into_owned(),
                         updated_at: now,
@@ -374,6 +382,11 @@ fn collect_for(
     // statusline이 신선하면 관측 스냅샷·이벤트·임계발화는 statusline 경로가 진실원 — 여기서 종료
     // (소비 적재는 위에서 이미 완료). 끊기면(60s+) 아래 트랜스크립트 관측으로 graceful 폴백.
     if statusline_fresh {
+        if let Some(model) = next.and_then(|u| u.model) {
+            if let Some(ref mut usage) = *s.observed_usage.lock().unwrap() {
+                usage.model = Some(model);
+            }
+        }
         return;
     }
 
@@ -1154,10 +1167,12 @@ async fn agy_quota_probe(port: u16) -> Option<Vec<RateWindow>> {
 fn update_agy_usage(daemon: &Arc<Daemon>, s: &Arc<Surface>, rate: Vec<RateWindow>) {
     let new = ObservedUsage {
         agent: "gemini".into(),
+        model: None,
         ctx_tokens: None,
         ctx_window: None,
         ctx_pct: None,
         rate,
+        rate_updated_at: Some(now_epoch()),
         source: "agy-rpc".into(),
         session_file: String::new(),
         updated_at: now_epoch(),
@@ -1318,6 +1333,8 @@ mod tests {
         let (ctx, model) = parse_claude_line(&line).expect("assistant usage 라인 파싱 실패");
         assert_eq!(ctx, 82_796);
         assert_eq!(model, "claude-fable-5");
+        let switched = line.replace("claude-fable-5", "claude-sonnet-5-5");
+        assert_eq!(parse_claude_line(&switched).unwrap().1, "claude-sonnet-5-5");
     }
 
     #[test]

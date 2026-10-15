@@ -131,7 +131,7 @@ const LAYOUT_KEY = "cys-layout-v2";
 const paneKey = (sid: number, socket?: string): string => `${socket ?? ""}#${sid}`;
 function displayPaneHeading(el: HTMLElement, sid: number, state?: PaneTitleState) {
   const heading = paneHeading({ sid, role: state?.role, model: state?.model,
-    ctx: state?.usage?.ctx_pct, approximate: state?.usage?.source === "transcript", tail: state?.reported });
+    ctx: state?.usage?.ctx_pct, approximate: !!state?.usage && state.usage.source !== "statusline", tail: state?.reported });
   const [prefix, context] = heading.split(" · CTX ");
   const ctx = document.createElement("span");
   ctx.textContent = `CTX ${context.split(" · ")[0]}`;

@@ -5118,6 +5118,9 @@ fn statusline_to_report_params(v: &Value) -> Value {
         }
     }
     let mut params = json!({ "rate": rate });
+    if let Some(model) = v.get("model").and_then(|m| m.get("id")).and_then(|id| id.as_str()) {
+        params["model"] = json!(model);
+    }
     if let Some(p) = ctx_pct {
         params["ctx_pct"] = json!(p);
     }
@@ -8859,6 +8862,7 @@ mod tests {
     #[test]
     fn statusline_params_full_schema() {
         let v = json!({
+            "model": {"id": "claude-opus-5-5"},
             "context_window": {
                 "context_window_size": 200000,
                 "used_percentage": 41.6,
@@ -8875,6 +8879,7 @@ mod tests {
             }
         });
         let p = statusline_to_report_params(&v);
+        assert_eq!(p["model"], json!("claude-opus-5-5"));
         assert_eq!(p["ctx_pct"].as_f64(), Some(41.6));
         assert_eq!(p["ctx_window"].as_u64(), Some(200000));
         // ctx_tokens = input + cache_creation + cache_read (output 제외) = 83000

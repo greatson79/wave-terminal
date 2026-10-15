@@ -15,6 +15,7 @@ import { clampWsbarWidth, clampWsbarFont, WSBAR_W_DEFAULT, WSBAR_FONT_STEP } fro
 import { composeFontFamily, FONT_CHOICES, ROLE_COLOR, roleDotColor } from "./appearance";
 import { safeHelpText } from "./help";
 import { paneHeading } from "./paneheading";
+import { sidebarUsage } from "./usagebar";
 
 declare global {
   interface Window {
@@ -169,6 +170,7 @@ interface ObservedUsage {
   ctx_window: number | null;
   ctx_pct: number | null;
   rate: RateWindow[];
+  rate_updated_at?: number | null;
   source: string;
   session_file: string;
   updated_at: number;
@@ -196,6 +198,39 @@ function renderUsage(el: HTMLElement, u: ObservedUsage | null | undefined) {
   if (age > 120) tip.push(`⚠ ${Math.round(age / 60)}분 전 관측 (stale)`);
   el.title = tip.join("\n");
   el.classList.toggle("stale", age > 120);
+}
+
+function renderSidebarUsage(samples: ObservedUsage[]) {
+  const box = document.getElementById("sidebar-usage")!;
+  box.replaceChildren();
+  const groups = sidebarUsage(samples);
+  if (!groups.length) {
+    box.textContent = "측정 안 됨 — 첫 응답 뒤 표시됩니다";
+    return;
+  }
+  for (const group of groups) {
+    const name = document.createElement("strong");
+    name.textContent = group.agent === "claude" ? "Claude" : "Codex";
+    box.append(name);
+    if (group.agent === "claude" && group.rows.every((row) => row.remaining == null)) {
+      const note = document.createElement("div");
+      note.textContent = "이 부서는 사용량 연결이 안 돼 있습니다";
+      box.append(note);
+    }
+    for (const row of group.rows) {
+      const line = document.createElement("div");
+      line.className = `usage-row ${row.severity}${row.age != null && row.age >= 10 ? " stale" : ""}`;
+      const value = row.reset ? "리셋됨 — 새 측정 대기" : row.remaining == null ? "측정 안 됨" : `남음 ${row.remaining}%`;
+      const bars = row.remaining == null || row.reset ? "" : `${"▓".repeat(Math.round(row.remaining / 12.5))}${"░".repeat(8 - Math.round(row.remaining / 12.5))}  `;
+      line.textContent = `${row.label === "5h" ? "5시간" : "7일"}  ${bars}${value}`;
+      box.append(line);
+      if (row.age != null) {
+        const stamp = document.createElement("small");
+        stamp.textContent = `측정 ${row.age === 0 ? "방금" : `${row.age}분 전`}`;
+        box.append(stamp);
+      }
+    }
+  }
 }
 
 // ---------- T6 Control Center (전용 풀 패널 — 네이티브 실시간 모니터링) ----------
@@ -1503,6 +1538,7 @@ function setRoleDot(el: HTMLElement, role: string | null) {
 //   이게 없으면 노드가 데몬 안에서 헤드리스로만 돌고 화면에 보이지 않는다.
 let refreshing = false;
 let started = false; // start()의 세션 복원이 끝나기 전 인터벌 자동 입양 차단 (이중 생성 방지)
+const sidebarUsageCache = new Map<string, ObservedUsage[]>();
 async function refreshPaneTitles() {
   if (!started || refreshing) return; // 겹친 호출의 이중 입양 방지
   refreshing = true;
@@ -1510,6 +1546,7 @@ async function refreshPaneTitles() {
     // 멀티마스터 F4: workspace별 소켓을 순회 — 각 데몬의 surface를 그 소켓 ws에만 귀속시킨다.
     const sockets = [...new Set(workspaces.map((w) => w.socket))];
     let adopted = false;
+    const allUsage: ObservedUsage[] = [];
     for (const sk of sockets) {
       const org = (await invoke("org_status", { socket: sk }).catch(() => ({ surfaces: [] }))) as { surfaces?: { surface_id: number; status?: { task?: string | null } }[] };
       const tasks = new Map((org.surfaces || []).map((s) => [s.surface_id, s.status?.task ?? null]));
@@ -1524,6 +1561,7 @@ async function refreshPaneTitles() {
           usage?: ObservedUsage | null;
         }[];
       };
+      for (const s of r.surfaces) if (!s.exited && s.usage) allUsage.push(s.usage);
       for (const s of r.surfaces) {
         const rt = panes.get(paneKey(s.surface_id, sk));
         if (!rt) continue;
@@ -1551,6 +1589,9 @@ async function refreshPaneTitles() {
         adopted = true;
       }
     }
+    for (const agent of new Set(allUsage.map((u) => u.agent)))
+      sidebarUsageCache.set(agent, allUsage.filter((u) => u.agent === agent));
+    renderSidebarUsage([...sidebarUsageCache.values()].flat());
     if (adopted) {
       render();
       // 자동입양으로 pane이 생긴 활성 ws에 유효 포커스가 없으면 그 첫 pane에 포커스(포커스 회수, 탈취 아님).

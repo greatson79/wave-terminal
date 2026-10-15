@@ -137,25 +137,34 @@ def main():
 
             page.route("**/*", route_local)
             page.goto(origin + "/index.html")
-            page.locator(".pane-title-text").get_by_text("7번 · 홈페이지 글 고치는 중").wait_for(timeout=10000)
+            page.locator(".pane-title-text").get_by_text("s7 · CTX — · 작업 중").wait_for(timeout=10000)
+            page.evaluate("""() => { window.__mockSurfaces[0].role = 'master'; window.__mockSurfaces[0].model = 'claude-opus-5-5'; window.__mockSurfaces[0].usage = {agent:'claude',ctx_tokens:84000,ctx_window:200000,ctx_pct:42,rate:[{label:'5h',used_pct:12,resets_at:4102444800},{label:'7d',used_pct:70,resets_at:4102444800}],source:'statusline',session_file:'',updated_at:Date.now()/1000}; localStorage.setItem('mock-surfaces', JSON.stringify(window.__mockSurfaces)); }""")
+            page.get_by_text("마스터 Opus 5.5·s7 · CTX 42% · 작업 중").wait_for(timeout=10000)
+            assert "남음 88%" in page.locator("#sidebar-usage").inner_text()
+            assert "남음 30%" in page.locator("#sidebar-usage").inner_text()
+            page.locator("#sidebar-usage").screenshot(path=str(output / "00_사이드바사용량.png"))
+            page.evaluate("window.__mockSurfaces[0].usage = null")
+            page.wait_for_timeout(3200)
+            assert "남음 88%" in page.locator("#sidebar-usage").inner_text(), "last measurement vanished"
+            page.evaluate("window.__mockSurfaces[0].usage = JSON.parse(localStorage.getItem('mock-surfaces'))[0].usage")
             assert not blocked, f"outside request attempted: {blocked}"
             assert not page.locator("#btn-master-start, #btn-dept-master, #btn-ws-dept").count()
 
             page.screenshot(path=str(output / "01_버튼없는_사이드바.png"))
             assert page.locator("#help-message").input_value() == ""
             page.screenshot(path=str(output / "02_빈입력창.png"))
-            page.locator(".pane-title-text").screenshot(path=str(output / "06_패인번호_작업내용.png"))
+            page.locator(".pane-title-text").screenshot(path=str(output / "06_패인번호_작업상태.png"))
             page.locator("#btn-new").click()
-            page.locator(".pane[data-sid='8'] .pane-title-text").get_by_text("8번 · 대기 중").wait_for()
+            page.locator(".pane[data-sid='8'] .pane-title-text").get_by_text("s8 · CTX — · 대기 중").wait_for()
             close = page.locator(".pane[data-sid='8'] .pane-close")
             close.click()
             close.click()
             page.locator(".pane[data-sid='8']").wait_for(state="detached")
             page.locator("#btn-new").click()
-            page.locator(".pane[data-sid='9'] .pane-title-text").get_by_text("9번 · 대기 중").wait_for()
+            page.locator(".pane[data-sid='9'] .pane-title-text").get_by_text("s9 · CTX — · 대기 중").wait_for()
             page.reload()
-            page.locator(".pane[data-sid='7'] .pane-title-text").get_by_text("7번 · 홈페이지 글 고치는 중").wait_for()
-            page.locator(".pane[data-sid='9'] .pane-title-text").get_by_text("9번 · 대기 중").wait_for()
+            page.locator(".pane[data-sid='7'] .pane-title-text").get_by_text("마스터 Opus 5.5·s7 · CTX 42% · 작업 중").wait_for()
+            page.locator(".pane[data-sid='9'] .pane-title-text").get_by_text("s9 · CTX — · 대기 중").wait_for()
             print("PASS C11: two surface IDs 7/8; closed 8 then 9; restored 7/9 keep IDs")
 
             network_after_load = []
@@ -215,9 +224,9 @@ def main():
                 print(f"PASS {mode}: text and preview preserved; retry enabled; guidance matched")
             assert not blocked, f"outside request attempted: {blocked}"
             page.evaluate("""() => {
-              const surface = {surface_id: 1, title: 'surface 1', role: null, live_cwd: null, exited: false, usage: null};
+              const surface = {surface_id: 1, title: 'surface 1', role: 'master', model: 'claude-opus-5-5', live_cwd: null, exited: false, usage: null};
               localStorage.setItem('mock-surfaces', JSON.stringify([surface]));
-              localStorage.setItem('mock-by-socket', JSON.stringify({other: [surface]}));
+              localStorage.setItem('mock-by-socket', JSON.stringify({other: [{...surface, role: 'worker', model: 'claude-sonnet-5-5'}]}));
               localStorage.setItem('mock-depts', JSON.stringify({depts: {classroom: {socket: 'other', display_name: '교실'}}}));
               localStorage.setItem('cys-layout-v2', JSON.stringify({workspaces: [
                 {id: 1, name: '본부', tree: {type: 'pane', sid: 1}},
@@ -233,7 +242,7 @@ def main():
             page.wait_for_timeout(100)
             second_heading = page.locator(".pane-title-text").first.inner_text()
             assert first_heading != second_heading, f"two sockets share heading: {first_heading!r}"
-            assert "1번" in first_heading and "1번" in second_heading
+            assert "s1" in first_heading and "s1" in second_heading
             assert "other" not in second_heading
             page.screenshot(path=str(output / "12_두데몬_같은번호_구분.png"))
             print(f"PASS C11 two sockets: {first_heading!r} != {second_heading!r}")

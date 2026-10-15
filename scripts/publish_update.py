@@ -5,8 +5,8 @@
 waveainetworks.com/mac·/win 은 releases/latest/download/… 로 연결한다 → 그 릴리스를 Latest 로 올리는
 한 동작에 설치 링크(새 수강생)와 Update 버튼(깔린 수강생)이 같이 바뀐다.
 
-  python3 publish_update.py --version 0.2.1 --art <산출물 폴더> [--skip-cdhash] [--with-pack]   # 드라이런(기본 팩 제외): 검사·목록·해시·명령 출력
-  python3 publish_update.py --check [--version 0.2.1]                              # GET 만: 공개된 두 입구 대조
+  python3 publish_update.py --version 0.2.2 --art <산출물 폴더> [--skip-cdhash] [--with-pack]   # 드라이런(기본 팩 제외): 검사·목록·해시·명령 출력
+  python3 publish_update.py --check [--version 0.2.2]                              # GET 만: 공개된 두 입구 대조
 
 ★이 스크립트는 업로드·초안 생성·push 를 하지 않는다. 발행 명령은 출력만 한다(사람이 실행).
 비밀키는 쓰지 않는다 — 서명은 미리 끝낸 .sig/.minisig 를 앱 내장 공개키로 검증만 한다.

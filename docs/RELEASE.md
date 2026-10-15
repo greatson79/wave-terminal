@@ -181,12 +181,12 @@ cargo zigbuild --release --target aarch64-pc-windows-gnullvm --bin cys --bin cys
 
 # MSI (wixl — wxs Source 상대경로가 ../target/... 이므로 dist-win에서 실행)
 cd dist-win
-wixl -o cys-0.2.1-windows-x64.msi   cys-x64.wxs
-wixl -o cys-0.2.1-windows-arm64.msi cys.wxs
+wixl -o cys-0.2.2-windows-x64.msi   cys-x64.wxs
+wixl -o cys-0.2.2-windows-arm64.msi cys.wxs
 cd ..
 # ZIP
-zip -j dist-win/cys-0.2.1-windows-x64.zip   target/x86_64-pc-windows-gnu/release/cys.exe target/x86_64-pc-windows-gnu/release/cysd.exe
-zip -j dist-win/cys-0.2.1-windows-arm64.zip target/aarch64-pc-windows-gnullvm/release/cys.exe target/aarch64-pc-windows-gnullvm/release/cysd.exe
+zip -j dist-win/cys-0.2.2-windows-x64.zip   target/x86_64-pc-windows-gnu/release/cys.exe target/x86_64-pc-windows-gnu/release/cysd.exe
+zip -j dist-win/cys-0.2.2-windows-arm64.zip target/aarch64-pc-windows-gnullvm/release/cys.exe target/aarch64-pc-windows-gnullvm/release/cysd.exe
 ```
 
 ⚠ **한계(정직)**: 크로스빌드 산출물은 PE 포맷·아키텍처는 검증되나(`file`로 PE32+ x86-64 /

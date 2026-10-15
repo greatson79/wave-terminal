@@ -63,6 +63,43 @@ class DeptStatusLineTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("cys-statusline.sh", (good / "settings.json").read_text())
 
+    def test_missing_account_dir_uses_existing_default_fork_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            account = root / ".cys" / "claude-default-dept-1"
+            account.mkdir(parents=True)
+            missing = root / ".cys" / "claude-default-dept-2"
+            registry = root / "depts.json"
+            registry.write_text(json.dumps({"depts": {"dept-1": {}, "dept-2": {}}}))
+            result = subprocess.run([os.environ.get("CYS_TEST_BASH", "bash"), str(DEPT_TOOL), "statusline-all"],
+                                    env={**os.environ, "HOME": tmp, "CYS_ROLE": "",
+                                         "CYS_DEPT_DEFAULT_ACCOUNT": "default",
+                                         "CYS_PACK_DIR": str(SCRIPT.parents[1]), "CYS_DEPTS_JSON": str(registry)},
+                                    capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            self.assertIn("cys-statusline.sh", (account / "settings.json").read_text())
+            self.assertFalse(missing.exists())
+
+    def test_missing_account_dir_failure_does_not_skip_next_fork(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = root / ".cys"
+            bad = base / "claude-default-dept-1"
+            good = base / "claude-default-dept-2"
+            bad.mkdir(parents=True)
+            good.mkdir()
+            (bad / "settings.json").write_text("{")
+            registry = root / "depts.json"
+            registry.write_text(json.dumps({"depts": {"dept-1": {}, "dept-2": {}}}))
+            result = subprocess.run([os.environ.get("CYS_TEST_BASH", "bash"), str(DEPT_TOOL), "statusline-all"],
+                                    env={**os.environ, "HOME": tmp, "CYS_ROLE": "",
+                                         "CYS_DEPT_DEFAULT_ACCOUNT": "default",
+                                         "CYS_PACK_DIR": str(SCRIPT.parents[1]), "CYS_DEPTS_JSON": str(registry)},
+                                    capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual((bad / "settings.json").read_text(), "{")
+            self.assertIn("cys-statusline.sh", (good / "settings.json").read_text())
+
     def test_invalid_registry_root_reports_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             reg = Path(tmp) / "depts.json"

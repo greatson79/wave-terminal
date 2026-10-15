@@ -32,6 +32,7 @@ export CYS_BIN="$CYS"
 # agents.json·directives 읽기가 UnicodeDecodeError로 크래시(부서 seed 실패 등). PYTHONUTF8=1로 전 python
 # heredoc·자식 python을 UTF-8 기본으로 강제(unix 무영향). 개별 open(encoding=) 누락도 이걸로 방어.
 export PYTHONUTF8=1
+export PYTHONIOENCODING=utf-8
 
 # RC-4: 부서 소켓 규약 — Windows(MSYS/Git-Bash)는 named pipe `\\.\pipe\cys-dept-<n>`
 # (cysd가 CYS_SOCKET을 named pipe로 바인드·Rust cys::dept_socket_path와 정합), 그 외는 unix .sock.

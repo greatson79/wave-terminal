@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "javis_preflight.py"
+DEPT_TOOL = SCRIPT.parent / "cys-dept"
 
 
 class DeptStatusLineTest(unittest.TestCase):
@@ -66,8 +67,10 @@ class DeptStatusLineTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             reg = Path(tmp) / "depts.json"
             reg.write_text("[]")
-            result = subprocess.run([sys.executable, str(SCRIPT), "--statusline-depts"],
-                                    env={**os.environ, "HOME": tmp, "CYS_DEPTS_JSON": str(reg)}, capture_output=True)
+            result = subprocess.run(["bash", str(DEPT_TOOL), "statusline-all"],
+                                    env={**os.environ, "HOME": tmp, "CYS_ROLE": "",
+                                         "CYS_PACK_DIR": str(SCRIPT.parents[1]),
+                                         "CYS_DEPTS_JSON": str(reg)}, capture_output=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("등록부", result.stderr.decode())
             self.assertNotIn("Traceback", result.stderr.decode())

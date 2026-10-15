@@ -38,6 +38,7 @@ jobs:
           test -s "$RUNNER_TEMP/statusline-output.txt"
           python -c 'import json,os; v=json.load(open(os.environ["CYS_STATUSLINE_CAPTURE"])); assert v["model"]["id"] == "claude-opus-5-5"; assert v["context_window"]["used_percentage"] == 41.6; assert v["rate_limits"]["five_hour"]["used_percentage"] == 41; assert v["rate_limits"]["seven_day"]["used_percentage"] == 12'
           cargo test --bin cys statusline_params_full_schema
+          export CYS_TEST_BASH="$(cygpath -w "$(command -v bash)")"
           python -m unittest cysjavis-pack/bin/tests/test_dept_statusline.py
   verify:
     runs-on: windows-latest

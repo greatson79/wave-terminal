@@ -67,12 +67,16 @@ class DeptStatusLineTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             reg = Path(tmp) / "depts.json"
             reg.write_text("[]")
-            result = subprocess.run(["bash", str(DEPT_TOOL), "statusline-all"],
-                                    env={**os.environ, "HOME": tmp, "CYS_ROLE": "",
-                                         "CYS_PACK_DIR": str(SCRIPT.parents[1]),
-                                         "CYS_DEPTS_JSON": str(reg)}, capture_output=True)
+            env = {**os.environ, "HOME": tmp, "CYS_ROLE": "",
+                   "CYS_PACK_DIR": str(SCRIPT.parents[1]), "CYS_DEPTS_JSON": str(reg)}
+            bash = os.environ.get("CYS_TEST_BASH", "bash")
+            if bash != "bash":
+                ambient = subprocess.run(["bash", str(DEPT_TOOL), "statusline-all"], env=env, capture_output=True)
+                print(f"ambient bash: rc={ambient.returncode} stdout={ambient.stdout!r} stderr={ambient.stderr!r}", file=sys.stderr)
+            result = subprocess.run([bash, str(DEPT_TOOL), "statusline-all"], env=env, capture_output=True)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("등록부", result.stderr.decode())
+            self.assertIn("등록부", result.stderr.decode(),
+                          f"bash={bash} rc={result.returncode} stdout={result.stdout!r} stderr={result.stderr!r}")
             self.assertNotIn("Traceback", result.stderr.decode())
 
 

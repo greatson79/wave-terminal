@@ -17,6 +17,7 @@ import { safeHelpText } from "./help";
 import { paneHeading } from "./paneheading";
 import { sidebarUsage } from "./usagebar";
 import { inputSource } from "./inputsource";
+import { sendPreparedHelp } from "./helpflow";
 
 declare global {
   interface Window {
@@ -39,50 +40,61 @@ const helpBox = document.getElementById("sidebar-help")!;
 const helpMessage = document.getElementById("help-message") as HTMLTextAreaElement;
 const helpKind = document.getElementById("help-kind") as HTMLSelectElement;
 const helpPreview = document.getElementById("help-preview")!;
+const helpPreviewDetails = document.getElementById("help-preview-details") as HTMLDetailsElement;
 const helpSend = document.getElementById("help-send") as HTMLButtonElement;
 const helpResult = document.getElementById("help-result")!;
 let previewedHelp: Record<string, unknown> | null = null;
 let helpEditRevision = 0;
+let helpSent = false;
 helpBox.addEventListener("keydown", (e) => e.stopPropagation());
 helpBox.addEventListener("paste", (e) => e.stopPropagation());
 function invalidateHelpPreview() {
   helpEditRevision++;
   previewedHelp = null;
-  helpPreview.hidden = true;
-  helpSend.disabled = true;
+  helpPreviewDetails.open = false;
+  helpSend.disabled = !helpMessage.value.trim() || helpMessage.value.length > 500;
   helpSend.textContent = "보내기";
   helpResult.textContent = "";
+  helpSent = false;
   document.getElementById("help-limit")!.hidden = helpMessage.value.length <= 500;
 }
 helpMessage.addEventListener("input", invalidateHelpPreview);
 helpKind.addEventListener("change", invalidateHelpPreview);
-document.getElementById("help-preview-button")!.addEventListener("click", async () => {
+async function prepareHelpPayload(): Promise<Record<string, unknown> | null> {
   const revision = helpEditRevision;
   const rawMessage = helpMessage.value;
   const kind = helpKind.value;
   const username = await invoke("help_username").catch(() => "") as string;
-  if (revision !== helpEditRevision) return;
+  if (revision !== helpEditRevision) return null;
   const message = safeHelpText(rawMessage, username);
-  if (!message) { helpResult.textContent = "글을 입력해 주세요"; return; }
+  if (!message) { helpResult.textContent = "글을 입력해 주세요"; return null; }
   try {
     const payload = await invoke("prepare_help", { kind, message }) as Record<string, unknown>;
-    if (revision !== helpEditRevision) return;
-    previewedHelp = payload;
+    if (revision !== helpEditRevision) return null;
+    return payload;
   } catch {
     helpResult.textContent = "보내는 내용을 준비하지 못했습니다. 잠시 뒤 다시 시도해 주세요.";
+    return null;
+  }
+}
+helpPreviewDetails.addEventListener("toggle", async () => {
+  if (!helpPreviewDetails.open) {
+    if (!helpSent) helpResult.textContent = "아직 안 보냈습니다";
     return;
   }
-  helpPreview.textContent = JSON.stringify(previewedHelp, null, 2);
-  helpPreview.hidden = false;
-  helpSend.disabled = false;
+  const payload = previewedHelp ?? await prepareHelpPayload();
+  if (!helpPreviewDetails.open || !payload) return;
+  previewedHelp = payload;
+  helpPreview.textContent = JSON.stringify(payload, null, 2);
   helpResult.textContent = "";
 });
 helpSend.addEventListener("click", async () => {
-  if (!previewedHelp) return;
   helpSend.disabled = true;
   try {
-    const result = await invoke("send_help", { payload: previewedHelp }) as { id: string };
-    helpResult.textContent = `접수됨 · 접수 번호 ${result.id}`;
+    const id = await sendPreparedHelp(previewedHelp, prepareHelpPayload,
+      (payload) => invoke("send_help", { payload }) as Promise<{ id: string }>);
+    helpSent = true;
+    helpResult.textContent = `접수됨 · 접수 번호 ${id}`;
   } catch (e) {
     const error = String(e);
     const advice = error.includes("429") ? "요청이 많습니다. 잠시 뒤 다시 보내 주세요."

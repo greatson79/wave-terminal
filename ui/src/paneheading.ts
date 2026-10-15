@@ -1,33 +1,15 @@
-type WorkspaceLabelSource = { socket?: string; name: string };
-
-export function paneWorkspaceLabels(workspaces: WorkspaceLabelSource[]): Map<string, string> {
-  const bySocket = new Map<string, WorkspaceLabelSource>();
-  for (const ws of workspaces) {
-    const key = ws.socket ?? "";
-    if (!bySocket.has(key)) bySocket.set(key, ws);
-  }
-  if (bySocket.size < 2) return new Map();
-  const labels = new Map<string, string>();
-  const used = new Set<string>();
-  let index = 0;
-  for (const [socket, ws] of bySocket) {
-    index++;
-    const name = ws.name.replace(/·/g, " ").replace(/\s+/g, " ").trim();
-    const internal = !name || name === "non title" || name === "…" || /^dept-\d+$/.test(name)
-      || /^ws \d+$/.test(name) || /[/\\]/.test(name) || (!!socket && name.includes(socket));
-    const base = internal ? `워크스페이스 ${index}` : name;
-    let label = base;
-    for (let n = 2; used.has(label); n++) label = `${base} ${n}`;
-    used.add(label);
-    labels.set(socket, label);
-  }
-  return labels;
-}
-
-export function paneHeadingPrefix(surfaceId: number, workspaceLabel?: string): string {
-  return `${workspaceLabel ? `${workspaceLabel} · ` : ""}${surfaceId}번 · `;
-}
-
-export function paneHeading(surfaceId: number, manual: string | undefined, reported: string | null, workspaceLabel?: string): string {
-  return `${paneHeadingPrefix(surfaceId, workspaceLabel)}${manual || reported || "대기 중"}`;
+export function paneHeading({ sid, role, model, ctx, approximate, tail }: {
+  sid: number;
+  role?: string | null;
+  model?: string | null;
+  ctx?: number | null;
+  approximate?: boolean;
+  tail?: string | null;
+}): string {
+  const roleName = role === "master" ? "마스터" : role === "worker" || role?.startsWith("worker-") ? "워커"
+    : role === "cso" ? "CSO" : role?.startsWith("reviewer") ? "리뷰어" : role || "";
+  const modelName = model?.replace(/^claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d+))?.*$/i,
+    (_, family: string, major: string, minor?: string) => `${family[0].toUpperCase()}${family.slice(1).toLowerCase()} ${major}${minor ? `.${minor}` : ""}`)
+    .replace(/^claude-/, "") || "";
+  return `${[roleName, modelName].filter(Boolean).join(" ")}${roleName || modelName ? "·" : ""}s${sid} · CTX ${ctx == null ? "—" : `${approximate ? "~" : ""}${Math.round(ctx)}%`} · ${tail ? "작업 중" : "대기 중"}`;
 }

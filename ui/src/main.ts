@@ -14,7 +14,7 @@ import { ccEffectiveZoom } from "./ccscale";
 import { clampWsbarWidth, clampWsbarFont, WSBAR_W_DEFAULT, WSBAR_FONT_STEP } from "./wsbar";
 import { composeFontFamily, FONT_CHOICES, ROLE_COLOR, roleDotColor } from "./appearance";
 import { safeHelpText } from "./help";
-import { paneHeading, paneHeadingPrefix, paneWorkspaceLabels } from "./paneheading";
+import { paneHeading } from "./paneheading";
 
 declare global {
   interface Window {
@@ -128,10 +128,16 @@ const LAYOUT_KEY = "cys-layout-v2";
 
 // pane 식별 복합키 — 서로 다른 데몬이 같은 surface_id를 독립 발급하므로 (socket, sid)로 구분한다.
 const paneKey = (sid: number, socket?: string): string => `${socket ?? ""}#${sid}`;
-const paneManualTask: Record<string, string> = JSON.parse(localStorage.getItem("cys-pane-tasks") || "{}");
-function displayPaneTask(sid: number, socket: string | undefined, reported: string | null): string {
-  const label = paneWorkspaceLabels(workspaces).get(socket ?? "");
-  return paneHeading(sid, paneManualTask[paneKey(sid, socket)], reported, label);
+function displayPaneHeading(el: HTMLElement, sid: number, state?: PaneTitleState) {
+  const heading = paneHeading({ sid, role: state?.role, model: state?.model,
+    ctx: state?.usage?.ctx_pct, approximate: state?.usage?.source === "transcript", tail: state?.reported });
+  const [prefix, context] = heading.split(" · CTX ");
+  const ctx = document.createElement("span");
+  ctx.textContent = `CTX ${context.split(" · ")[0]}`;
+  const pct = state?.usage?.ctx_pct;
+  if (pct != null) ctx.className = sevClass(pct, 75, 85);
+  el.replaceChildren(prefix + " · ", ctx, context.includes(" · ") ? ` · ${context.split(" · ").slice(1).join(" · ")}` : "", state?.exited ? " [종료]" : "");
+  el.title = pct == null ? `${heading}\n첫 응답 뒤 표시` : state?.usage?.model ? heading : `${heading}\n시작 시 모델`;
 }
 
 interface PaneRuntime {
@@ -166,6 +172,7 @@ interface ObservedUsage {
   source: string;
   session_file: string;
   updated_at: number;
+  model?: string | null;
 }
 
 const sevClass = (pct: number, warn: number, crit: number): string =>
@@ -178,21 +185,6 @@ function renderUsage(el: HTMLElement, u: ObservedUsage | null | undefined) {
     el.title = "";
     return;
   }
-  const parts: { text: string; cls: string }[] = [];
-  if (u.ctx_pct !== null && u.ctx_pct !== undefined)
-    parts.push({ text: `CTX ${u.ctx_pct}%`, cls: sevClass(u.ctx_pct, 60, 80) });
-  for (const w of u.rate ?? [])
-    parts.push({ text: `${w.label} ${Math.round(w.used_pct)}%`, cls: sevClass(w.used_pct, 70, 90) });
-  if (!parts.length) {
-    el.title = "";
-    return;
-  }
-  parts.forEach((p, i) => {
-    const s = document.createElement("span");
-    s.textContent = (i ? "·" : "") + p.text;
-    if (p.cls) s.className = p.cls;
-    el.appendChild(s);
-  });
   const tip: string[] = [`${u.agent} 사용량 (관측: ${u.source})`];
   if (u.ctx_tokens != null && u.ctx_window != null)
     tip.push(`context ${u.ctx_tokens.toLocaleString()} / ${u.ctx_window.toLocaleString()} tokens`);
@@ -1356,7 +1348,8 @@ let groups: GroupMeta[] = []; // 06: 그룹 메타 배열(진실원=localStorage
 let groupCounter = 1; // 06: 그룹 id 발급(ws의 wsCounter와 분리)
 let focusedSid: number | null = null;
 const panes = new Map<string, PaneRuntime>(); // 키 = paneKey(sid, socket)
-const paneTitleState = new Map<string, { reported: string | null; exited: boolean }>();
+interface PaneTitleState { reported: string | null; exited: boolean; role?: string | null; model?: string | null; usage?: ObservedUsage | null }
+const paneTitleState = new Map<string, PaneTitleState>();
 // 부서 데몬 socket_slug(F3 백엔드 단일진실) → socket 경로. launch_dept_daemon 반환·daemon-event로 채운다.
 const socketForSlug = new Map<string, string>();
 // 사이드바 노드 신호 캐시(B3) — org.status 응답을 워크스페이스 행 집계용으로 보관.
@@ -1525,6 +1518,7 @@ async function refreshPaneTitles() {
           surface_id: number;
           title: string;
           role: string | null;
+          model?: string | null;
           live_cwd: string | null;
           exited: boolean;
           usage?: ObservedUsage | null;
@@ -1535,10 +1529,10 @@ async function refreshPaneTitles() {
         if (!rt) continue;
         renderUsage(rt.usageEl, s.exited ? null : s.usage); // 종료 pane은 배지 제거 (혼동 방지)
         setRoleDot(rt.roleEl, s.exited ? null : s.role); // 역할 점도 동일 주기 갱신
-        paneTitleState.set(paneKey(s.surface_id, sk), { reported: tasks.get(s.surface_id) ?? null, exited: s.exited });
-        if (rt.titleEl.isContentEditable) continue; // 이름 편집 중에는 덮어쓰지 않음
-        rt.titleEl.textContent = displayPaneTask(s.surface_id, sk, tasks.get(s.surface_id) ?? null) + (s.exited ? " [종료]" : "");
-        rt.titleEl.title = rt.titleEl.textContent;
+        const state = { reported: tasks.get(s.surface_id) ?? null, exited: s.exited,
+          role: s.role, model: s.usage?.model ?? s.model, usage: s.usage };
+        paneTitleState.set(paneKey(s.surface_id, sk), state);
+        displayPaneHeading(rt.titleEl, s.surface_id, state);
       }
       // 자동 입양: 그 소켓의 role surface 중 UI에 없는 것 → '같은 소켓을 가진 ws'에만 표출.
       // ★소켓 일치 가드 — 부서A 노드가 부서B 탭에 잘못 입양되는 격리 누수 차단(검증 mustFix).
@@ -1606,7 +1600,7 @@ async function makePane(sid: number, title: string, socket?: string): Promise<Pa
   roleEl.style.display = "none";
   const titleEl = document.createElement("span");
   titleEl.className = "pane-title-text";
-  titleEl.textContent = displayPaneTask(sid, socket, null);
+  displayPaneHeading(titleEl, sid);
   const usageEl = document.createElement("span");
   usageEl.className = "pane-usage";
   // 배지 위 mousedown이 pane 드래그로 번지지 않게 — tooltip(hover) 확인 중 오발 방지
@@ -1638,41 +1632,6 @@ async function makePane(sid: number, title: string, socket?: string): Promise<Pa
     render();
   });
   header.append(roleEl, titleEl, usageEl, closeBtn);
-  header.addEventListener("contextmenu", (e) => {
-    e.preventDefault();
-    showCtxMenu(e.clientX, e.clientY, [
-      {
-        label: "이름 변경",
-        action: () => {
-          const originalPrefix = paneHeadingPrefix(sid, paneWorkspaceLabels(workspaces).get(socket ?? ""));
-          titleEl.contentEditable = "true";
-          titleEl.focus();
-          window.getSelection()?.selectAllChildren(titleEl);
-          const onKey = (ke: KeyboardEvent) => {
-            if (ke.key === "Enter") {
-              ke.preventDefault();
-              titleEl.blur();
-            }
-          };
-          const commit = () => {
-            titleEl.removeEventListener("keydown", onKey); // rename마다 리스너 누적 방지
-            titleEl.contentEditable = "false";
-            const edited = (titleEl.textContent || "").trim();
-            const name = edited.startsWith(originalPrefix) ? edited.slice(originalPrefix.length).trim() : edited;
-            // 사람의 작업 내용이 신고값보다 우선하며 빈 값은 신고값으로 돌아간다.
-            if (name) paneManualTask[paneKey(sid, socket)] = name;
-            else delete paneManualTask[paneKey(sid, socket)];
-            localStorage.setItem("cys-pane-tasks", JSON.stringify(paneManualTask));
-            invoke("rename_surface", { socket, surfaceId: sid, title: name })
-              .catch(() => {})
-              .then(() => refreshPaneTitles());
-          };
-          titleEl.addEventListener("blur", commit, { once: true });
-          titleEl.addEventListener("keydown", onKey);
-        },
-      },
-    ]);
-  });
   const termHost = document.createElement("div");
   termHost.className = "term-host";
   el.append(header, termHost);
@@ -2053,10 +2012,8 @@ function paneAtPhysicalPoint(pos?: { x: number; y: number }): PaneRuntime | unde
 
 function render() {
   for (const rt of panes.values()) {
-    if (rt.titleEl.isContentEditable) continue;
     const state = paneTitleState.get(paneKey(rt.sid, rt.socket));
-    rt.titleEl.textContent = displayPaneTask(rt.sid, rt.socket, state?.reported ?? null) + (state?.exited ? " [종료]" : "");
-    rt.titleEl.title = rt.titleEl.textContent;
+    displayPaneHeading(rt.titleEl, rt.sid, state);
   }
   for (const rt of panes.values()) rt.el.remove();
   root.innerHTML = "";

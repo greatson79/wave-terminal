@@ -1460,7 +1460,7 @@ async fn maybe_autoregister_launchd() -> bool {
     };
     let running = connect().await.is_ok();
     let holder_pid = if running {
-        tokio::time::timeout(Duration::from_secs(2), daemon_pid_of(&cys::socket_path()))
+        tokio::time::timeout(std::time::Duration::from_secs(2), daemon_pid_of(&cys::socket_path()))
             .await.ok().flatten().and_then(|pid| u32::try_from(pid).ok())
     } else { None };
     match cys::launchd::register_if_absent(&daemon, running, holder_pid) {

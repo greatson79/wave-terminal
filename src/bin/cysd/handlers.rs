@@ -140,6 +140,22 @@ fn is_terminal_query_reply(text: &str) -> bool {
     .is_match(text)
 }
 
+fn human_burst_warning(burst: &mut Option<(std::time::Instant, std::time::Instant, u32, bool)>, now: std::time::Instant) -> bool {
+    let (start, last, count, warned) = burst.get_or_insert((now, now, 0, false));
+    if now.duration_since(*last) > std::time::Duration::from_secs(1) {
+        *burst = Some((now, now, 1, false));
+        return false;
+    }
+    *last = now;
+    *count += 1;
+    let elapsed = now.duration_since(*start).as_secs_f64();
+    if elapsed > 10.0 && (*count as f64) / elapsed >= 2.0 && !*warned {
+        *warned = true;
+        return true;
+    }
+    false
+}
+
 /// launch-agent 완료 신호용 좌석별 토큰. PID 조회가 실패할 수 있는 Windows에서도
 /// 새 surface.create 응답을 받은 호출자만 완료를 기록하게 한다.
 fn launch_token_hex() -> Result<String, String> {
@@ -979,7 +995,17 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                 Err(e) => return Reply::Single(err_response(&id, "acl_denied", &e)),
             };
             if human && !is_terminal_query_reply(&text) {
-                *surface.last_human_input.lock().unwrap() = Some(std::time::Instant::now());
+                let now = std::time::Instant::now();
+                *surface.last_human_input.lock().unwrap() = Some(now);
+                let burst_count = {
+                    let mut burst = surface.human_burst.lock().unwrap();
+                    human_burst_warning(&mut burst, now).then(|| burst.as_ref().unwrap().2)
+                };
+                if let Some(count) = burst_count {
+                    let first = String::from_utf8_lossy(&text.as_bytes()[..text.len().min(16)]);
+                    eprintln!("[cysd] surface {} human input over 2/s for 10s ({} inputs, first bytes: {})",
+                        surface.id, count, first.escape_debug());
+                }
             }
             // T3-13 권위 전달(clear_first): 잔존 미제출 텍스트를 Ctrl-U로 지운 깨끗한 라인에
             // 명령을 원자적으로 꽂고 제출한다(아래 Inject 경로). 게이트를 데몬에서 집행한다.
@@ -4357,6 +4383,19 @@ mod tests {
         assert!(surface.last_human_input.lock().unwrap().is_some());
         let _ = surface.child.lock().unwrap().kill();
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn human_burst_warning_requires_ten_seconds_and_logs_once() {
+        let start = std::time::Instant::now();
+        let mut burst = None;
+        for tick in 0..=20 {
+            let warn = super::human_burst_warning(&mut burst, start + std::time::Duration::from_millis(tick * 500));
+            assert!(!warn);
+        }
+        assert!(super::human_burst_warning(&mut burst, start + std::time::Duration::from_millis(10500)));
+        assert!(!super::human_burst_warning(&mut burst, start + std::time::Duration::from_secs(11)));
+        assert!(!super::human_burst_warning(&mut burst, start + std::time::Duration::from_secs(13)));
     }
 
     /// ★주인님 지시(2026-10-03): 첫기동 관문 화면(구 신뢰·2.1.261 신뢰·Bypass 면책)에는 프로그램

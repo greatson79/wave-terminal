@@ -497,13 +497,13 @@ fn ime_debug_enabled() -> bool {
 }
 
 #[tauri::command]
-async fn send_input(socket: Option<String>, surface_id: u64, data: String) -> Result<(), String> {
+async fn send_input(socket: Option<String>, surface_id: u64, data: String, human: Option<bool>) -> Result<(), String> {
     // human=true: T3-13 타이핑 가드의 신호 — UI 키 입력을 '사람'으로 표시해
     // 원격 주입이 사람의 미완성 입력을 오염시키지 못하게 한다
     rpc_on(
         &resolve_socket(&socket),
         "surface.send_text",
-        json!({"surface_id": surface_id, "text": data, "quiet": true, "human": true}),
+        json!({"surface_id": surface_id, "text": data, "quiet": true, "human": human.unwrap_or(true)}),
     )
     .await
     .map(|_| ())

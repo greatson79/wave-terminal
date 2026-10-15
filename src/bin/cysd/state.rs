@@ -140,6 +140,7 @@ pub struct Surface {
     pub agent_exit_notified: AtomicBool,
     /// T3-13 타이핑 가드: 사람(UI) 입력의 마지막 시각 — 원격 주입 충돌 보호
     pub last_human_input: Mutex<Option<Instant>>,
+    pub human_burst: Mutex<Option<(Instant, Instant, u32, bool)>>,
     /// T3-14 단조 라인 커서: scrollback FIFO와 무관하게 증가하는 누적 완성 라인 수
     pub line_count: AtomicU64,
     /// T4-17 헬스 조치: 이 시각까지 queued 배달 일시정지 (직접 send는 통과)
@@ -1726,6 +1727,7 @@ impl Daemon {
             crash_notified: AtomicBool::new(false),
             last_cmd_ack: Mutex::new(None),
             last_human_input: Mutex::new(None),
+            human_burst: Mutex::new(None),
             line_count: AtomicU64::new(0),
             queue_paused_until: Mutex::new(None),
             last_injected: Mutex::new(None),

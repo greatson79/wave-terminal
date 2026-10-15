@@ -16,6 +16,7 @@ import { composeFontFamily, FONT_CHOICES, ROLE_COLOR, roleDotColor } from "./app
 import { safeHelpText } from "./help";
 import { paneHeading } from "./paneheading";
 import { sidebarUsage } from "./usagebar";
+import { inputSource } from "./inputsource";
 
 declare global {
   interface Window {
@@ -1748,10 +1749,10 @@ async function makePane(sid: number, title: string, socket?: string): Promise<Pa
   // 전송 직렬화 체인: 빠른 타자에서 비동기 IPC 호출이 경주하면 도착 순서가 뒤집힌다 —
   // promise 체인으로 같은 pane의 모든 입력을 발사 순서대로 보장한다.
   let sendChain: Promise<unknown> = Promise.resolve();
-  const sendRaw = (data: string) => {
+  const sendRaw = (data: string, human = true) => {
     follow = true; // 입력 = 프롬프트 사용 의사 — 바닥 고정 재개(xterm scrollOnUserInput과 정합)
     sendChain = sendChain
-      .then(() => invoke("send_input", { socket, surfaceId: sid, data }))
+      .then(() => invoke("send_input", { socket, surfaceId: sid, data, human }))
       .catch(() => {});
     return sendChain;
   };
@@ -1809,11 +1810,13 @@ async function makePane(sid: number, title: string, socket?: string): Promise<Pa
     if (imeDbg) invoke("log_ime", { line: `[s${sid}] ${line}` }).catch(() => {});
   };
   let imeState = initialImeState();
-  const applyIme = (event: ImeEvent) => {
+  const applyIme = (event: ImeEvent, human = true) => {
     const { state, actions } = imeStep(imeState, event);
     imeState = state;
+    const dataAction = event.kind === "onData" && !event.duplicate
+      ? actions.filter((action) => "send" in action).at(-1) : null;
     for (const a of actions) {
-      if ("send" in a) sendRaw(a.send);
+      if ("send" in a) sendRaw(a.send, a === dataAction ? human : true);
       else dbg(a.debug);
     }
   };
@@ -1826,11 +1829,15 @@ async function makePane(sid: number, title: string, socket?: string): Promise<Pa
   // 리스너 — xterm _inputEvent 포함 — 보다 먼저 실행되므로 유출 시점을 정확히 포착).
   let insertLeak: string | null = null;
 
+  const source = inputSource(term as Parameters<typeof inputSource>[0], (message) => {
+    console.warn(message);
+    invoke("log_ime", { line: `[s${sid}] ${message}` }).catch(() => {});
+  });
   term.onData((data) => {
     // 완성 음절은 그대로 PTY로 — 잔여 pending이 있으면 리듀서가 순서 보존 후 함께 전송(안전장치).
     // Windows 등 비-WKWebView에선 input 핸들러·insertLeak 감지 미배선이라 insertLeak이 항상 null →
     // duplicate=false → 순수 send(data)와 동일(회귀 0). WKWebView에서 insertText 자모 유출만 폐기.
-    applyIme({ kind: "onData", data, duplicate: insertLeak !== null && data === insertLeak });
+    applyIme({ kind: "onData", data, duplicate: insertLeak !== null && data === insertLeak }, source.takeHuman());
   });
 
   // ★F: 위 조합 상태 머신은 macOS WKWebView 전용 우회다. Windows WebView2 등 Chromium 계열은

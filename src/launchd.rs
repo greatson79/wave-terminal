@@ -54,9 +54,9 @@ pub fn render_plist(daemon: &Path, log: &Path) -> String {
     )
 }
 
-/// launchd가 현재 LAUNCHD_LABEL을 적재 중인가(`launchctl list <label>` 성공 여부).
+/// launchd가 현재 LAUNCHD_LABEL을 적재 중인가.
 pub fn is_loaded() -> bool {
-    loaded_pid().0
+    matches!(launchd_state(), LaunchdState::Running(_) | LaunchdState::LoadedIdle)
 }
 
 /// ★W3: CLI autostart가 launchd에 위임할지 판정(순수 함수). launchd가 cysd 서비스를 적재
@@ -91,19 +91,43 @@ pub fn kickstart_restart() -> bool {
         .output().map(|o| o.status.success()).unwrap_or(false)
 }
 
-fn loaded_pid() -> (bool, Option<u32>) {
-    let Ok(out) = std::process::Command::new("launchctl").args(["list", LAUNCHD_LABEL]).output() else {
-        return (false, None);
-    };
-    let pid = String::from_utf8_lossy(&out.stdout).lines().find_map(|line| {
-        line.trim().strip_prefix("\"PID\" = ")?.trim_end_matches(';').parse().ok()
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchdState {
+    Running(u32),
+    LoadedIdle,
+    NotLoaded,
+    Unknown,
+}
+
+fn parse_launchctl_list(exit_code: Option<i32>, stdout: &str, stderr: &str) -> LaunchdState {
+    if exit_code == Some(113) || stderr.contains("Could not find service") {
+        return LaunchdState::NotLoaded;
+    }
+    if exit_code != Some(0) { return LaunchdState::Unknown; }
+    let field = |key| stdout.lines().find_map(|line| {
+        line.trim().strip_prefix(key).map(|v| v.trim_end_matches(';').trim())
     });
-    (out.status.success(), pid)
+    if let Some(pid) = field("\"PID\" = ") {
+        return pid.parse::<u32>().ok().filter(|pid| *pid > 0)
+            .map(LaunchdState::Running).unwrap_or(LaunchdState::Unknown);
+    }
+    if field("\"LastExitStatus\" = ").and_then(|v| v.parse::<i32>().ok()).is_some() {
+        LaunchdState::LoadedIdle
+    } else {
+        LaunchdState::Unknown
+    }
+}
+
+fn launchd_state() -> LaunchdState {
+    let Ok(out) = std::process::Command::new("launchctl").args(["list", LAUNCHD_LABEL]).output() else {
+        return LaunchdState::Unknown;
+    };
+    parse_launchctl_list(out.status.code(), std::str::from_utf8(&out.stdout).unwrap_or(""),
+        std::str::from_utf8(&out.stderr).unwrap_or(""))
 }
 
 pub fn owns_daemon(pid: u32) -> bool {
-    let (loaded, launchd_pid) = loaded_pid();
-    loaded && launchd_pid == Some(pid)
+    launchd_state() == LaunchdState::Running(pid)
 }
 
 fn plist_matches(daemon: &Path) -> bool {
@@ -112,8 +136,7 @@ fn plist_matches(daemon: &Path) -> bool {
 
 /// 이 결과에서 launchd가 cysd 기동을 책임지는가 — 앱 setup이 **수동 spawn을 건너뛰고**
 /// launchd-owned cysd의 socket-ready를 폴링할지 결정한다(split-brain·이중 spawn 방지).
-/// Registered/AlreadyRegistered = launchd가 띄움. DeferredDaemonRunning = 기존 데몬이
-/// 이미 가동(connect로 충분, launchd 미적재).
+/// Registered/AlreadyRegistered = launchd가 띄움. DeferredDaemonRunning = 소유권 판정 보류.
 pub fn launchd_will_serve(outcome: RegisterOutcome) -> bool {
     matches!(
         outcome,
@@ -136,17 +159,14 @@ pub fn write_plist(daemon: &Path) -> std::io::Result<PathBuf> {
 pub enum RegisterOutcome {
     /// plist가 이미 존재 — 이미 launchd 소유(무동작).
     AlreadyRegistered,
-    /// plist 기록 + launchctl load 완료(launchd가 cysd 소유).
+    /// launchctl load 완료(launchd가 cysd 소유).
     Registered,
-    /// 데몬이 이미 가동 중 — plist만 기록(load 보류, 다음 로그인 발효).
-    /// 현 세션의 flock 단일소유를 깨지 않아 가동 세션 소멸을 피한다.
+    /// 소유권 판정 불가 — plist만 기록(load 보류, 다음 로그인 발효).
     DeferredDaemonRunning,
 }
 
 /// 자동등록 결정(순수 함수 — 부작용 없음, 진리표 테스트 가능).
-/// 멱등성은 plist 존재만이 아니라 **'plist 존재 AND launchd 적재'** 교차검사로 판정한다 —
-/// DeferredDaemonRunning(plist만 기록·load 보류) 후 데몬이 소멸하면 plist는 남아도
-/// 적재는 안 된 상태이므로, 재호출 시 `loaded=false`를 보고 load를 시도해 KeepAlive 보호를 복원한다.
+/// 판정이 불확실하면 실행 중인 데몬을 건드리지 않고 plist만 기록한다.
 struct Plan {
     write: bool,
     bootout: bool,
@@ -155,34 +175,36 @@ struct Plan {
 }
 
 /// `fresh` = plist 본문 전체가 현재 render_plist와 일치.
-fn plan(fresh: bool, loaded: bool, daemon_running: bool, launchd_pid: Option<u32>, holder_pid: Option<u32>) -> Plan {
-    if fresh && loaded {
+fn plan(fresh: bool, launchd: LaunchdState, daemon_running: bool, holder_pid: Option<u32>) -> Plan {
+    if !daemon_running {
+        return match launchd {
+            LaunchdState::NotLoaded => Plan { write: !fresh, bootout: false, load: true, outcome: RegisterOutcome::Registered },
+            LaunchdState::LoadedIdle => Plan { write: !fresh, bootout: true, load: true, outcome: RegisterOutcome::Registered },
+            LaunchdState::Running(_) if fresh => Plan { write: false, bootout: false, load: false, outcome: RegisterOutcome::AlreadyRegistered },
+            LaunchdState::Running(_) | LaunchdState::Unknown => Plan { write: !fresh, bootout: false, load: false, outcome: RegisterOutcome::DeferredDaemonRunning },
+        };
+    }
+    if fresh && matches!(launchd, LaunchdState::Running(_) | LaunchdState::LoadedIdle) {
         // plist가 올바른 경로로 존재 AND launchd 적재 중 — 무동작.
         Plan { write: false, bootout: false, load: false, outcome: RegisterOutcome::AlreadyRegistered }
-    } else if (loaded && holder_pid.is_some() && launchd_pid == holder_pid)
-        || (daemon_running && (!loaded || holder_pid.is_none())) {
-        // shortcut: 주인 PID를 못 읽으면 가동 중인 항목을 보존하고 plist 변경은 다음 로그인에 적용한다.
-        Plan { write: !fresh, bootout: false, load: false, outcome: RegisterOutcome::DeferredDaemonRunning }
+    } else if daemon_running && holder_pid.is_some_and(|holder| match launchd {
+        LaunchdState::LoadedIdle => true,
+        LaunchdState::Running(pid) => pid != holder,
+        LaunchdState::NotLoaded | LaunchdState::Unknown => false,
+    }) {
+        Plan { write: !fresh, bootout: true, load: true, outcome: RegisterOutcome::Registered }
     } else {
-        // 미가동 + (미적재 또는 stale) → 재기록 + load(신규 등록·보호 복원·stale 경로 교정).
-        Plan { write: !fresh, bootout: loaded, load: true, outcome: RegisterOutcome::Registered }
+        Plan { write: !fresh, bootout: false, load: false, outcome: RegisterOutcome::DeferredDaemonRunning }
     }
 }
 
 /// 앱 첫 실행/매 기동 시 자동등록(멱등). 부작용 없는 `plan()`이 결정한 대로 plist 기록·load.
-/// 멱등성은 'plist 본문 일치(fresh) AND launchd 적재' 교차검사로 판정한다.
-/// - 미등록 + 데몬 미가동(첫 실행): plist write + `launchctl load` → launchd가 즉시 cysd 소유
-/// - plist 존재하나 미적재 + 데몬 미가동(deferred 후 데몬 소멸 등): load로 KeepAlive 보호 복원
-/// - plist가 옛 경로(stale drift) + 데몬 미가동: 재기록 + reload로 경로 교정
-/// - 데몬 가동 중: plist만 보장(load 보류) → 현 세션 flock 단일소유 비파괴
-/// - fresh AND 적재 중: 무동작
-pub fn register_if_absent(daemon: &Path, daemon_running: bool) -> std::io::Result<RegisterOutcome> {
+/// plist 본문과 적재 상태가 확인되면 무동작. 교체는 살아 있는 데몬 PID와
+/// launchd 비소유가 모두 확인될 때만 수행한다.
+pub fn register_if_absent(daemon: &Path, daemon_running: bool, holder_pid: Option<u32>) -> std::io::Result<RegisterOutcome> {
     // KeepAlive 정책 변경도 본문 불일치로 판정한다.
     let fresh = plist_matches(daemon);
-    let (loaded, launchd_pid) = loaded_pid();
-    let holder_pid = std::fs::read_to_string(crate::socket_path().with_extension("lock"))
-        .ok().and_then(|s| s.trim().parse::<u32>().ok());
-    let p = plan(fresh, loaded, daemon_running, launchd_pid, holder_pid);
+    let p = plan(fresh, launchd_state(), daemon_running, holder_pid);
     if p.write {
         write_plist(daemon)?;
     }
@@ -257,20 +279,38 @@ mod tests {
     #[test]
     fn single_owner_launchd_plan_truth_table() {
         use RegisterOutcome::*;
-        let check = |fresh, loaded, running, launchd_pid, holder_pid| {
-            let p = plan(fresh, loaded, running, launchd_pid, holder_pid);
+        use LaunchdState::*;
+        let check = |fresh, launchd, running, holder_pid| {
+            let p = plan(fresh, launchd, running, holder_pid);
             (p.write, p.bootout, p.load, p.outcome)
         };
-        assert_eq!(check(true, true, true, Some(1), Some(2)), (false, false, false, AlreadyRegistered));
-        assert_eq!(check(false, false, false, None, None), (true, false, true, Registered));
-        assert_eq!(check(true, false, false, None, None), (false, false, true, Registered));
-        assert_eq!(check(false, false, true, None, Some(2)), (true, false, false, DeferredDaemonRunning));
-        assert_eq!(check(false, true, true, Some(2), Some(2)), (true, false, false, DeferredDaemonRunning));
-        assert_eq!(check(false, true, false, Some(2), Some(2)), (true, false, false, DeferredDaemonRunning));
-        assert_eq!(check(false, true, true, Some(2), None), (true, false, false, DeferredDaemonRunning));
-        assert_eq!(check(false, true, true, None, Some(2)), (true, true, true, Registered));
-        assert_eq!(check(false, true, true, Some(1), Some(2)), (true, true, true, Registered));
-        assert_eq!(check(false, true, false, Some(1), None), (true, true, true, Registered));
+        assert_eq!(check(true, Running(1), true, Some(2)), (false, false, false, AlreadyRegistered));
+        assert_eq!(check(false, NotLoaded, false, None), (true, false, true, Registered));
+        assert_eq!(check(true, NotLoaded, false, None), (false, false, true, Registered));
+        assert_eq!(check(false, LoadedIdle, false, None), (true, true, true, Registered));
+        assert_eq!(check(true, Running(1), false, None), (false, false, false, AlreadyRegistered));
+        assert_eq!(check(false, Running(1), false, None), (true, false, false, DeferredDaemonRunning));
+        assert_eq!(check(false, Unknown, false, None), (true, false, false, DeferredDaemonRunning));
+        assert_eq!(check(false, Unknown, true, Some(2)), (true, false, false, DeferredDaemonRunning)); // launchctl 파싱 실패
+        assert_eq!(check(false, NotLoaded, true, Some(2)), (true, false, false, DeferredDaemonRunning));
+        assert_eq!(check(false, LoadedIdle, true, None), (true, false, false, DeferredDaemonRunning)); // 잠금 파일 PID만 있음
+        assert_eq!(check(false, Running(2), true, None), (true, false, false, DeferredDaemonRunning)); // identify holder 모름
+        assert_eq!(check(false, Running(777), true, None), (true, false, false, DeferredDaemonRunning)); // 오래된 잠금 PID 무시
+        assert_eq!(check(false, Running(2), true, Some(2)), (true, false, false, DeferredDaemonRunning));
+        assert_eq!(check(false, LoadedIdle, true, Some(2)), (true, true, true, Registered));
+        assert_eq!(check(false, Running(1), true, Some(2)), (true, true, true, Registered));
+    }
+
+    #[test]
+    fn single_owner_launchctl_list_requires_proven_state() {
+        use LaunchdState::*;
+        assert_eq!(parse_launchctl_list(Some(0), "\"PID\" = 12;\n\"LastExitStatus\" = 0;", ""), Running(12));
+        assert_eq!(parse_launchctl_list(Some(0), "\"LastExitStatus\" = 0;", ""), LoadedIdle);
+        assert_eq!(parse_launchctl_list(Some(113), "", ""), NotLoaded);
+        assert_eq!(parse_launchctl_list(Some(1), "", "Could not find service"), NotLoaded);
+        assert_eq!(parse_launchctl_list(Some(1), "\"PID\" = 12;", "other error"), Unknown);
+        assert_eq!(parse_launchctl_list(Some(0), "\"PID\" = nope;\n\"LastExitStatus\" = 0;", ""), Unknown);
+        assert_eq!(parse_launchctl_list(Some(0), "unrecognized output", ""), Unknown);
     }
 
     #[test]

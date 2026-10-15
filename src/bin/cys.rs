@@ -5133,7 +5133,7 @@ fn statusline_to_report_params(v: &Value) -> Value {
     params
 }
 
-/// statusline JSON → 사람이 읽는 한 줄 (`<model> · CTX n% · 5h n% · 7d n%`). rate는 있을 때만.
+/// statusline JSON → 사람이 읽는 한 줄 (`<model> · CTX n% · 5h 남음 n% · 7d 남음 n%`). rate는 있을 때만.
 /// claude UI statusline에 그대로 표시된다(pane 헤더 배지와 별개·추가 표면).
 fn statusline_human_line(v: &Value) -> String {
     let model = v
@@ -5156,7 +5156,7 @@ fn statusline_human_line(v: &Value) -> String {
                 .and_then(|w| w.get("used_percentage"))
                 .and_then(|x| x.as_f64())
             {
-                parts.push(format!("{label} {u:.0}%"));
+                parts.push(format!("{label} 남음 {:.0}%", (100.0 - u).clamp(0.0, 100.0)));
             }
         }
     }
@@ -8916,7 +8916,7 @@ mod tests {
                 "seven_day": {"used_percentage": 12.0}
             }
         });
-        assert_eq!(statusline_human_line(&v), "Opus 4.8 · CTX 42% · 5h 41% · 7d 12%");
+        assert_eq!(statusline_human_line(&v), "Opus 4.8 · CTX 42% · 5h 남음 59% · 7d 남음 88%");
         let v2 = json!({"context_window": {"used_percentage": 8.0}});
         assert_eq!(statusline_human_line(&v2), "claude · CTX 8%");
     }

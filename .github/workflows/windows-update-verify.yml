@@ -1,0 +1,41 @@
+name: windows-update-verify
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify signed update and install silently
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = 'https://github.com/greatson79/wave-terminal-test/releases/download/v0.2.2/latest.json'
+          Invoke-WebRequest $url -OutFile latest.json
+          $manifest = Get-Content latest.json -Raw | ConvertFrom-Json
+          if ($manifest.version -ne '0.2.2') { throw 'manifest version mismatch' }
+          $entry = $manifest.platforms.'windows-x86_64'
+          $expected = 'https://github.com/greatson79/wave-terminal-test/releases/download/v0.2.2/wave-terminal-0.2.2-windows-x64-setup.nsis.zip'
+          if ($entry.url -ne $expected -or -not $entry.signature) { throw 'Windows entry mismatch' }
+          Invoke-WebRequest $entry.url -OutFile update.zip
+          $conf = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          [IO.File]::WriteAllBytes('pubkey', [Convert]::FromBase64String($conf.plugins.updater.pubkey))
+          [IO.File]::WriteAllBytes('update.minisig', [Convert]::FromBase64String($entry.signature))
+          choco install minisign --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'minisign install failed' }
+          minisign -V -p pubkey -m update.zip -x update.minisig
+          if ($LASTEXITCODE -ne 0) { throw 'updater signature invalid' }
+          Expand-Archive update.zip -DestinationPath unpack
+          $setup = @(Get-ChildItem unpack -Filter '*-setup.exe' -File)
+          if ($setup.Count -ne 1) { throw 'expected one setup.exe' }
+          $p = Start-Process $setup[0].FullName -ArgumentList '/S' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "installer failed: $($p.ExitCode)" }
+          $installed = Join-Path $env:LOCALAPPDATA 'Wave Terminal\cys-app.exe'
+          if (-not (Test-Path $installed)) { throw 'installed app missing' }
+          $version = (Get-Item $installed).VersionInfo.ProductVersion
+          if ($version -ne '0.2.2') { throw "installed version mismatch: $version" }
+          Write-Host "PASS: signature valid; silent install; installed app $version"

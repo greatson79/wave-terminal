@@ -1575,6 +1575,13 @@ async fn ensure_daemon() -> Result<(), String> {
     if connect().await.is_ok() {
         return Ok(());
     }
+    #[cfg(target_os = "macos")]
+    if cys::launchd::is_loaded() {
+        if cys::launchd::kickstart() && wait_for_connect(150).await {
+            return Ok(());
+        }
+        return Err("launchd-owned cysd did not come up".into());
+    }
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()));
@@ -2431,6 +2438,13 @@ async fn stop_running_daemon() {
         .ok()
         .and_then(|r| r["daemon_pid"].as_u64());
     if let Some(pid) = pid {
+        #[cfg(target_os = "macos")]
+        if cys::launchd::owns_daemon(pid as u32) {
+            if !cys::launchd::kickstart_restart() {
+                eprintln!("[cys-app] launchd kickstart -k failed");
+            }
+            return;
+        }
         #[cfg(unix)]
         unsafe {
             libc::kill(pid as i32, libc::SIGTERM);

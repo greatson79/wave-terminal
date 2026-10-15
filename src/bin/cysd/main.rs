@@ -37,6 +37,28 @@ type Stream = Box<dyn AsyncReadWrite>;
 trait AsyncReadWrite: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncReadWrite for T {}
 
+fn single_owner_healthy_holder_exit_code() -> i32 { 0 }
+
+#[cfg(any(test, windows))]
+fn single_owner_pipe_exit_code(collision: bool, owner_reachable: bool) -> i32 {
+    if collision && owner_reachable { 0 } else { 1 }
+}
+
+#[cfg(test)]
+mod single_owner_tests {
+    #[test]
+    fn single_owner_healthy_holder_is_success() {
+        assert_eq!(super::single_owner_healthy_holder_exit_code(), 0);
+    }
+
+    #[test]
+    fn single_owner_windows_pipe_collision_only_when_owner_reachable() {
+        assert_eq!(super::single_owner_pipe_exit_code(true, true), 0);
+        assert_eq!(super::single_owner_pipe_exit_code(true, false), 1);
+        assert_eq!(super::single_owner_pipe_exit_code(false, true), 1);
+    }
+}
+
 /// Claude Code 세션 안에서 spawn된 데몬이 그 세션의 정체성 env를 PTY 자식들에게
 /// 물려주면, pane의 claude가 **child-session 모드**(부모 세션 종속)로 동작해 트랜스크립트
 /// .jsonl을 영속하지 않는다 — 복원(restore)·recall·사용량 관측(T5)이 전부 깨진다
@@ -80,7 +102,8 @@ async fn main() {
             Err(error) => {
                 startup_mark(&startup, "pipe_create_failed", &socket_path);
                 eprintln!("create pipe {name} failed: {error}");
-                std::process::exit(1);
+                let owner_reachable = tokio::net::windows::named_pipe::ClientOptions::new().open(&*name).is_ok();
+                std::process::exit(single_owner_pipe_exit_code(error.kind() == std::io::ErrorKind::PermissionDenied, owner_reachable));
             }
         }
     };
@@ -388,7 +411,7 @@ fn acquire_startup_lock(
         }
         deadman::HolderVerdict::Healthy => {
             log_lock_loss(state_dir, lock_path, "healthy-holder");
-            std::process::exit(1);
+            std::process::exit(single_owner_healthy_holder_exit_code());
         }
         deadman::HolderVerdict::FailClosed => {
             // 구 락파일(pid 미상) — 오살상 방지 위해 개입하지 않고 exit.

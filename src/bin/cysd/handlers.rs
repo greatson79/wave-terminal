@@ -3245,16 +3245,11 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                     &format!("surface {sid} not found"),
                 ));
             };
-            // 신원·소유 게이트: queue.clear는 대상 surface의 pending_queue를 통째로 drain해, 제3자가
-            // --queued로 보낸(queued:true 응답까지 받은) 인플라이트 메시지를 조용히 폐기한다. 가드가
-            // 없으면 워커 pane이 임의 surface_id로 타 노드에 향하던 큐를 인멸해 send ACL이 막은 대상을
-            // 큐 인멸로 방해할 수 있다(status.set·close와 동일한 '임의 surface 무인증 파괴' 부류). 발신
-            // pane은 커널 peer pid로만 확정한다(client 자기신고 surface_id 불신). 자기 surface(cs == sid)
-            // 만 비울 수 있다. 익명 발신(caller_pid None = 데몬 내부 경로)은 통과 — pane은 peer pid가
-            // 항상 자기 surface로 해석되므로 익명을 위조할 수 없다.
+            // 다른 창의 큐 삭제는 권위 역할과 송신 ACL을 모두 만족할 때만 허용한다.
             let caller_sid = caller_pid.and_then(|p| resolve_caller_surface(daemon, p));
             if let Some(cs) = caller_sid {
-                if cs != sid {
+                if cs != sid && !(authoritative_caller_ok(daemon, caller_sid, caller_pid)
+                    && check_send_acl(daemon, caller_pid, &surface).is_ok()) {
                     daemon.bus.publish(
                         "queue.clear_denied",
                         "queue",
@@ -5742,6 +5737,30 @@ mod tests {
             panic!("expected single reply");
         };
         resp
+    }
+
+    #[test]
+    fn recover_scope_queue_clear_authoritative_foreign_allowed() {
+        let daemon = isolated_daemon();
+        let master = make_surface(&daemon, Some("master"));
+        let victim = make_surface(&daemon, Some("worker-1"));
+        bind_caller(&daemon, 994_301, master);
+        daemon.get_surface(victim).unwrap().pending_queue.lock().unwrap().push_back("queued".into());
+        let resp = queue_clear_rpc(&daemon, victim, Some(994_301));
+        assert_eq!(resp["ok"], json!(true), "{resp}");
+        assert_eq!(resp["result"]["cleared"], json!(1));
+    }
+
+    #[test]
+    fn recover_scope_queue_clear_non_authoritative_foreign_denied() {
+        let daemon = isolated_daemon();
+        let worker = make_surface(&daemon, Some("worker-1"));
+        let victim = make_surface(&daemon, Some("worker-2"));
+        bind_caller(&daemon, 994_302, worker);
+        daemon.get_surface(victim).unwrap().pending_queue.lock().unwrap().push_back("queued".into());
+        let resp = queue_clear_rpc(&daemon, victim, Some(994_302));
+        assert_eq!(resp["error"]["code"], json!("clear_denied"), "{resp}");
+        assert_eq!(daemon.get_surface(victim).unwrap().pending_queue.lock().unwrap().len(), 1);
     }
 
     /// 발견(신원·소유 검증 부재): queue.clear가 caller_pid를 전혀 쓰지 않아, 워커 pane이 자기 소유가

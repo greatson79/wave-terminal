@@ -486,7 +486,10 @@ pub fn is_dept_socket(socket_path: &std::path::Path) -> bool {
 /// Parse a surface reference: "surface:31", "31", or 31 → 31.
 pub fn parse_surface_ref(s: &str) -> Option<u64> {
     let t = s.trim();
-    let t = t.strip_prefix("surface:").unwrap_or(t);
+    let t = t.strip_prefix("surface:")
+        .or_else(|| t.strip_prefix("s:"))
+        .or_else(|| t.strip_prefix('s'))
+        .unwrap_or(t);
     t.parse::<u64>().ok()
 }
 
@@ -566,6 +569,18 @@ mod tests {
         assert_eq!(parse_surface_ref("surface:31"), Some(31));
         assert_eq!(parse_surface_ref("31"), Some(31));
         assert_eq!(parse_surface_ref("x"), None);
+    }
+
+    #[test]
+    fn recover_scope_parse_short_surface_ref() {
+        assert_eq!(parse_surface_ref("s31"), Some(31));
+        assert_eq!(parse_surface_ref("s"), None);
+    }
+
+    #[test]
+    fn recover_scope_parse_colon_short_surface_ref() {
+        assert_eq!(parse_surface_ref("s:31"), Some(31));
+        assert_eq!(parse_surface_ref("s:x"), None);
     }
 
     #[test]

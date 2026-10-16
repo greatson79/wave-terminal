@@ -92,6 +92,7 @@ jobs:
         if: env.RELEASE_VERSION == '0.2.4'
         shell: pwsh
         run: ./scripts/gates-v024/win-g23-label.ps1
-      - name: Pack provenance after daemon and label checks
+      - name: Pack provenance after daemon start
+        if: always()
         shell: pwsh
-        run: ./scripts/gates-v024/win-pack-provenance.ps1 -Stage post-checks
+        run: ./scripts/gates-v024/win-pack-provenance.ps1 -Stage post-daemon

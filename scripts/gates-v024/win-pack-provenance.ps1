@@ -1,4 +1,4 @@
-﻿param([ValidateSet('install', 'post-checks')][string]$Stage = 'post-checks')
+﻿param([ValidateSet('install', 'post-daemon')][string]$Stage = 'post-daemon')
 $ErrorActionPreference = 'Stop'
 $pack = Join-Path $env:USERPROFILE '.cys\pack'
 $manifest = Join-Path $pack '.install-manifest.json'
@@ -13,6 +13,7 @@ if ($hasManifest) {
 }
 if ($hasPristine) { $files = @(Get-ChildItem -LiteralPath $pristine -Recurse -File -Force).Count }
 Write-Host "stage=$Stage manifest_exists=$hasManifest manifest_items=$items pristine_exists=$hasPristine pristine_files=$files"
+if ($Stage -eq 'install') { Write-Host 'PACK PROVENANCE PRE-INIT (measurement only)'; exit 0 }
 if (-not $hasManifest -and -not $hasPristine) { Write-Host 'PACK PROVENANCE MISSING' }
 else { Write-Host 'PACK PROVENANCE PRESENT' }
 exit 0

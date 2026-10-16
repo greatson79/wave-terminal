@@ -55,11 +55,8 @@ enum Command {
     /// List surfaces
     List,
     /// 창에 표시할 이름을 바꿉니다. 이름을 비우려면 --clear를 쓰세요.
-    #[command(disable_help_flag = true, help_template = "사용법: cys rename [--surface 창번호] [--clear] [이름]\n\n창에 표시할 이름을 바꿉니다. 이름을 비우려면 --clear를 쓰세요.\n\n이름: 새 창 이름\n--surface 창번호: 바꿀 창 번호. 생략하면 현재 창입니다\n--clear: 창 이름을 지웁니다\n--socket 경로: 연결할 데몬 소켓 경로\n--help: 도움말을 봅니다\n")]
+    #[command(help_template = "사용법: cys rename [--surface 창번호] [--clear] [이름]\n\n창에 표시할 이름을 바꿉니다. 이름을 비우려면 --clear를 쓰세요.\n\n이름: 새 창 이름\n--surface 창번호: 바꿀 창 번호. 생략하면 현재 창입니다\n--clear: 창 이름을 지웁니다\n--socket 경로: 연결할 데몬 소켓 경로\n--help: 도움말을 봅니다\n")]
     Rename {
-        /// 도움말을 봅니다.
-        #[arg(short = 'h', long = "help", action = clap::ArgAction::Help)]
-        help: bool,
         /// 바꿀 창 번호. 생략하면 현재 창입니다.
         #[arg(long, value_name = "창번호")]
         surface: Option<String>,
@@ -888,7 +885,16 @@ fn main() {
     let cli = Cli::try_parse().unwrap_or_else(|e| {
         if e.kind() == clap::error::ErrorKind::DisplayHelp { e.exit(); }
         if is_rename_subcommand(std::env::args_os().skip(1)) {
-            eprintln!("cys rename 입력이 올바르지 않습니다. 사용법: cys rename [--surface 창번호] [--clear] [이름]");
+            use clap::error::ContextKind;
+            for (kind, value) in e.context() {
+                match kind {
+                    ContextKind::InvalidArg => eprintln!("cys rename에서 알아보지 못한 인자: {value}"),
+                    ContextKind::InvalidValue => eprintln!("cys rename에서 올바르지 않은 값: {value}"),
+                    _ => {}
+                }
+            }
+            eprintln!("{e}");
+            eprintln!("사용법: cys rename [--surface 창번호] [--clear] [이름]");
             std::process::exit(2);
         }
         e.exit();
@@ -1485,7 +1491,7 @@ fn run(command: Command) -> i32 {
             }
         }),
 
-        Command::Rename { help: _, surface, clear, name } => {
+        Command::Rename { surface, clear, name } => {
             let result = (|| -> Result<(), String> {
                 if clear && name.is_some() { return Err("이름과 --clear를 함께 쓸 수 없습니다".into()); }
                 let label = if clear { "" } else { name.as_deref().ok_or("이름을 입력하거나 --clear를 쓰세요")? };
@@ -7778,6 +7784,17 @@ mod tests {
         let help = app.find_subcommand_mut("rename").unwrap().render_long_help().to_string();
         assert!(help.contains("사용법:") && help.contains("이름을 비우려면 --clear"));
         assert!(!help.contains("Arguments:") && !help.contains("Options:") && !help.contains("Socket path"));
+        // PowerShell passes --surface, surface:N, and the Unicode name as three argv values.
+        let cli = Cli::try_parse_from(["cys", "rename", "--surface", "surface:123", "한글이름테스트"]).unwrap();
+        assert!(matches!(cli.command, Command::Rename { surface: Some(ref id), name: Some(ref name), .. }
+            if id == "surface:123" && name == "한글이름테스트"));
+        let cli = Cli::try_parse_from(["cys", "rename", "--surface", "surface:123", &"가".repeat(21)]).unwrap();
+        assert!(matches!(cli.command, Command::Rename { name: Some(ref name), .. } if name.chars().count() == 21));
+        assert_eq!(Cli::try_parse_from(["cys", "rename", "--help"]).err().unwrap().kind(),
+            clap::error::ErrorKind::DisplayHelp);
+        let bad = Cli::try_parse_from(["cys", "rename", "--bad"]).err().unwrap();
+        assert!(bad.context().any(|(kind, value)| kind == clap::error::ContextKind::InvalidArg
+            && value.to_string() == "--bad"));
         #[cfg(unix)]
         {
             use std::os::unix::net::UnixListener;
@@ -7799,7 +7816,7 @@ mod tests {
             });
             let old = std::env::var("CYS_SOCKET").ok();
             std::env::set_var("CYS_SOCKET", &path);
-            let code = run(Command::Rename { help: false, surface: Some("surface:123".into()),
+            let code = run(Command::Rename { surface: Some("surface:123".into()),
                 clear: false, name: Some("이름".into()) });
             assert!(restore_surface_label(456, &json!({"label":"복원 이름"})).is_ok());
             if let Some(value) = old { std::env::set_var("CYS_SOCKET", value); }

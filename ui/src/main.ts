@@ -4147,6 +4147,17 @@ function onDaemonEvent(event: Record<string, unknown>) {
 // ---------- startup / session restore ----------
 
 async function start() {
+  const seenPreserved = new Set<string>();
+  const showPreserved = (message: string) => {
+    if (seenPreserved.has(message)) return;
+    seenPreserved.add(message);
+    setTimeout(() => seenPreserved.delete(message), 10000);
+    toast("feed", "수정한 팩 파일 보존", message);
+  };
+  await listen("update-preserved", (e) => {
+    if (typeof e.payload === "string") showPreserved(e.payload);
+  });
+  for (const message of await invoke<string[]>("take_update_preserved_notices")) showPreserved(message);
   const info = document.getElementById("daemon-info")!;
   await new Promise<void>((resolve) => {
     listen("daemon-ready", () => resolve());

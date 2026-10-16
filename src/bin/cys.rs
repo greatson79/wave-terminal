@@ -7073,9 +7073,9 @@ fn run_pack_plan(force: bool) -> i32 {
     println!("팩 반영 플랜 (대상: {} · 바이너리 {} · 쓰기 없음)", dir.display(), env!("CARGO_PKG_VERSION"));
     section("🔄 자동 갱신", &plan.update, "비수정 — 그대로 갱신됨");
     section("✨ 신규 생성", &plan.create, "");
-    section("🛠 강제 치유", &plan.heal, "system 수정본 — 덮기 전 사용자본을 <파일>.user 로 보존");
-    section("⏸ 보존+병합 대기", &plan.merge_new, "user-owned 수정본 유지 + 신버전 <파일>.new 병치 → cys pack-merge");
-    section("🔒 보존", &plan.keep_user, "user-owned 수정본 — 건드리지 않음");
+    section("🛠 강제 치유", &plan.heal, "force 설치 — 덮기 전 사용자본을 <파일>.user 로 보존");
+    section("⏸ 보존+병합 대기", &plan.merge_new, "수정본 유지 + 신버전 <파일>.new 병치 → cys pack-merge");
+    section("🔒 보존", &plan.keep_user, "수정본 — 건드리지 않음");
     section("🗑 정리(폐기 파일)", &plan.prune_delete, "임베드에서 제거된 비수정 파일");
     section("🗑→🔒 폐기지만 보존", &plan.prune_keep_modified, "수정본이라 삭제하지 않음");
     println!("\n= 변화 없음(최신) {}건", plan.unchanged);
@@ -7090,8 +7090,7 @@ fn run_pack_plan(force: bool) -> i32 {
 /// ③ 커스터마이즈 병합: 병합 대기 원장 목록·해소. 해소 경로 4종 —
 ///   --take-new(신버전 채택) · --keep-mine(내 수정 유지·이번 신버전 소화) ·
 ///   diff3/--ai 3-way 병합(base=.pristine 조상) · --to-local(healed system 파일을 오버레이로 이동).
-/// system(healed) 파일은 rel 로 되쓰기 금지 — 다음 기동 install 이 다시 치유(P0-4)하므로
-/// 지원 경로는 to-local(스킬 shadowing)뿐임을 명시한다.
+/// 과거 force로 healed 된 system 파일의 `.user` 보존본은 to-local로 옮길 수 있다.
 fn run_pack_merge(
     file: Option<String>,
     take_new: bool,
@@ -7286,7 +7285,7 @@ fn run_pack_merge(
                 0
             } else {
                 println!(
-                    "'{rel}' 은 system 파일 — 직접 되쓰기는 다음 기동 때 다시 치유(P0-4)되므로 지원하지 않음.\n\
+                    "'{rel}' 은 과거 치유된 system 파일 — 보존본을 오버레이로 옮기거나 정리할 수 있습니다.\n\
                      \x20 cys pack-merge --file {rel} --to-local  # 사용자본을 ~/.cys/local 오버레이로(스킬 shadowing)\n\
                      \x20 cys pack-merge --file {rel} --keep-mine # vendor 본 유지 확정(보존본 정리)\n\
                      보존본 위치: {}",

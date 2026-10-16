@@ -160,11 +160,10 @@ async fn main() {
     // (매 부트 전량 치유는 seed-once 원복 사고(7-12)의 원인 기전 — 의도적 축소).
     if !cys::pack::pack_current_for(env!("CARGO_PKG_VERSION")) {
         match cys::pack::install(false) {
-            Ok((written, _)) if written > 0 => eprintln!(
-                "[cysd] CYSJavis Pack: {written} file(s) installed at {}",
+            Ok((written, kept)) => eprintln!(
+                "[cysd] CYSJavis Pack: {written} written, {kept} preserved at {}",
                 cys::pack::pack_dir().display()
             ),
-            Ok(_) => {}
             Err(e) => eprintln!("[cysd] pack auto-install skipped: {e}"),
         }
     }

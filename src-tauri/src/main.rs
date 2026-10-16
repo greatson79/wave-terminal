@@ -18,6 +18,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncReadWrite for T {}
 // 멀티마스터 F3: attach 핸들 키를 (소켓 slug, surface_id) 복합키로 — 서로 다른 데몬이 같은
 // surface_id를 독립 발급하므로 단독 키는 부서 간 PTY 스트림이 충돌한다.
 struct Attachments(Mutex<HashMap<(String, u64), tauri::async_runtime::JoinHandle<()>>>);
+#[derive(Default)]
+struct PreservedNotices(Mutex<Vec<String>>);
 
 /// 소켓 경로 → 짧은 결정론 식별자(이벤트명·attach 키용). 백엔드 단일 진실 — UI는 attach 반환값/
 /// daemon-event 페이로드로 이 값을 전달받아 그대로 쓴다(독립 재계산 금지, 검증 mustFix).
@@ -906,12 +908,25 @@ fn decide_pending_update(
     }
 }
 
+fn emit_pack_preserved_notices(app: &AppHandle, stdout: &str) {
+    for line in stdout.lines().filter(|line| {
+        line.contains("이 파일은 고치셔서 그대로 두었습니다 · 새 판 ")
+            || line.contains("합치려면 cys pack-merge")
+    }) {
+        app.state::<PreservedNotices>().0.lock().unwrap_or_else(|e| e.into_inner()).push(line.to_string());
+        let _ = app.emit("update-preserved", line);
+    }
+}
+
+#[tauri::command]
+fn take_update_preserved_notices(state: State<PreservedNotices>) -> Vec<String> {
+    std::mem::take(&mut *state.0.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
 /// 업데이트(인앱 재시작 OR 홈페이지 수동설치로 인한 버전변경)이면 두 가지를 한다:
-///  ① 새 기능 배포 — 새 cys 바이너리에 embed된 팩(pack.rs include_str! + build.rs PACK_SKILLS)을
-///     `cys init-pack --no-install-hook`으로 ~/.cys/pack에 반영한다. --no-install-hook: hook 등록은
-///     최초 설치/launch-agent에서 끝나므로 매 업데이트마다 settings.json을 건드리지 않는다(.bak-cys
-///     백업 파괴·활성 프로필 재직렬화 방지 — 적대검증 serious). force 없이 호출하므로 preserve-gate가
-///     사용자 수정 파일을 보존하고 비수정·신규만 갱신한다.
+///  ① 팩 오류 수리 반영 — `cys init-pack --no-install-hook`으로 ~/.cys/pack에 반영한다.
+///     hook 등록은 최초 설치/launch-agent에서 끝나므로 매 업데이트마다 settings.json을 건드리지
+///     않는다. force 없이 호출하여 수정 파일을 보존하고 비수정·신규만 갱신한다.
 ///  ② 자동복귀 — 팩 반영 성공 시에만 조직 전체(본부+등록 부서) 노드를 복원(T2 spawn_org_restore).
 ///     init-pack 실패 시 마커·스탬프를 보존하고 복원을 보류해, 노드가 구 디렉티브로 조용히 각성하는
 ///     침묵 실패를 막는다(적대검증 fatal). restore는 멱등(run_restore).
@@ -938,11 +953,8 @@ fn maybe_apply_pending_update(app: &AppHandle) {
     let mut init_cmd = std::process::Command::new(resolve_sidecar(if cfg!(windows) { "cys.exe" } else { "cys" }));
     init_cmd.arg("init-pack").arg("--no-install-hook");
     no_console(&mut init_cmd);
-    let pack_ok = init_cmd
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !pack_ok {
+    let pack_output = init_cmd.output();
+    if !pack_output.as_ref().is_ok_and(|out| out.status.success()) {
         // 실패 — 마커·스탬프를 보존(다음 재시작에 재시도)하고 노드 복원을 보류한다. 구 디렉티브로
         // 조용히 각성하는 것을 막고 사용자에게 알린다.
         let _ = app.emit(
@@ -950,6 +962,9 @@ fn maybe_apply_pending_update(app: &AppHandle) {
             "새 팩 반영(init-pack) 실패 — 노드 복원 보류, 다음 재시작에 재시도",
         );
         return;
+    }
+    if let Ok(out) = pack_output {
+        emit_pack_preserved_notices(app, &String::from_utf8_lossy(&out.stdout));
     }
     let mut statusline_cmd = std::process::Command::new("bash");
     inject_runtime_path(&mut statusline_cmd);
@@ -2367,6 +2382,7 @@ async fn install_pack_update(
         );
         return Err(format!("pack-update 실패: {stderr}"));
     }
+    emit_pack_preserved_notices(&app, &stdout);
     // ★디스크 반영 성공(success 또는 degraded) — .pack-version을 읽어 새 팩 버전으로 브로드캐스트(§2-②/§7-③).
     //   read_board_catalog가 pack_dir의 정적 파일을 읽는 것과 동일 SOT(pack_dir).
     let pack_version = std::fs::read_to_string(cys::pack::pack_dir().join(".pack-version"))
@@ -2499,6 +2515,7 @@ fn main() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_notification::init())
         .manage(Attachments(Mutex::new(HashMap::new())))
+        .manage(PreservedNotices::default())
         .invoke_handler(tauri::generate_handler![
             dept_tombstone_by_socket,
             dept_tombstones,
@@ -2553,6 +2570,7 @@ fn main() {
             autotest_patch_install,
             rotate_daemon,
             install_pack_update,
+            take_update_preserved_notices,
             launch_dept_daemon,
             allocate_dept_daemon,
             stop_dept_daemon,

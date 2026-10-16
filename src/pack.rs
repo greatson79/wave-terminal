@@ -358,13 +358,10 @@ pub fn content_hash_pub(content: &str) -> String {
     content_hash(content)
 }
 
-/// ★B2(§2 축B 소유권 매니페스트): 팩 파일의 system|user 소유권 축. **기본값=system**(임베드 진실 —
-/// 해시 불일치 시 강제 갱신), **user 는 화이트리스트만**(사용자 수정 보존). 화이트리스트를 좁게 유지해
-/// '조용한 탈락'(system 인데 user 로 오분류돼 스큐가 동결)을 방지한다.
-///   user(preserve)  = 디렉티브(*_DIRECTIVE.md)·헌법(soul.md)·CLAUDE.md·agents.json·acl.json·skills/.
-///   system(update)  = bin/*·hooks/*·schemas·templates 등 그 외 전부(cysd 소유·스큐 금지).
-/// P0-4 수리: 과거 `_ =>` catch-all 이 매니페스트 부재·읽기 실패까지 'user 수정'으로 오판해 phoenix(system)를
-/// 영구 동결시켜 배포 스큐를 냈다 — 이 분류가 그 근원을 대체한다(CLAUDE.md.template 은 .template 이라 system).
+/// ★B2(§2 축B 소유권 매니페스트): 팩 파일의 system|user 소유권 축. 비강제 설치는
+/// 소유권과 관계없이 수정본을 보존하며, 이 분류는 force·prune 정책에 사용한다.
+///   user(force 보존) = 디렉티브(*_DIRECTIVE.md)·헌법(soul.md)·CLAUDE.md·agents.json·acl.json·skills/.
+///   system(force 갱신) = bin/*·hooks/*·schemas·templates 등 그 외 전부.
 pub(crate) fn is_user_owned(rel: &str) -> bool {
     ownership(rel) == Ownership::User
 }
@@ -385,7 +382,7 @@ pub(crate) fn is_seed_once(rel: &str) -> bool {
 /// 호출 순서에 숨는다 — 단일 match 가 배타 등급 하나만 반환하게 구조로 보장한다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Ownership {
-    /// 임베드 진실(기본값) — 불일치 시 강제 치유(P0-4)·비수정 자동 갱신·prune 대상.
+    /// 기본값 — force 시 갱신·비수정 자동 갱신·prune 대상.
     System,
     /// 사용자 주권(디렉티브·soul·CLAUDE·schedule·agents·acl·skills) — 영구 보존, 임베드 신버전은 `.new` 병치.
     User,
@@ -424,12 +421,8 @@ pub(crate) fn ownership(rel: &str) -> Ownership {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ★사용자 커스터마이즈 절충 계층 (2026-07-07 오너 승인 6층 로드맵의 ②③④ 코어)
-//   문제: system 파일은 매 install 강제 치유(P0-4)로 사용자 수정이 소실, user-owned 는
-//   보존되지만 영구 동결(병합 경로 없음) — 업데이트가 커스텀을 무효화한다는 사용자 항의의 실체.
-//   절충(dpkg conffile/rpmnew·rpmsave 패턴):
-//     - user-owned 수정본 + 임베드 신버전 변경 → 보존 유지 + `<rel>.new` 병치(병합 대기)
-//     - system 수정본 치유 → 덮어쓰기 **전에** `<rel>.user` 로 사용자본 보존(파괴 0)
+// ★사용자 커스터마이즈 보존 계층: 비강제 설치는 수정본을 유지하고 새 판을 `.new`에 둔다.
+//   force로 system 수정본을 덮을 때만 `.user`에 백업한다.
 //     - `.pristine/<rel>` = 마지막으로 디스크에 적용된 vendor 원본(3-way 병합의 공통 조상)
 //     - `.merge-pending.json` = 병합 대기 원장 — `cys pack-merge` 가 소비
 //   판정은 decide_file_action(순수)로 추출해 install_into(쓰기)와 plan_install(드라이런)이
@@ -460,12 +453,11 @@ pub(crate) enum FileAction {
     /// 임베드 내용을 디스크에 기록. heal_user_copy=true 면 사용자 수정본을 `<rel>.user` 로 먼저 보존.
     Write { heal_user_copy: bool },
     /// 디스크 유지. adopt_hash=true 면 매니페스트에 현재 임베드 해시 채택(구설치본 승계).
-    /// new_pending=true 면 임베드 신버전을 `<rel>.new` 로 병치(병합 대기 — user-owned 동결 해소 경로).
+    /// new_pending=true 면 임베드 신버전을 `<rel>.new` 로 병치(병합 대기).
     Keep { adopt_hash: bool, new_pending: bool },
 }
 
-/// 현행 install_into 분기(★B2 user-owned 영구 보존 · P0-4 system 강제 치유 · 비수정 자동 갱신)를
-/// 글자 그대로 보존한 순수 판정 + 신규 부수효과 플래그(heal_user_copy·new_pending)만 추가한다.
+/// 비강제 설치는 수정본을 소유권과 무관하게 보존하고, 비수정본만 갱신한다.
 pub(crate) fn decide_file_action(
     rel: &str,
     embed: &str,
@@ -489,8 +481,8 @@ pub(crate) fn decide_file_action(
             return FileAction::Write { heal_user_copy: false };
         }
     }
-    // ★B2 user-owned 영구 보존 (force 여도) — 읽기 성공 + 내용 상이일 때.
-    if exists && is_user_owned(rel) {
+    // 비강제 설치는 모든 수정본을 보존한다. user-owned 는 force 여도 보존한다.
+    if exists && (!force || is_user_owned(rel)) {
         if let Some(d) = disk {
             if d != embed && !unmodified(d) {
                 // 임베드가 마지막 적용본(매니페스트 해시)에서 전진했으면 신버전 병치(병합 대기).
@@ -498,7 +490,7 @@ pub(crate) fn decide_file_action(
                 // 구 Windows 빌드(autocrlf)는 임베드를 CRLF 로 굽고 그 해시를 매니페스트에 남겼다 —
                 // 같은 배포본의 CRLF 변형 해시도 "같은 버전"으로 본다(개행 동치 수리와 일관).
                 let crlf = embed.replace("\r\n", "\n").replace('\n', "\r\n");
-                let new_pending = manifest_hash
+                let new_pending = !force || manifest_hash
                     .is_none_or(|m| m != content_hash(embed) && m != content_hash(&crlf));
                 return FileAction::Keep { adopt_hash: false, new_pending };
             }
@@ -513,17 +505,7 @@ pub(crate) fn decide_file_action(
                 // 설치-당시 해시 그대로(사용자 비수정) + 임베드가 더 새 버전 → 갱신.
                 return FileAction::Write { heal_user_copy: false };
             }
-            _ => {
-                // 사용자 수정본·매니페스트 부재·읽기 실패.
-                if is_user_owned(rel) {
-                    // (여기 도달 = 읽기 실패 케이스 — 내용 상이는 위 첫 블록이 잡는다) 보존.
-                    return FileAction::Keep { adopt_hash: false, new_pending: false };
-                }
-                // system: 강제 치유(P0-4 — 임베드 진실). 진짜 사용자 수정본이면 먼저 .user 보존.
-                let heal = matches!(disk, Some(d) if d != embed
-                    && !unmodified(d));
-                return FileAction::Write { heal_user_copy: heal };
-            }
+            _ => return FileAction::Keep { adopt_hash: false, new_pending: disk.is_none() },
         }
     }
     // 신규 생성 또는 force 갱신 — force 로 수정본을 덮을 때도 사용자본은 보존한다(파괴 0).
@@ -554,8 +536,8 @@ pub fn save_merge_pending(dir: &Path, pending: &serde_json::Map<String, serde_js
 pub struct InstallPlan {
     pub create: Vec<String>,              // 신규 생성
     pub update: Vec<String>,              // 자동 갱신(비수정 system)
-    pub heal: Vec<String>,                // 수정본 강제 치유(사용자본 `<rel>.user` 보존 후 덮어씀)
-    pub merge_new: Vec<String>,           // user-owned 보존 + 신버전 `<rel>.new` 병치(병합 대기)
+    pub heal: Vec<String>,                // force 시 수정본 치유(사용자본 `<rel>.user` 보존 후 덮어씀)
+    pub merge_new: Vec<String>,           // 수정본 보존 + 신버전 `<rel>.new` 병치(병합 대기)
     pub keep_user: Vec<String>,           // user-owned 보존(신버전 병치 불요)
     pub unchanged: usize,                 // 최신(변화 없음)
     pub prune_delete: Vec<String>,        // 폐기 파일 제거(비수정)
@@ -612,7 +594,7 @@ pub fn plan_install(
             }
             FileAction::Keep { new_pending: true, .. } => plan.merge_new.push(rel.to_string()),
             FileAction::Keep { .. } => {
-                if (is_user_owned(rel) || is_seed_once(rel)) && disk.as_deref() != Some(content) {
+                if disk.as_deref() != Some(content) {
                     plan.keep_user.push(rel.to_string());
                 } else {
                     plan.unchanged += 1;
@@ -768,10 +750,9 @@ pub fn install(force: bool) -> Result<(usize, usize), String> {
 /// prune·매니페스트·다운그레이드 차단·.pack-version 기록·격리 config·exec bit를 수행한다.
 /// embed PACK_ALL iter(기존 경로)와 staged-tree iter(무중단 채널)가 같은 로직을 공유한다(중복 0·회귀 0).
 /// 다운그레이드 가드 비교 기준은 `target_version`(env! 직접 참조 제거 — staged 입력은 자기 버전을 넘김).
-/// force=false: user-owned(디렉티브·soul·CLAUDE·schedule)·seed-once(상태·기억) 불가침, **수정된
-/// system 파일은 임베드로 치유**(사용자본 `<rel>.user` 보존), 비수정 파일은 입력 신버전으로 자동 갱신.
-/// ("사용자 수정 파일 불가침" 구 문구는 user-owned 등급에만 참인데 전체로 읽혀 배포 현장의 오판을
-/// 낳았다 — 2026-07-12 치유 원복 사고 시정.) 반환: (written, kept).
+/// force=false: 수정된 파일은 소유권에 관계없이 보존 + `.new`, 비수정 파일은 자동 갱신.
+/// seed-once 상태는 force 여도 불가침. force 시 system 수정본은 `.user` 백업 후 갱신.
+/// 반환: (written, kept).
 /// `transactional`: false면 embed/cysd/init-pack 경로 — 종전대로 마지막에 `.pack-version`을
 /// best-effort 기록하고 `.install-manifest.json` 영속도 best-effort(외부 동작 불변). true면
 /// 무중단 pack-update 트랜잭션(apply_pack_transactional) 경로 — ⓐ`.pack-version`을 여기서
@@ -826,10 +807,10 @@ pub fn install_into<'a, I: IntoIterator<Item = (&'a str, &'a str)>>(
     let mut written = 0;
     let mut kept = 0;
     // ★커스터마이즈 절충 원장(②): .new/.user 병치·pristine 미러·병합 대기 기록.
-    // 판정 자체는 decide_file_action(순수 — ★B2 user-owned 영구 보존 · P0-4 system 강제 치유 ·
-    // 비수정 자동 갱신을 글자 그대로 보존)에 위임하고, 여기는 부수효과만 수행한다.
+    // 판정 자체는 decide_file_action(순수 — 비강제 수정본 보존·비수정 자동 갱신)에 위임한다.
     let mut pending = load_merge_pending(&dir);
     let mut pending_dirty = false;
+    let mut preserved_notices = Vec::new();
     let now_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -869,12 +850,14 @@ pub fn install_into<'a, I: IntoIterator<Item = (&'a str, &'a str)>>(
                     ensure_pristine(&dir, rel, content);
                 }
                 if new_pending {
-                    // user-owned 보존 + 임베드 신버전 병치(idempotent) — '영구 동결'을 '보이는 병합 대기'로.
+                    // 수정본 보존 + 임베드 신버전 병치(idempotent).
                     let new_path = dir.join(format!("{rel}.new"));
                     if std::fs::read_to_string(&new_path).ok().as_deref() != Some(content) {
-                        let _ = write_atomic(&new_path, content.as_bytes());
+                        write_atomic(&new_path, content.as_bytes())
+                            .map_err(|e| format!("cannot write {}: {e}", new_path.display()))?;
                     }
                     upsert_pending(&mut pending, &mut pending_dirty, rel, "new-pending", format!("{rel}.new"));
+                    preserved_notices.push(rel);
                 } else if pending
                     .get(rel)
                     .and_then(|e| e.get("kind"))
@@ -1042,6 +1025,12 @@ pub fn install_into<'a, I: IntoIterator<Item = (&'a str, &'a str)>>(
                 let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755));
             }
         }
+    }
+    if !preserved_notices.is_empty() {
+        for rel in preserved_notices {
+            println!("[init-pack] 이 파일은 고치셔서 그대로 두었습니다 · 새 판 {rel}.new");
+        }
+        println!("[init-pack] 합치려면 cys pack-merge");
     }
     Ok((written, kept))
 }
@@ -1619,11 +1608,10 @@ mod tests {
     /// ★불변식 박제 + B2 소유권 매니페스트: force=false 업그레이드 의미론.
     /// ① system 비수정 파일(설치-당시 해시 일치) → 임베드 신버전으로 자동 갱신
     /// ② user 파일(soul.md) 수정 → 불가침 보존
-    /// ③ ★B2/P0-4: system 파일 매니페스트 부재 + 내용 상이 → **강제 갱신**(과거 보존 동결이 배포 스큐 근원)
+    /// ③ system 파일 매니페스트 부재 + 내용 상이 → 보존 + `.new`
     /// ④ user 파일 매니페스트 부재 + 내용 상이 → 보존(안전측)
     /// ⑤ 디스크=임베드인 구설치본 → 매니페스트 채택 기록 + 멱등
-    /// ★커스터마이즈 절충(②) 순수 판정: decide_file_action 이 기존 B2/P0-4 분기를 보존하면서
-    /// heal_user_copy(치유 전 사용자본 보존)·new_pending(user-owned 신버전 병치)만 추가하는지 박제.
+    /// 비강제 수정본 보존과 force 시 system 백업을 판정한다.
     #[test]
     fn decide_file_action_threeway_matrix() {
         use super::FileAction::*;
@@ -1639,9 +1627,9 @@ mod tests {
         assert_eq!(decide_file_action("bin/x.py", embed, true, Some("OLD"),
                        Some(content_hash("OLD").as_str()), false),
                    Write { heal_user_copy: false });
-        // system 수정본(매니페스트 부재·상이) → 강제 치유(P0-4)하되 사용자본 .user 보존.
+        // system 수정본(매니페스트 부재·상이) → 비강제 보존 + .new.
         assert_eq!(decide_file_action("bin/x.py", embed, true, Some("HACKED"), None, false),
-                   Write { heal_user_copy: true });
+                   Keep { adopt_hash: false, new_pending: true });
         // force 로 system 수정본을 덮을 때도 사용자본 보존.
         assert_eq!(decide_file_action("bin/x.py", embed, true, Some("HACKED"), None, true),
                    Write { heal_user_copy: true });
@@ -1649,16 +1637,16 @@ mod tests {
         assert_eq!(decide_file_action("soul.md", embed, true, Some("MY-SOUL"),
                        Some(content_hash("EMBED-V1").as_str()), false),
                    Keep { adopt_hash: false, new_pending: true });
-        // user-owned 수정 + 임베드=마지막 적용본(vendor 무변경) → 보존만(dpkg 동형 — 병치 불요).
+        // 비강제 설치에서는 vendor 무변경이어도 수정본 옆에 .new 병치.
         assert_eq!(decide_file_action("soul.md", embed, true, Some("MY-SOUL"),
                        Some(eh.as_str()), false),
-                   Keep { adopt_hash: false, new_pending: false });
-        // 구 Windows CRLF 매니페스트 + 데몬 런타임 수정본 + 임베드 무변경 → .new 없음(같은 버전).
+                   Keep { adopt_hash: false, new_pending: true });
+        // 구 Windows CRLF 매니페스트 + 데몬 런타임 수정본 + 임베드 무변경 → .new 병치.
         let sched = "{\n  \"jobs\": []\n}\n";
         let crlf_hash = content_hash(&sched.replace('\n', "\r\n"));
         assert_eq!(decide_file_action("schedule.json", sched, true, Some("{\"jobs\":[\"phoenix\"]}"),
                        Some(crlf_hash.as_str()), false),
-                   Keep { adopt_hash: false, new_pending: false });
+                   Keep { adopt_hash: false, new_pending: true });
         // 매니페스트가 다른 구버전 해시면 종전대로 병치.
         assert_eq!(decide_file_action("schedule.json", sched, true, Some("{\"jobs\":[\"phoenix\"]}"),
                        Some(content_hash("{\"jobs\":[\"old\"]}").as_str()), false),
@@ -1669,7 +1657,7 @@ mod tests {
                    Keep { adopt_hash: false, new_pending: false });
     }
 
-    /// ★커스터마이즈 절충(②③④) 통합: .new 병치·.user 보존·.pristine 미러·병합 원장·해소 경로 박제.
+    /// `.new` 병치·.pristine 미러·병합 원장·해소 경로 박제.
     #[test]
     fn install_threeway_sides_pristine_and_pending_lifecycle() {
         let td = std::env::temp_dir().join(format!("cys-pack-threeway-test-{}", std::process::id()));
@@ -1680,7 +1668,7 @@ mod tests {
             .unwrap_or_else(|| panic!("팩에 {rel} 부재"));
         let sys_a = "README.md";  // system·비수정 → 갱신 + pristine 미러
         let user_b = "soul.md";   // user-owned·수정 + vendor 전진 → 보존 + .new + pending
-        let sys_c = "hooks/appbuild-gate.sh"; // system·수정 → 치유 + .user + pending
+        let sys_c = "hooks/appbuild-gate.sh"; // system·수정 → 보존 + .new + pending
         std::fs::create_dir_all(&td).unwrap();
         for (rel, stale) in [(sys_a, "OLD-INSTALLED"), (user_b, "USER-SOUL"), (sys_c, "SYS-DRIFT")] {
             std::fs::create_dir_all(td.join(rel).parent().unwrap()).unwrap();
@@ -1699,15 +1687,15 @@ mod tests {
         // ① user-owned: 보존 + 신버전 .new 병치 + 원장 new-pending.
         assert_eq!(read(user_b), "USER-SOUL", "user-owned 보존 불변");
         assert_eq!(read("soul.md.new"), get(user_b), ".new = 임베드 신버전");
-        // ② system 수정본: 치유(임베드) + 사용자본 .user 보존 + 원장 healed.
-        assert_eq!(read(sys_c), get(sys_c), "system 치유(P0-4 불변)");
-        assert_eq!(read("hooks/appbuild-gate.sh.user"), "SYS-DRIFT", "치유 전 사용자본 보존(파괴 0)");
+        // ② system 수정본: 원본 유지 + .new + 원장 new-pending.
+        assert_eq!(read(sys_c), "SYS-DRIFT", "system 수정본 보존");
+        assert_eq!(read("hooks/appbuild-gate.sh.new"), get(sys_c));
         let pending = load_merge_pending(&td);
         assert_eq!(pending.get(user_b).and_then(|e| e["kind"].as_str()), Some("new-pending"));
-        assert_eq!(pending.get(sys_c).and_then(|e| e["kind"].as_str()), Some("healed"));
-        // ③ pristine 미러: 적용된 vendor 본만(sys_a·sys_c), 동결 user-owned(user_b)는 미기록(조상 보존).
+        assert_eq!(pending.get(sys_c).and_then(|e| e["kind"].as_str()), Some("new-pending"));
+        // ③ pristine 미러: 적용된 vendor 본만 기록한다.
         assert_eq!(read(&format!("{PRISTINE_DIR}/{sys_a}")), get(sys_a));
-        assert_eq!(read(&format!("{PRISTINE_DIR}/{sys_c}")), get(sys_c));
+        assert!(!td.join(PRISTINE_DIR).join(sys_c).exists());
         assert!(!td.join(PRISTINE_DIR).join(user_b).exists(), "동결 파일 조상은 미갱신");
         // ④ 멱등: 재실행해도 상태 동일(원장 중복 기록·불필요 rewrite 없음).
         install(false).expect("재실행 실패");
@@ -1745,13 +1733,14 @@ mod tests {
         assert!(plan.blocked.is_none());
         assert!(plan.update.iter().any(|r| r == "README.md"), "비수정 → update");
         assert!(plan.merge_new.iter().any(|r| r == "soul.md"), "user-owned+전진 → merge_new");
-        assert!(plan.heal.iter().any(|r| r == "hooks/appbuild-gate.sh"), "system 수정 → heal");
+        assert!(plan.merge_new.iter().any(|r| r == "hooks/appbuild-gate.sh"), "system 수정 → merge_new");
         // 실제 install 이 플랜과 같은 행동을 하는지 대조.
         install(false).expect("install 실패");
         let read = |rel: &str| std::fs::read_to_string(td.join(rel)).unwrap();
         assert_eq!(read("soul.md"), "USER-SOUL");
         assert!(td.join("soul.md.new").exists());
-        assert!(td.join("hooks/appbuild-gate.sh.user").exists());
+        assert_eq!(read("hooks/appbuild-gate.sh"), "SYS-DRIFT");
+        assert!(td.join("hooks/appbuild-gate.sh.new").exists());
 
         let _ = std::fs::remove_dir_all(&td);
     }
@@ -1791,7 +1780,8 @@ mod tests {
 
         assert_eq!(read(sys_a), sys_a_c, "①system 비수정 → 임베드로 갱신");
         assert_eq!(read(user_b), "USER-MODIFIED", "②user 수정본 불가침");
-        assert_eq!(read(sys_c), sys_c_c, "③★B2/P0-4: system 매니페스트부재·상이 → 강제 갱신(동결 금지)");
+        assert_eq!(read(sys_c), "SYS-DRIFT", "③system 매니페스트부재·상이 → 보존");
+        assert_eq!(read(&format!("{sys_c}.new")), sys_c_c);
         assert_eq!(read(user_d), "USER-CUSTOM", "④user 매니페스트부재·상이 → 보존");
 
         // ⑤ 채택 기록 + 멱등: 재실행이 아무것도 다시 쓰지 않고 user 보존 유지.
@@ -1844,7 +1834,7 @@ mod tests {
     }
 
     #[test]
-    fn pack_owner_modified_student_files_are_preserved_and_system_files_backed_up() {
+    fn pack_owner_modified_student_files_are_preserved_with_new_sides() {
         let td = std::env::temp_dir().join(format!("cys-pack-owner-modified-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&td);
         let _dirs = override_dirs_for_thread(&td, td.join("cysclaude"));
@@ -1860,13 +1850,10 @@ mod tests {
         }
         std::fs::write(td.join(INSTALL_MANIFEST), serde_json::Value::Object(manifest).to_string()).unwrap();
         install(false).unwrap();
-        for rel in student {
+        for rel in student.into_iter().chain(system) {
             assert_eq!(std::fs::read_to_string(td.join(rel)).unwrap(), format!("USER-{rel}"));
             assert_eq!(std::fs::read_to_string(td.join(format!("{rel}.new"))).unwrap(), get(rel));
-        }
-        for rel in system {
-            assert_eq!(std::fs::read_to_string(td.join(rel)).unwrap(), get(rel));
-            assert_eq!(std::fs::read_to_string(td.join(format!("{rel}.user"))).unwrap(), format!("USER-{rel}"));
+            assert!(!td.join(format!("{rel}.user")).exists());
         }
         let _ = std::fs::remove_dir_all(&td);
     }
@@ -1876,7 +1863,8 @@ mod tests {
         let td = std::env::temp_dir().join(format!("cys-pack-owner-unmodified-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&td);
         let _dirs = override_dirs_for_thread(&td, td.join("cysclaude"));
-        let student = ["agents.json", "acl.json", "skills/korean-humanizer/SKILL.md"];
+        let student = ["agents.json", "acl.json", "skills/korean-humanizer/SKILL.md",
+                       "hooks/appbuild-gate.sh", "bin/javis_route.py"];
         let mut manifest = serde_json::Map::new();
         for rel in student {
             let path = td.join(rel);
@@ -2628,7 +2616,7 @@ mod tests {
         assert_eq!(decide_file_action("bin/x.py", new_embed, true, Some(old_crlf), Some(&mh), false),
                    w, "system: 비수정 CRLF 사본 → 갱신(.user 없음)");
         assert_eq!(decide_file_action("bin/x.py", new_embed, true, Some("OLD\r\nEDIT\r\n"), Some(&mh), false),
-                   FileAction::Write { heal_user_copy: true }, "system: 실편집 → .user 보존 후 치유");
+                   FileAction::Keep { adopt_hash: false, new_pending: true }, "system: 실편집 → 보존 + .new");
         // user 소유는 LF 사용자와 같은 정책: 내용이 바뀐 신버전은 .new 병치(개행 때문에 달라지지 않음).
         assert_eq!(decide_file_action("soul.md", new_embed, true, Some(old_crlf), Some(&mh), false),
                    decide_file_action("soul.md", new_embed, true, Some(old), Some(&mh), false), "user: CRLF = LF 동작");

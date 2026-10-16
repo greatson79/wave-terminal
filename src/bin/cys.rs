@@ -885,25 +885,7 @@ fn main() {
     let cli = Cli::try_parse().unwrap_or_else(|e| {
         if e.kind() == clap::error::ErrorKind::DisplayHelp { e.exit(); }
         if is_rename_subcommand(std::env::args_os().skip(1)) {
-            use clap::error::{ContextKind, ErrorKind};
-            let arg = e.context().find(|(kind, _)| *kind == ContextKind::InvalidArg)
-                .map(|(_, value)| value.to_string());
-            let value = e.context().find(|(kind, _)| *kind == ContextKind::InvalidValue)
-                .map(|(_, value)| value.to_string());
-            let prior = e.context().find(|(kind, _)| *kind == ContextKind::PriorArg)
-                .map(|(_, value)| value.to_string());
-            match (e.kind(), arg.as_deref(), value.as_deref(), prior.as_deref()) {
-                (ErrorKind::UnknownArgument, Some(arg), _, _) => eprintln!("cys rename에서 알아보지 못한 인자: {arg}"),
-                (ErrorKind::InvalidValue, Some(arg), Some(""), _) => eprintln!("cys rename 인자 {arg}의 값이 빠졌습니다"),
-                (ErrorKind::InvalidValue, Some(arg), Some(value), _) => eprintln!("cys rename 인자 {arg}의 값이 올바르지 않습니다: {value}"),
-                (ErrorKind::ArgumentConflict, Some(arg), _, Some(prior)) if arg == prior => eprintln!("cys rename 인자 {arg}를 여러 번 쓸 수 없습니다"),
-                (ErrorKind::ArgumentConflict, Some(arg), _, Some(prior)) => eprintln!("cys rename 인자 {arg}와 {prior}를 함께 쓸 수 없습니다"),
-                (ErrorKind::ArgumentConflict, Some(arg), _, _) => eprintln!("cys rename 인자 {arg}가 다른 인자와 충돌합니다"),
-                (ErrorKind::TooManyValues, Some(arg), Some(value), _) => eprintln!("cys rename 인자 {arg}에 값이 너무 많습니다: {value}"),
-                (ErrorKind::MissingRequiredArgument, Some(arg), _, _) => eprintln!("cys rename 필수 인자가 빠졌습니다: {arg}"),
-                _ => eprintln!("cys rename 입력이 올바르지 않습니다"),
-            }
-            eprintln!("{e}");
+            eprintln!("{}", rename_parse_error_ko(&e));
             eprintln!("사용법: cys rename [--surface 창번호] [--clear] [이름]");
             std::process::exit(2);
         }
@@ -924,6 +906,41 @@ fn main() {
     }
     let code = run(cli.command);
     std::process::exit(code);
+}
+
+fn rename_parse_error_ko(e: &clap::Error) -> String {
+    use clap::error::{ContextKind, ErrorKind};
+    let context = |kind| e.context().find(|(key, _)| *key == kind)
+        .map(|(_, value)| value.to_string());
+    let arg = context(ContextKind::InvalidArg);
+    let value = context(ContextKind::InvalidValue);
+    let prior = context(ContextKind::PriorArg);
+    match (e.kind(), arg.as_deref(), value.as_deref(), prior.as_deref()) {
+        (ErrorKind::UnknownArgument, Some(arg), _, _) => format!("cys rename에서 알아보지 못한 인자: {arg}"),
+        (ErrorKind::InvalidValue, Some(arg), Some(""), _) => format!("cys rename 인자 {arg}의 값이 빠졌습니다"),
+        (ErrorKind::InvalidValue, Some(arg), Some(value), _) => format!("cys rename 인자 {arg}의 값이 올바르지 않습니다: {value}"),
+        (ErrorKind::ArgumentConflict, Some(arg), _, Some(prior)) if arg == prior => format!("cys rename 인자 {arg}를 여러 번 쓸 수 없습니다"),
+        (ErrorKind::ArgumentConflict, Some(arg), _, Some(prior)) => format!("cys rename 인자 {arg}와 {prior}를 함께 쓸 수 없습니다"),
+        (ErrorKind::ArgumentConflict, Some(arg), _, _) => format!("cys rename 인자 {arg}가 다른 인자와 충돌합니다"),
+        (ErrorKind::TooManyValues, Some(arg), Some(value), _) => format!("cys rename 인자 {arg}에 값이 너무 많습니다: {value}"),
+        (ErrorKind::MissingRequiredArgument, Some(arg), _, _) => format!("cys rename 필수 인자가 빠졌습니다: {arg}"),
+        _ => {
+            let reason = match e.kind() {
+                ErrorKind::UnknownArgument => "알 수 없는 인자",
+                ErrorKind::InvalidValue | ErrorKind::ValueValidation => "올바르지 않은 값",
+                ErrorKind::ArgumentConflict => "인자 충돌",
+                ErrorKind::TooManyValues => "값이 너무 많음",
+                ErrorKind::TooFewValues | ErrorKind::MissingRequiredArgument => "필수 인자나 값 누락",
+                ErrorKind::WrongNumberOfValues => "값 개수 오류",
+                ErrorKind::NoEquals => "등호 누락",
+                ErrorKind::InvalidUtf8 => "문자 인코딩 오류",
+                ErrorKind::InvalidSubcommand => "알 수 없는 하위 명령",
+                ErrorKind::MissingSubcommand => "하위 명령 누락",
+                _ => "인자 형식 오류",
+            };
+            format!("cys rename 입력이 올바르지 않습니다: {reason}")
+        }
+    }
 }
 
 fn is_rename_subcommand(mut args: impl Iterator<Item = std::ffi::OsString>) -> bool {
@@ -7780,6 +7797,23 @@ extern "C" fn scoped_cleanup_handler(sig: libc::c_int) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn label_scope_rename_parse_errors_are_korean_only() {
+        use super::*;
+        for (args, expected) in [
+            (vec!["cys", "rename", "--bad"], "알아보지 못한 인자: --bad"),
+            (vec!["cys", "rename", "--surface"], "--surface <창번호>의 값이 빠졌습니다"),
+            (vec!["cys", "rename", "--surface", "a", "--surface", "b"], "--surface <창번호>를 여러 번 쓸 수 없습니다"),
+        ] {
+            let error = Cli::try_parse_from(args).err().unwrap();
+            let message = rename_parse_error_ko(&error);
+            assert!(message.contains(expected), "{message}");
+            assert!(!message.contains("error:") && !message.contains("Usage:"), "{message}");
+        }
+        let error = clap::Error::raw(clap::error::ErrorKind::InvalidUtf8, "opaque");
+        assert_eq!(rename_parse_error_ko(&error), "cys rename 입력이 올바르지 않습니다: 문자 인코딩 오류");
+    }
+
     #[test]
     fn label_scope_rename_and_restore() {
         use super::*;

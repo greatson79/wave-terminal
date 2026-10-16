@@ -4435,12 +4435,14 @@ fn launch_once_on_surface(
     // 있으면 readiness 미확인·restore 중 stall 시 meta=None으로 남아 → 사망감지 스킵(governance.rs)
     // → agent_seen 영원히 false → status 허위 DEAD → task-prompt 생존게이트가 '미기동' 오판(DRILL_LIVE_1).
     // 스폰 시점에 의도가 확정되므로 여기서 등록하는 것이 정직하다(§3-1 진단의 수리).
-    let bin = extract_bin(&cmd, agent).to_string();
-    request(
-        "surface.set_meta",
-        json!({"surface_id": sid, "agent": agent, "agent_bin": bin,
-               "model": model, "model_fallback": fell_back}),
-    )?;
+    if !fell_back {
+        let bin = extract_bin(&cmd, agent).to_string();
+        request(
+            "surface.set_meta",
+            json!({"surface_id": sid, "agent": agent, "agent_bin": bin,
+                   "model": model, "model_fallback": false}),
+        )?;
+    }
     if !fresh {
         request("surface.send_key", json!({"surface_id": sid, "key": "C-u"}))?;
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -4594,14 +4596,15 @@ fn recover_scope_denial_precedes_all_shell_input() {
 
 #[cfg(test)]
 #[test]
-fn recover_scope_model_fallback_meta_denial_stops_input() {
+fn recover_scope_model_fallback_skips_meta() {
     let source = include_str!("cys.rs");
     let launch = source.split("fn launch_once_on_surface(").nth(1).unwrap()
         .split("fn run_surface_role(").next().unwrap();
-    let meta = launch.find("\"surface.set_meta\"").unwrap();
-    let input = launch.find("\"surface.send_key\"").unwrap();
-    assert!(launch[meta..input].contains(")?;"), "set_meta denial must return before input");
-    assert!(!launch[meta..input].contains("if fell_back"), "fallback must not swallow set_meta denial");
+    let guarded = launch.split("if !fell_back {").nth(1).unwrap()
+        .split("\n    if !fresh {").next().unwrap();
+    assert_eq!(launch.matches("\"surface.set_meta\"").count(), 1);
+    assert!(guarded.contains("\"surface.set_meta\""));
+    assert!(guarded.contains(")?;"), "non-fallback denial must stop before input");
 }
 
 /// 에이전트 기동 + 역할 지침 자동 주입 (어댑터: agents.json).

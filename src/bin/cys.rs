@@ -887,7 +887,7 @@ fn main() {
     }
     let cli = Cli::try_parse().unwrap_or_else(|e| {
         if e.kind() == clap::error::ErrorKind::DisplayHelp { e.exit(); }
-        if std::env::args_os().any(|arg| arg == "rename") {
+        if is_rename_subcommand(std::env::args_os().skip(1)) {
             eprintln!("cys rename 입력이 올바르지 않습니다. 사용법: cys rename [--surface 창번호] [--clear] [이름]");
             std::process::exit(2);
         }
@@ -908,6 +908,15 @@ fn main() {
     }
     let code = run(cli.command);
     std::process::exit(code);
+}
+
+fn is_rename_subcommand(mut args: impl Iterator<Item = std::ffi::OsString>) -> bool {
+    while let Some(arg) = args.next() {
+        if arg == "--socket" { let _ = args.next(); continue; }
+        if arg.to_string_lossy().starts_with("--socket=") { continue; }
+        return arg == "rename";
+    }
+    false
 }
 
 fn target_surface(explicit: &Option<String>, to_role: &Option<String>) -> Result<u64, String> {
@@ -7758,6 +7767,13 @@ mod tests {
     #[test]
     fn label_scope_rename_and_restore() {
         use super::*;
+        let command = |args: &[&str]| is_rename_subcommand(args.iter().map(std::ffi::OsString::from));
+        assert!(command(&["rename", "--bad"]));
+        assert!(command(&["--socket", "/tmp/cys.sock", "rename", "--bad"]));
+        assert!(command(&["--socket=/tmp/cys.sock", "rename", "--bad"]));
+        assert!(!command(&["send", "rename"]));
+        assert!(!command(&["--socket", "rename", "send", "x"]));
+        assert!(!command(&["--socket", "/tmp/cys.sock", "send", "rename"]));
         let mut app = <Cli as clap::CommandFactory>::command();
         let help = app.find_subcommand_mut("rename").unwrap().render_long_help().to_string();
         assert!(help.contains("사용법:") && help.contains("이름을 비우려면 --clear"));

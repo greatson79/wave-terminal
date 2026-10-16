@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { paneHeading, splitPaneHeading } from "./paneheading";
+import { bindPaneRename, paneHeading, splitPaneHeading } from "./paneheading";
 
 test("role, model, surface ID, context, and reported status compose a fixed heading", () => {
   expect(paneHeading({ sid: 8, role: "master", model: "claude-opus-5-5", ctx: 42, tail: "홈페이지 글 고치는 중" }))
@@ -32,4 +32,25 @@ test("user label without a role leads the heading", () => {
 test("context coloring splits at the final context marker", () => {
   const heading = paneHeading({ sid: 8, role: "worker", label: "과제 · CTX 정리", ctx: 42 });
   expect(splitPaneHeading(heading)).toEqual(["워커(과제 · CTX 정리)·s8", "42% · 대기 중"]);
+});
+
+test("IME Enter does not save a pane name; one later Enter does", () => {
+  const listeners = new Map<string, EventListener>();
+  const titleEl = {
+    contentEditable: "true",
+    addEventListener: (type: string, handler: EventListener) => listeners.set(type, handler),
+    removeEventListener: (type: string) => listeners.delete(type),
+    blur: () => listeners.get("blur")?.({} as Event),
+  } as unknown as HTMLElement;
+  const calls: string[] = [];
+  bindPaneRename(titleEl, (cancelled) => { if (!cancelled) calls.push("set_surface_label"); });
+  const keydown = (key: string, isComposing: boolean, keyCode: number) =>
+    listeners.get("keydown")?.({ key, isComposing, keyCode, stopPropagation() {}, preventDefault() {} } as KeyboardEvent);
+  keydown("Enter", true, 13);
+  keydown("Enter", false, 229);
+  expect(calls).toEqual([]);
+  expect(titleEl.contentEditable).toBe("true");
+  keydown("Enter", false, 13);
+  expect(calls).toEqual(["set_surface_label"]);
+  expect(titleEl.contentEditable).toBe("false");
 });

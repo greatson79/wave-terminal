@@ -14,7 +14,7 @@ import { ccEffectiveZoom } from "./ccscale";
 import { clampWsbarWidth, clampWsbarFont, WSBAR_W_DEFAULT, WSBAR_FONT_STEP } from "./wsbar";
 import { composeFontFamily, FONT_CHOICES, ROLE_COLOR, roleDotColor } from "./appearance";
 import { safeHelpText } from "./help";
-import { paneHeading, splitPaneHeading } from "./paneheading";
+import { bindPaneRename, paneHeading, splitPaneHeading } from "./paneheading";
 import { sidebarUsage } from "./usagebar";
 import { inputSource } from "./inputsource";
 import { sendPreparedHelp } from "./helpflow";
@@ -1664,16 +1664,7 @@ async function makePane(sid: number, title: string, socket?: string): Promise<Pa
     titleEl.contentEditable = "true";
     titleEl.focus();
     window.getSelection()?.selectAllChildren(titleEl);
-    let cancelled = false;
-    const onKey = (ke: KeyboardEvent) => {
-      ke.stopPropagation();
-      if (ke.isComposing || ke.keyCode === 229) return;
-      if (ke.key === "Escape") { cancelled = true; ke.preventDefault(); titleEl.blur(); }
-      else if (ke.key === "Enter") { ke.preventDefault(); titleEl.blur(); }
-    };
-    const finish = async () => {
-      titleEl.removeEventListener("keydown", onKey);
-      titleEl.contentEditable = "false";
+    bindPaneRename(titleEl, async (cancelled) => {
       if (cancelled) { displayPaneHeading(titleEl, sid, paneTitleState.get(key)); return; }
       try {
         const label = titleEl.textContent ?? "";
@@ -1685,9 +1676,7 @@ async function makePane(sid: number, title: string, socket?: string): Promise<Pa
         toast("health", "창 이름을 바꾸지 못했습니다", "");
       }
       displayPaneHeading(titleEl, sid, paneTitleState.get(key));
-    };
-    titleEl.addEventListener("keydown", onKey);
-    titleEl.addEventListener("blur", finish, { once: true });
+    });
   };
   titleEl.addEventListener("dblclick", (e) => { e.stopPropagation(); startPaneRename(); });
   header.addEventListener("contextmenu", (e) => {

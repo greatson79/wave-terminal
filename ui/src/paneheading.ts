@@ -23,3 +23,24 @@ export function splitPaneHeading(heading: string): [string, string] {
   const at = heading.lastIndexOf(marker);
   return at < 0 ? [heading, ""] : [heading.slice(0, at), heading.slice(at + marker.length)];
 }
+
+export function paneRenameKeyAction(e: Pick<KeyboardEvent, "key" | "keyCode" | "isComposing">): "save" | "cancel" | null {
+  if (e.isComposing || e.keyCode === 229) return null;
+  return e.key === "Enter" ? "save" : e.key === "Escape" ? "cancel" : null;
+}
+
+export function bindPaneRename(titleEl: HTMLElement, finish: (cancelled: boolean) => void): void {
+  let cancelled = false;
+  const onKey = (ke: KeyboardEvent) => {
+    ke.stopPropagation();
+    const action = paneRenameKeyAction(ke);
+    if (action === "cancel") cancelled = true;
+    if (action) { ke.preventDefault(); titleEl.blur(); }
+  };
+  titleEl.addEventListener("keydown", onKey);
+  titleEl.addEventListener("blur", () => {
+    titleEl.removeEventListener("keydown", onKey);
+    titleEl.contentEditable = "false";
+    finish(cancelled);
+  }, { once: true });
+}

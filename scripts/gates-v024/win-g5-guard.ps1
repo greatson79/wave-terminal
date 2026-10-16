@@ -49,3 +49,4 @@ Send-Rpc 'x' $true
 $blocked = (& $cys send --surface $ref 'guard-proof' 2>&1) -join "`n"
 if ($LASTEXITCODE -eq 0 -or $blocked -notmatch 'typing_guard') { throw "human input did not activate typing guard: $blocked" }
 Write-Host 'G5 win-guard PASS'
+exit 0

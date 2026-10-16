@@ -885,13 +885,23 @@ fn main() {
     let cli = Cli::try_parse().unwrap_or_else(|e| {
         if e.kind() == clap::error::ErrorKind::DisplayHelp { e.exit(); }
         if is_rename_subcommand(std::env::args_os().skip(1)) {
-            use clap::error::ContextKind;
-            for (kind, value) in e.context() {
-                match kind {
-                    ContextKind::InvalidArg => eprintln!("cys rename에서 알아보지 못한 인자: {value}"),
-                    ContextKind::InvalidValue => eprintln!("cys rename에서 올바르지 않은 값: {value}"),
-                    _ => {}
-                }
+            use clap::error::{ContextKind, ErrorKind};
+            let arg = e.context().find(|(kind, _)| *kind == ContextKind::InvalidArg)
+                .map(|(_, value)| value.to_string());
+            let value = e.context().find(|(kind, _)| *kind == ContextKind::InvalidValue)
+                .map(|(_, value)| value.to_string());
+            let prior = e.context().find(|(kind, _)| *kind == ContextKind::PriorArg)
+                .map(|(_, value)| value.to_string());
+            match (e.kind(), arg.as_deref(), value.as_deref(), prior.as_deref()) {
+                (ErrorKind::UnknownArgument, Some(arg), _, _) => eprintln!("cys rename에서 알아보지 못한 인자: {arg}"),
+                (ErrorKind::InvalidValue, Some(arg), Some(""), _) => eprintln!("cys rename 인자 {arg}의 값이 빠졌습니다"),
+                (ErrorKind::InvalidValue, Some(arg), Some(value), _) => eprintln!("cys rename 인자 {arg}의 값이 올바르지 않습니다: {value}"),
+                (ErrorKind::ArgumentConflict, Some(arg), _, Some(prior)) if arg == prior => eprintln!("cys rename 인자 {arg}를 여러 번 쓸 수 없습니다"),
+                (ErrorKind::ArgumentConflict, Some(arg), _, Some(prior)) => eprintln!("cys rename 인자 {arg}와 {prior}를 함께 쓸 수 없습니다"),
+                (ErrorKind::ArgumentConflict, Some(arg), _, _) => eprintln!("cys rename 인자 {arg}가 다른 인자와 충돌합니다"),
+                (ErrorKind::TooManyValues, Some(arg), Some(value), _) => eprintln!("cys rename 인자 {arg}에 값이 너무 많습니다: {value}"),
+                (ErrorKind::MissingRequiredArgument, Some(arg), _, _) => eprintln!("cys rename 필수 인자가 빠졌습니다: {arg}"),
+                _ => eprintln!("cys rename 입력이 올바르지 않습니다"),
             }
             eprintln!("{e}");
             eprintln!("사용법: cys rename [--surface 창번호] [--clear] [이름]");
@@ -7785,16 +7795,26 @@ mod tests {
         assert!(help.contains("사용법:") && help.contains("이름을 비우려면 --clear"));
         assert!(!help.contains("Arguments:") && !help.contains("Options:") && !help.contains("Socket path"));
         // PowerShell passes --surface, surface:N, and the Unicode name as three argv values.
-        let cli = Cli::try_parse_from(["cys", "rename", "--surface", "surface:123", "한글이름테스트"]).unwrap();
-        assert!(matches!(cli.command, Command::Rename { surface: Some(ref id), name: Some(ref name), .. }
-            if id == "surface:123" && name == "한글이름테스트"));
-        let cli = Cli::try_parse_from(["cys", "rename", "--surface", "surface:123", &"가".repeat(21)]).unwrap();
+        let cli = Cli::try_parse_from(["cys", "rename", "--surface", "surface:3", "한글이름"]).unwrap();
+        assert!(matches!(cli.command, Command::Rename { surface: Some(ref id), name: Some(ref name), clear: false }
+            if id == "surface:3" && name == "한글이름"));
+        let cli = Cli::try_parse_from(["cys", "rename", "이름"]).unwrap();
+        assert!(matches!(cli.command, Command::Rename { surface: None, name: Some(ref name), clear: false }
+            if name == "이름"));
+        let cli = Cli::try_parse_from(["cys", "rename", "--clear"]).unwrap();
+        assert!(matches!(cli.command, Command::Rename { surface: None, name: None, clear: true }));
+        let cli = Cli::try_parse_from(["cys", "rename", "--surface", "surface:3", &"가".repeat(21)]).unwrap();
         assert!(matches!(cli.command, Command::Rename { name: Some(ref name), .. } if name.chars().count() == 21));
         assert_eq!(Cli::try_parse_from(["cys", "rename", "--help"]).err().unwrap().kind(),
             clap::error::ErrorKind::DisplayHelp);
         let bad = Cli::try_parse_from(["cys", "rename", "--bad"]).err().unwrap();
         assert!(bad.context().any(|(kind, value)| kind == clap::error::ContextKind::InvalidArg
             && value.to_string() == "--bad"));
+        let repeated = Cli::try_parse_from(["cys", "rename", "--surface", "a", "--surface", "b"])
+            .err().unwrap();
+        assert_eq!(repeated.kind(), clap::error::ErrorKind::ArgumentConflict);
+        assert!(repeated.context().any(|(kind, value)| kind == clap::error::ContextKind::InvalidArg
+            && value.to_string() == "--surface <창번호>"));
         #[cfg(unix)]
         {
             use std::os::unix::net::UnixListener;

@@ -1500,10 +1500,7 @@ fn run(command: Command) -> i32 {
                                 Some(d) => println!("QUEUED (depth {d})"),
                                 // 구 데몬은 queued 파라미터를 모르고 즉시 주입한다 —
                                 // "QUEUED"로 오표시하지 않는다(skew의 결정론 신호).
-                                None => eprintln!(
-                                    "[send-key] 경고: 데몬이 --queued를 지원하지 않아 \
-                                     직접 주입됨(구버전 cysd — 재기동으로 갱신하라)"
-                                ),
+                                None => return Err("데몬이 --queued를 지원하지 않아 직접 주입됨(구버전 cysd — 재기동으로 갱신하라)".into()),
                             }
                         }
                     }
@@ -1560,25 +1557,27 @@ fn run(command: Command) -> i32 {
             // 호출처(install_update)가 영구 정지하지 않게 한다.
             std::thread::spawn(|| {
                 std::thread::sleep(std::time::Duration::from_secs(12));
-                std::process::exit(0);
+                std::process::exit(1);
             });
             let mut n = 0;
-            if let Ok(topo) = request("system.topology", json!({})) {
-                for e in topo["live"].as_array().cloned().unwrap_or_default() {
+            let mut failed = false;
+            match request("system.topology", json!({})) {
+                Ok(topo) => for e in topo["live"].as_array().cloned().unwrap_or_default() {
                     let Some(role) = e["role"].as_str() else { continue };
-                    if let Ok(r) = request("system.resolve_role", json!({"role": role})) {
-                        if let Some(sid) = r["surface_id"].as_u64() {
-                            let _ = inject_text(sid, "[DRAIN] 업데이트 재시작이 임박했다. 승인 프롬프트 대기 중이면 이 메시지는 무시하라. 아니면 지금 _round/SESSION_STATE.md와 자기 TODO를 저장하고 작업을 멈춰라. 작업 재개는 복원 후 master 지시를 기다린다.");
-                            n += 1;
-                        }
+                    match request("system.resolve_role", json!({"role": role})) {
+                        Ok(r) => if let Some(sid) = r["surface_id"].as_u64() {
+                            if inject_text(sid, "[DRAIN] 업데이트 재시작이 임박했다. 승인 프롬프트 대기 중이면 이 메시지는 무시하라. 아니면 지금 _round/SESSION_STATE.md와 자기 TODO를 저장하고 작업을 멈춰라. 작업 재개는 복원 후 master 지시를 기다린다.").is_ok() { n += 1; } else { failed = true; }
+                        } else { failed = true; },
+                        Err(_) => failed = true,
                     }
-                }
+                },
+                Err(_) => failed = true,
             }
             if n > 0 {
                 std::thread::sleep(std::time::Duration::from_secs(8));
             }
             println!("drained {n} node(s)");
-            return 0;
+            return if failed { 1 } else { 0 };
         }
 
         Command::GateCheck => {
@@ -3751,9 +3750,11 @@ fn run_boot(cwd: Option<String>) -> i32 {
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| json!({}));
     // 이미 가동 중인 역할은 중복 기동하지 않는다
-    let live_roles: std::collections::HashSet<String> = request("surface.list", json!({}))
-        .ok()
-        .and_then(|r| r["surfaces"].as_array().cloned())
+    let live_surfaces = match request("surface.list", json!({})) {
+        Ok(r) => r,
+        Err(e) => { eprintln!("surface.list 실패: {e}"); return 1; }
+    };
+    let live_roles: std::collections::HashSet<String> = live_surfaces["surfaces"].as_array().cloned()
         .unwrap_or_default()
         .iter()
         .filter(|s| !s["exited"].as_bool().unwrap_or(true))
@@ -4553,6 +4554,7 @@ fn launch_once_on_surface(
         );
     } else {
         eprintln!("[launch-agent] warning: directive not visible on screen — verify with `cys read-screen --surface {}`", surface_ref(sid));
+        if !fresh { return Err("node-recover directive not visible on screen".into()); }
     }
 
     // 5) T2-5 에이전트 메타 등록은 ★Phase 5 ①a로 기동 직후(위)로 이동했다 — readiness 폴링/주입
@@ -5373,7 +5375,7 @@ fn run_fleet(as_json: bool) -> i32 {
             );
         }
     }
-    0
+    if out.iter().any(|d| d.get("error").is_some()) { 1 } else { 0 }
 }
 
 fn run_status(as_json: bool) -> i32 {
@@ -5707,8 +5709,9 @@ fn run_cycle_agent(
         })();
         // 재개 성공/실패와 무관하게 quiescing 해제 — 실패로 master가 quiescing에 갇혀 채널이
         // 영구 보류되는 것을 막는다(master 자기보고 안전망과 별개의 결정론 해제).
-        let _ = set_surface_quiescing(sid, false);
+        let cleanup = set_surface_quiescing(sid, false);
         clear_resume?;
+        cleanup?;
         println!("cycle complete → surface:{sid} ({role_name})");
         Ok(())
     })();
@@ -7098,9 +7101,8 @@ fn run_pack_merge(
                 Err(_) => match embed_now {
                     Some(c) => c.to_string(),
                     None => {
-                        eprintln!("{rel}.new 부재 + 임베드에도 없음 — 원장만 정리");
-                        resolve(&mut pending, ".new");
-                        return 0;
+                        eprintln!("{rel}.new 부재 + 임베드에도 없음 — 병합 대기를 유지");
+                        return 1;
                     }
                 },
             };

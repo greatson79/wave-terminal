@@ -206,6 +206,13 @@ for name, kw, want in (("ping", {"ping_exit": 1}, 3),
     shutil.rmtree(tmp)
 
 # ── 7. assert-ready: 부재=5 · warn=0 · off=0 · 버전 불일치=5 · 일치=0 ──
+tmp = tempfile.mkdtemp(prefix="boot-internal-failure-")
+env, home = make_env(tmp, boot_exit=1)
+code, out, err = run(env)
+check("boot 내부 실패는 ④에서 exit 4", code == 4 and not os.path.exists(marker_path(home)))
+check("boot 내부 실패 뒤 ⑤ 검사 미실행", "assert-ready" not in calls(tmp))
+shutil.rmtree(tmp)
+
 tmp = tempfile.mkdtemp(prefix="boot-t7-")
 env, home = make_env(tmp)
 code, _, _ = run(env, "assert-ready")

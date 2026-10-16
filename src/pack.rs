@@ -353,6 +353,18 @@ fn content_hash(content: &str) -> String {
     format!("{:x}", Sha256::digest(content.as_bytes()))
 }
 
+include!("pack_legacy_hashes.rs");
+
+fn vendor_baseline_hash(dir: &Path, rel: &str, manifest_hash: Option<&str>) -> Option<String> {
+    if let Some(hash) = manifest_hash { return Some(hash.to_string()); }
+    let pristine = dir.join(PRISTINE_DIR).join(rel);
+    // An unreadable pristine is still evidence of a baseline; never replace via older history.
+    std::fs::symlink_metadata(&pristine).ok().map(|meta| {
+        if !meta.file_type().is_file() { return String::new(); }
+        std::fs::read_to_string(pristine).map(|s| content_hash(&s)).unwrap_or_default()
+    })
+}
+
 /// ★B1: 외부(cysd)가 디스크 폴백 phoenix 의 stale 여부(임베드 해시 대조)를 판정할 때 쓰는 공개 래퍼.
 pub fn content_hash_pub(content: &str) -> String {
     content_hash(content)
@@ -472,7 +484,13 @@ pub(crate) fn decide_file_action(
     }
     // 설치-당시 해시 그대로 = 사용자 비수정. 디스크가 그 배포본의 개행 변형(LF 매니페스트 + CRLF 디스크)이어도 비수정.
     let unmodified = |d: &str| {
-        manifest_hash.is_some_and(|m| m == content_hash(d) || m == content_hash(&d.replace("\r\n", "\n")))
+        let disk_hash = content_hash(d);
+        let normalized_hash = content_hash(&d.replace("\r\n", "\n"));
+        manifest_hash.map_or_else(
+            || LEGACY_VENDOR_HASHES.iter().any(|(path, hash)|
+                *path == rel && (*hash == disk_hash || *hash == normalized_hash)),
+            |m| m == disk_hash || m == normalized_hash,
+        )
     };
     // 개행만 다른(CRLF↔LF) 사본 = 배포본 그대로(Windows v0.2.3 이 CRLF 로 설치) — 사용자 수정이
     // 아니므로 .new/.user 없이 LF 임베드로 덮는다. 실제 내용 편집은 아래 기존 분기가 그대로 보존.
@@ -576,12 +594,13 @@ pub fn plan_install(
         let path = dir.join(rel);
         let exists = path.exists();
         let disk = if exists { std::fs::read_to_string(&path).ok() } else { None };
+        let baseline = vendor_baseline_hash(dir, rel, manifest.get(rel).map(String::as_str));
         match decide_file_action(
             rel,
             content,
             exists,
             disk.as_deref(),
-            manifest.get(rel).map(String::as_str),
+            baseline.as_deref(),
             force,
         ) {
             FileAction::Write { heal_user_copy: true } => plan.heal.push(rel.to_string()),
@@ -733,8 +752,8 @@ fn ensure_pristine(dir: &Path, rel: &str, content: &str) {
 
 /// PACK 템플릿 설치 (CLI init-pack과 데몬 첫 기동 자동 설치의 공용 코어).
 /// force=false: 사용자 수정 파일 불가침 + **비수정 파일은 임베드 신버전으로 자동 갱신**
-/// (설치 매니페스트의 설치-당시 해시와 현재 파일 해시가 일치 = 비수정). 매니페스트가
-/// 없는 구설치본 파일은 종전대로 보존한다(안전측). 반환: (written, kept).
+/// (설치 매니페스트·pristine·기존 배포본 해시와 현재 파일이 일치 = 비수정).
+/// 셋 모두 없거나 내용이 다르면 수정본으로 보존한다. 반환: (written, kept).
 pub fn install(force: bool) -> Result<(usize, usize), String> {
     // 얇은 래퍼: embed PACK_ALL(git-추적 전체 트리)를 입력원으로 install_from_iter에 위임한다.
     // ★외부 동작(반환값·디스크 결과·부수효과)은 완전 불변 — C/D/E 호출처 무영향(§3 하위호환).
@@ -838,7 +857,7 @@ pub fn install_into<'a, I: IntoIterator<Item = (&'a str, &'a str)>>(
         let path = dir.join(rel);
         let exists = path.exists();
         let disk = if exists { std::fs::read_to_string(&path).ok() } else { None };
-        let mhash: Option<String> = manifest.get(rel).cloned();
+        let mhash = vendor_baseline_hash(&dir, rel, manifest.get(rel).map(String::as_str));
         match decide_file_action(rel, content, exists, disk.as_deref(), mhash.as_deref(), force) {
             FileAction::Keep { adopt_hash, new_pending } => {
                 if adopt_hash {
@@ -1878,6 +1897,53 @@ mod tests {
             let embed = PACK_ALL.iter().find(|(r, _)| *r == rel).unwrap().1;
             assert_eq!(std::fs::read_to_string(td.join(rel)).unwrap(), embed);
             assert!(!td.join(format!("{rel}.new")).exists());
+        }
+        let _ = std::fs::remove_dir_all(&td);
+    }
+
+    #[test]
+    fn pack_owner_manifestless_old_vendor_student_edit_and_pristine() {
+        let td = std::env::temp_dir().join(format!("cys-pack-owner-legacy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&td);
+        let _dirs = override_dirs_for_thread(&td, td.join("cysclaude"));
+        let rel = "agents.json";
+        let embed = PACK_ALL.iter().find(|(r, _)| *r == rel).unwrap().1;
+        let old = include_str!("../tests/fixtures/pack_v021_agents.json");
+        std::fs::create_dir_all(&td).unwrap();
+
+        std::fs::write(td.join(rel), old.replace('\n', "\r\n")).unwrap();
+        install(false).unwrap();
+        assert_eq!(std::fs::read_to_string(td.join(rel)).unwrap(), embed, "옛 배포 원본은 교체");
+        assert!(!td.join(format!("{rel}.new")).exists());
+
+        std::fs::remove_file(td.join(INSTALL_MANIFEST)).unwrap();
+        std::fs::remove_file(td.join(PRISTINE_DIR).join(rel)).unwrap();
+        let edited = format!("{old}\nSTUDENT EDIT\n");
+        std::fs::write(td.join(rel), &edited).unwrap();
+        install(false).unwrap();
+        assert_eq!(std::fs::read_to_string(td.join(rel)).unwrap(), edited, "학생 수정본은 보존");
+        assert_eq!(std::fs::read_to_string(td.join(format!("{rel}.new"))).unwrap(), embed);
+
+        std::fs::remove_file(td.join(INSTALL_MANIFEST)).unwrap();
+        let pristine = "EARLIER VENDOR\n";
+        std::fs::write(td.join(PRISTINE_DIR).join(rel), pristine).unwrap();
+        std::fs::write(td.join(rel), pristine).unwrap();
+        install(false).unwrap();
+        assert_eq!(std::fs::read_to_string(td.join(rel)).unwrap(), embed, "pristine 일치본은 교체");
+        assert!(!td.join(format!("{rel}.new")).exists());
+
+        std::fs::remove_file(td.join(INSTALL_MANIFEST)).unwrap();
+        std::fs::write(td.join(PRISTINE_DIR).join(rel), "OTHER VENDOR\n").unwrap();
+        std::fs::write(td.join(rel), old).unwrap();
+        install(false).unwrap();
+        assert_eq!(std::fs::read_to_string(td.join(rel)).unwrap(), old, "pristine 불일치는 구버전 해시보다 우선해 보존");
+        assert_eq!(std::fs::read_to_string(td.join(format!("{rel}.new"))).unwrap(), embed);
+        #[cfg(unix)] {
+            std::fs::remove_file(td.join(INSTALL_MANIFEST)).unwrap();
+            std::fs::remove_file(td.join(PRISTINE_DIR).join(rel)).unwrap();
+            std::os::unix::fs::symlink(td.join(rel), td.join(PRISTINE_DIR).join(rel)).unwrap();
+            install(false).unwrap();
+            assert_eq!(std::fs::read_to_string(td.join(rel)).unwrap(), old, "pristine 심링크는 기준본 아님");
         }
         let _ = std::fs::remove_dir_all(&td);
     }

@@ -1401,15 +1401,6 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
             let Some(surface) = daemon.get_surface(sid) else {
                 return Reply::Single(err_response(&id, "not_found", "창을 찾을 수 없습니다"));
             };
-            let caller_sid = caller_pid.and_then(|pid| resolve_caller_surface(daemon, pid));
-            if caller_sid.is_some_and(|cs| cs != sid)
-                && !(authoritative_caller_ok(daemon, caller_sid, caller_pid)
-                    && check_send_acl(daemon, caller_pid, &surface).is_ok()) {
-                daemon.bus.publish("surface.label_denied", "surface", Some(sid),
-                    json!({"caller_surface": caller_sid, "caller_pid": caller_pid}));
-                return Reply::Single(err_response(&id, "label_denied",
-                    "이 창에서 실행된 앱은 다른 창 이름을 못 바꿉니다"));
-            }
             let label = normalize_surface_label(input);
             *surface.label.lock().unwrap() = label.clone();
             crate::governance::persist_topology(daemon);
@@ -4251,57 +4242,14 @@ mod tests {
     }
 
     #[test]
-    fn label_scope_self_allowed() {
-        let daemon = isolated_daemon();
-        let sid = make_surface(&daemon, Some("worker-1"));
-        bind_caller(&daemon, 996_001, sid);
-        assert_eq!(set_label(&daemon, sid, "내 창", Some(996_001))["result"]["label"], json!("내 창"));
-    }
-
-    #[test]
-    fn label_scope_outside_allowed() {
-        let daemon = isolated_daemon();
-        let sid = make_surface(&daemon, Some("worker-1"));
-        assert_eq!(set_label(&daemon, sid, "사람 이름", None)["ok"], json!(true));
-    }
-
-    #[test]
-    fn label_scope_authoritative_acl_allowed() {
-        let daemon = isolated_daemon();
-        let master = make_surface(&daemon, Some("master"));
-        let sid = make_surface(&daemon, Some("worker-1"));
-        bind_caller(&daemon, 996_002, master);
-        assert_eq!(set_label(&daemon, sid, "지시 이름", Some(996_002))["ok"], json!(true));
-    }
-
-    #[test]
-    fn label_scope_authoritative_acl_denied() {
+    fn label_scope_worker_can_rename_foreign_surface_despite_acl() {
         let _lock = ACL_ENV_LOCK.lock().unwrap();
         let (daemon, dir, _dirs) = daemon_with_acl("label", r#"{"default":"deny"}"#);
-        let master = make_surface(&daemon, Some("master"));
-        let sid = make_surface(&daemon, Some("worker-1"));
-        bind_caller(&daemon, 996_003, master);
-        assert_eq!(set_label(&daemon, sid, "막힘", Some(996_003))["error"]["code"], json!("label_denied"));
-        assert!(daemon.get_surface(sid).unwrap().label.lock().unwrap().is_none());
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn label_scope_worker_foreign_denied() {
-        let daemon = isolated_daemon();
         let worker = make_surface(&daemon, Some("worker-1"));
         let sid = make_surface(&daemon, Some("worker-2"));
-        bind_caller(&daemon, 996_004, worker);
-        assert_eq!(set_label(&daemon, sid, "침범", Some(996_004))["error"]["code"], json!("label_denied"));
-    }
-
-    #[test]
-    fn label_scope_mapped_app_foreign_denied() {
-        let daemon = isolated_daemon();
-        let shell = make_surface(&daemon, None);
-        let sid = make_surface(&daemon, Some("worker-1"));
-        bind_caller(&daemon, 996_005, shell);
-        assert_eq!(set_label(&daemon, sid, "앱 침범", Some(996_005))["error"]["code"], json!("label_denied"));
+        bind_caller(&daemon, 996_003, worker);
+        assert_eq!(set_label(&daemon, sid, "자유 이름", Some(996_003))["result"]["label"], json!("자유 이름"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

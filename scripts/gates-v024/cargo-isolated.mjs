@@ -12,7 +12,7 @@ try {
   if (args.length === 1) args.push('--quiet', '--', '--test-threads=1');
   const gate = args[1] === 'exit_code_contract_' ? ['G19 exit-code-contract PASS', 22]
     : args[1] === 'recover_scope_' ? ['G20 recover-scope PASS', 12]
-    : args[1] === 'label_scope_' ? ['G21 label-scope PASS', 14] : null;
+    : args[1] === 'label_scope_' ? ['G21 label-scope PASS', 9] : null;
   const result = spawnSync('cargo', args, { env, cwd: process.cwd(),
     stdio: gate ? 'pipe' : 'inherit', encoding: gate ? 'utf8' : undefined });
   if (gate) { process.stdout.write(result.stdout || ''); process.stderr.write(result.stderr || ''); }

@@ -1681,9 +1681,8 @@ async function makePane(sid: number, title: string, socket?: string): Promise<Pa
         const state = paneTitleState.get(key);
         if (state) state.label = label || null;
         await refreshPaneTitles();
-      } catch (e) {
-        toast("health", String(e).includes("다른 창 이름을 못 바꿉니다")
-          ? "이 창에서 실행된 앱은 다른 창 이름을 못 바꿉니다" : "창 이름을 바꾸지 못했습니다", "");
+      } catch {
+        toast("health", "창 이름을 바꾸지 못했습니다", "");
       }
       displayPaneHeading(titleEl, sid, paneTitleState.get(key));
     };

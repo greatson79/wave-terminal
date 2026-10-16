@@ -1483,9 +1483,7 @@ fn run(command: Command) -> i32 {
                 let sid = target_surface(&surface, &None)
                     .map_err(|_| "창 번호를 찾을 수 없습니다. --surface surface:N을 확인하세요".to_string())?;
                 request("surface.set_label", json!({"surface_id": sid, "label": label}))
-                    .map_err(|e| if e.starts_with("label_denied:") {
-                        "이 창에서 실행된 앱은 다른 창 이름을 못 바꿉니다".to_string()
-                    } else if e.starts_with("not_found:") {
+                    .map_err(|e| if e.starts_with("not_found:") {
                         "창을 찾을 수 없습니다".to_string()
                     } else {
                         "창 이름을 바꾸지 못했습니다".to_string()
@@ -7759,7 +7757,7 @@ extern "C" fn scoped_cleanup_handler(sig: libc::c_int) {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn label_scope_rename_denial_returns_nonzero() {
+    fn label_scope_rename_and_restore() {
         use super::*;
         let mut app = <Cli as clap::CommandFactory>::command();
         let help = app.find_subcommand_mut("rename").unwrap().render_long_help().to_string();
@@ -7773,7 +7771,7 @@ mod tests {
             let listener = UnixListener::bind(&path).unwrap();
             let server = std::thread::spawn(move || {
                 for (expected, response) in [
-                    ("\"surface_id\":123", "{\"id\":1,\"ok\":false,\"error\":{\"code\":\"label_denied\",\"message\":\"다른 창 이름 변경 거부\"}}\n"),
+                    ("\"surface_id\":123", "{\"id\":1,\"ok\":true,\"result\":{\"surface_id\":123,\"label\":\"이름\"}}\n"),
                     ("\"surface_id\":456", "{\"id\":1,\"ok\":true,\"result\":{\"surface_id\":456,\"label\":\"복원 이름\"}}\n"),
                 ] {
                     let (mut stream, _) = listener.accept().unwrap();
@@ -7793,7 +7791,7 @@ mod tests {
             else { std::env::remove_var("CYS_SOCKET"); }
             server.join().unwrap();
             let _ = std::fs::remove_file(path);
-            assert_eq!(code, 1);
+            assert_eq!(code, 0);
         }
     }
 

@@ -17,8 +17,9 @@ export function sidebarUsage(samples: UsageSample[], now = Date.now() / 1000) {
       const remaining = Math.max(0, Math.min(100, Math.round(100 - rate.used_pct)));
       const old = rows.get(rate.label);
       const reset = rate.resets_at != null && rate.resets_at <= now;
-      if (!old || old.reset && !reset || old.reset === reset && remaining < old.remaining) rows.set(rate.label, {
-        remaining, updated: sample.rate_updated_at ?? sample.updated_at,
+      const updated = sample.rate_updated_at ?? sample.updated_at;
+      if (!old || old.reset && !reset || old.reset === reset && remaining < old.remaining || old.reset === reset && remaining === old.remaining && updated > old.updated) rows.set(rate.label, {
+        remaining, updated,
         reset,
       });
     }

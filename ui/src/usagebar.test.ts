@@ -21,3 +21,9 @@ test("missing, stale and reset measurements are distinct", () => {
   expect(sidebarUsage([sample(99, "5h", "codex", 1000, 1100), sample(5, "5h", "codex", 1600, 2000)], 1600)[0].rows[0])
     .toMatchObject({ remaining: 95, reset: false });
 });
+
+test("equally constrained samples use the freshest rate update", () => {
+  const older = sample(50, "5h", "claude", 1800);
+  const newer = { ...sample(50, "5h", "claude", 3000), rate_updated_at: 2940 };
+  expect(sidebarUsage([older, newer], 3000)[0].rows[0].age).toBe(1);
+});

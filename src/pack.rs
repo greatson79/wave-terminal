@@ -361,8 +361,8 @@ pub fn content_hash_pub(content: &str) -> String {
 /// ★B2(§2 축B 소유권 매니페스트): 팩 파일의 system|user 소유권 축. **기본값=system**(임베드 진실 —
 /// 해시 불일치 시 강제 갱신), **user 는 화이트리스트만**(사용자 수정 보존). 화이트리스트를 좁게 유지해
 /// '조용한 탈락'(system 인데 user 로 오분류돼 스큐가 동결)을 방지한다.
-///   user(preserve)  = 디렉티브(*_DIRECTIVE.md)·헌법(soul.md)·CLAUDE.md — CEO/사용자 커스텀 대상.
-///   system(update)  = bin/*.py·hooks/*·skills·schemas·templates 등 그 외 전부(cysd 소유·스큐 금지).
+///   user(preserve)  = 디렉티브(*_DIRECTIVE.md)·헌법(soul.md)·CLAUDE.md·agents.json·acl.json·skills/.
+///   system(update)  = bin/*·hooks/*·schemas·templates 등 그 외 전부(cysd 소유·스큐 금지).
 /// P0-4 수리: 과거 `_ =>` catch-all 이 매니페스트 부재·읽기 실패까지 'user 수정'으로 오판해 phoenix(system)를
 /// 영구 동결시켜 배포 스큐를 냈다 — 이 분류가 그 근원을 대체한다(CLAUDE.md.template 은 .template 이라 system).
 pub(crate) fn is_user_owned(rel: &str) -> bool {
@@ -387,7 +387,7 @@ pub(crate) fn is_seed_once(rel: &str) -> bool {
 pub(crate) enum Ownership {
     /// 임베드 진실(기본값) — 불일치 시 강제 치유(P0-4)·비수정 자동 갱신·prune 대상.
     System,
-    /// 사용자 주권(디렉티브·soul·CLAUDE·schedule) — 영구 보존, 임베드 신버전은 `.new` 병치.
+    /// 사용자 주권(디렉티브·soul·CLAUDE·schedule·agents·acl·skills) — 영구 보존, 임베드 신버전은 `.new` 병치.
     User,
     /// 런타임 상태(memory/·round 상태) — 부재 시에만 시드, 존재하면 force 여도 불가침.
     SeedOnce,
@@ -410,6 +410,9 @@ pub(crate) fn ownership(rel: &str) -> Ownership {
         || rel.ends_with("/soul.md")
         || rel == "CLAUDE.md"
         || rel.ends_with("/CLAUDE.md")
+        || rel == "agents.json"
+        || rel == "acl.json"
+        || rel.starts_with("skills/")
         // ★B2-1(W3): schedule.json 은 사용자가 `cys schedule add` 로 편집하는 혼합 파일 — 팩 강제갱신이 덮으면
         // 사용자 잡이 소실(비가역 데이터 손실)된다. user 소유로 보존하고, built-in 잡(phoenix-*)은 데몬 부트 시
         // 코드가 idempotent ensure 한다(cysd schedule::ensure_builtin_jobs). 기본 잡 드리프트(복구 가능) < 사용자 잡 소실.
@@ -489,7 +492,7 @@ pub(crate) fn decide_file_action(
     // ★B2 user-owned 영구 보존 (force 여도) — 읽기 성공 + 내용 상이일 때.
     if exists && is_user_owned(rel) {
         if let Some(d) = disk {
-            if d != embed {
+            if d != embed && !unmodified(d) {
                 // 임베드가 마지막 적용본(매니페스트 해시)에서 전진했으면 신버전 병치(병합 대기).
                 // 매니페스트 부재(구설치본)도 안전측으로 병치해 가시화한다(base 없는 2-way 병합).
                 // 구 Windows 빌드(autocrlf)는 임베드를 CRLF 로 굽고 그 해시를 매니페스트에 남겼다 —
@@ -1677,9 +1680,10 @@ mod tests {
             .unwrap_or_else(|| panic!("팩에 {rel} 부재"));
         let sys_a = "README.md";  // system·비수정 → 갱신 + pristine 미러
         let user_b = "soul.md";   // user-owned·수정 + vendor 전진 → 보존 + .new + pending
-        let sys_c = "acl.json";   // system·수정 → 치유 + .user + pending
+        let sys_c = "hooks/appbuild-gate.sh"; // system·수정 → 치유 + .user + pending
         std::fs::create_dir_all(&td).unwrap();
         for (rel, stale) in [(sys_a, "OLD-INSTALLED"), (user_b, "USER-SOUL"), (sys_c, "SYS-DRIFT")] {
+            std::fs::create_dir_all(td.join(rel).parent().unwrap()).unwrap();
             std::fs::write(td.join(rel), stale).unwrap();
         }
         // sys_a=비수정 증명(설치-당시 해시), user_b=마지막 적용본이 embed 와 다름(vendor 전진) 증명.
@@ -1697,7 +1701,7 @@ mod tests {
         assert_eq!(read("soul.md.new"), get(user_b), ".new = 임베드 신버전");
         // ② system 수정본: 치유(임베드) + 사용자본 .user 보존 + 원장 healed.
         assert_eq!(read(sys_c), get(sys_c), "system 치유(P0-4 불변)");
-        assert_eq!(read("acl.json.user"), "SYS-DRIFT", "치유 전 사용자본 보존(파괴 0)");
+        assert_eq!(read("hooks/appbuild-gate.sh.user"), "SYS-DRIFT", "치유 전 사용자본 보존(파괴 0)");
         let pending = load_merge_pending(&td);
         assert_eq!(pending.get(user_b).and_then(|e| e["kind"].as_str()), Some("new-pending"));
         assert_eq!(pending.get(sys_c).and_then(|e| e["kind"].as_str()), Some("healed"));
@@ -1728,7 +1732,8 @@ mod tests {
         std::fs::create_dir_all(&td).unwrap();
         std::fs::write(td.join("README.md"), "OLD-INSTALLED").unwrap();
         std::fs::write(td.join("soul.md"), "USER-SOUL").unwrap();
-        std::fs::write(td.join("acl.json"), "SYS-DRIFT").unwrap();
+        std::fs::create_dir_all(td.join("hooks")).unwrap();
+        std::fs::write(td.join("hooks/appbuild-gate.sh"), "SYS-DRIFT").unwrap();
         let manifest = serde_json::json!({
             "README.md": content_hash("OLD-INSTALLED"),
             "soul.md": content_hash("OLD-SOUL-BASE"),
@@ -1740,13 +1745,13 @@ mod tests {
         assert!(plan.blocked.is_none());
         assert!(plan.update.iter().any(|r| r == "README.md"), "비수정 → update");
         assert!(plan.merge_new.iter().any(|r| r == "soul.md"), "user-owned+전진 → merge_new");
-        assert!(plan.heal.iter().any(|r| r == "acl.json"), "system 수정 → heal");
+        assert!(plan.heal.iter().any(|r| r == "hooks/appbuild-gate.sh"), "system 수정 → heal");
         // 실제 install 이 플랜과 같은 행동을 하는지 대조.
         install(false).expect("install 실패");
         let read = |rel: &str| std::fs::read_to_string(td.join(rel)).unwrap();
         assert_eq!(read("soul.md"), "USER-SOUL");
         assert!(td.join("soul.md.new").exists());
-        assert!(td.join("acl.json.user").exists());
+        assert!(td.join("hooks/appbuild-gate.sh.user").exists());
 
         let _ = std::fs::remove_dir_all(&td);
     }
@@ -1761,7 +1766,7 @@ mod tests {
             .unwrap_or_else(|| panic!("팩에 {rel} 부재"));
         let sys_a = "README.md";       // system·비수정(manifest 일치) → 갱신
         let user_b = "soul.md";        // user·수정 → 보존
-        let sys_c = "acl.json";        // system·manifest 부재·상이 → 강제 갱신(B2/P0-4)
+        let sys_c = "hooks/appbuild-gate.sh"; // system·manifest 부재·상이 → 강제 갱신(B2/P0-4)
         let user_d = "directives/MASTER_DIRECTIVE.md"; // user·manifest 부재·상이 → 보존
         let (sys_a_c, user_b_c, sys_c_c, user_d_c) =
             (get(sys_a), get(user_b), get(sys_c), get(user_d));
@@ -1827,14 +1832,66 @@ mod tests {
     #[test]
     fn is_user_owned_classification() {
         for u in ["soul.md", "directives/MASTER_DIRECTIVE.md", "CLAUDE.md",
-                  "sub/dir/CSO_DIRECTIVE.md", "some/soul.md", "schedule.json"] {
+                  "sub/dir/CSO_DIRECTIVE.md", "some/soul.md", "schedule.json",
+                  "agents.json", "acl.json", "skills/x/SKILL.md", "skills/x/scripts/run.py"] {
             assert!(is_user_owned(u), "user 여야: {u}");
         }
         for s in ["bin/javis_phoenix.py", "hooks/session_start.sh", "README.md",
-                  "acl.json", "CLAUDE.md.template", "skills/x/SKILL.md",
-                  "directives/CEO_TEMPLATE.md", "sub/schedule.json"] {
+                  "sub/agents.json", "sub/acl.json", "sub/skills/x/SKILL.md",
+                  "CLAUDE.md.template", "directives/CEO_TEMPLATE.md", "sub/schedule.json"] {
             assert!(!is_user_owned(s), "system 여야: {s}");
         }
+    }
+
+    #[test]
+    fn pack_owner_modified_student_files_are_preserved_and_system_files_backed_up() {
+        let td = std::env::temp_dir().join(format!("cys-pack-owner-modified-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&td);
+        let _dirs = override_dirs_for_thread(&td, td.join("cysclaude"));
+        let get = |rel: &str| PACK_ALL.iter().find(|(r, _)| *r == rel).unwrap().1;
+        let student = ["agents.json", "acl.json", "skills/korean-humanizer/SKILL.md"];
+        let system = ["hooks/appbuild-gate.sh", "bin/javis_route.py"];
+        let mut manifest = serde_json::Map::new();
+        for rel in student.into_iter().chain(system) {
+            let path = td.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, format!("USER-{rel}")).unwrap();
+            manifest.insert(rel.into(), serde_json::json!(content_hash("OLD-VENDOR")));
+        }
+        std::fs::write(td.join(INSTALL_MANIFEST), serde_json::Value::Object(manifest).to_string()).unwrap();
+        install(false).unwrap();
+        for rel in student {
+            assert_eq!(std::fs::read_to_string(td.join(rel)).unwrap(), format!("USER-{rel}"));
+            assert_eq!(std::fs::read_to_string(td.join(format!("{rel}.new"))).unwrap(), get(rel));
+        }
+        for rel in system {
+            assert_eq!(std::fs::read_to_string(td.join(rel)).unwrap(), get(rel));
+            assert_eq!(std::fs::read_to_string(td.join(format!("{rel}.user"))).unwrap(), format!("USER-{rel}"));
+        }
+        let _ = std::fs::remove_dir_all(&td);
+    }
+
+    #[test]
+    fn pack_owner_unmodified_student_files_update_without_new_sides() {
+        let td = std::env::temp_dir().join(format!("cys-pack-owner-unmodified-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&td);
+        let _dirs = override_dirs_for_thread(&td, td.join("cysclaude"));
+        let student = ["agents.json", "acl.json", "skills/korean-humanizer/SKILL.md"];
+        let mut manifest = serde_json::Map::new();
+        for rel in student {
+            let path = td.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "OLD-VENDOR").unwrap();
+            manifest.insert(rel.into(), serde_json::json!(content_hash("OLD-VENDOR")));
+        }
+        std::fs::write(td.join(INSTALL_MANIFEST), serde_json::Value::Object(manifest).to_string()).unwrap();
+        install(false).unwrap();
+        for rel in student {
+            let embed = PACK_ALL.iter().find(|(r, _)| *r == rel).unwrap().1;
+            assert_eq!(std::fs::read_to_string(td.join(rel)).unwrap(), embed);
+            assert!(!td.join(format!("{rel}.new")).exists());
+        }
+        let _ = std::fs::remove_dir_all(&td);
     }
 
     #[test]

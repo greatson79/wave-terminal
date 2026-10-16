@@ -54,6 +54,22 @@ enum Command {
     },
     /// List surfaces
     List,
+    /// 창에 표시할 이름을 바꿉니다. 이름을 비우려면 --clear를 쓰세요.
+    #[command(disable_help_flag = true, help_template = "사용법: cys rename [--surface 창번호] [--clear] [이름]\n\n창에 표시할 이름을 바꿉니다. 이름을 비우려면 --clear를 쓰세요.\n\n이름: 새 창 이름\n--surface 창번호: 바꿀 창 번호. 생략하면 현재 창입니다\n--clear: 창 이름을 지웁니다\n--socket 경로: 연결할 데몬 소켓 경로\n--help: 도움말을 봅니다\n")]
+    Rename {
+        /// 도움말을 봅니다.
+        #[arg(short = 'h', long = "help", action = clap::ArgAction::Help)]
+        help: bool,
+        /// 바꿀 창 번호. 생략하면 현재 창입니다.
+        #[arg(long, value_name = "창번호")]
+        surface: Option<String>,
+        /// 창 이름을 지웁니다.
+        #[arg(long)]
+        clear: bool,
+        /// 새 창 이름.
+        #[arg(value_name = "이름")]
+        name: Option<String>,
+    },
     /// Inject text into a surface's stdin (no trailing newline; follow with send-key Return)
     Send {
         #[arg(long)]
@@ -869,7 +885,14 @@ fn main() {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
-    let cli = Cli::parse();
+    let cli = Cli::try_parse().unwrap_or_else(|e| {
+        if e.kind() == clap::error::ErrorKind::DisplayHelp { e.exit(); }
+        if std::env::args_os().any(|arg| arg == "rename") {
+            eprintln!("cys rename 입력이 올바르지 않습니다. 사용법: cys rename [--surface 창번호] [--clear] [이름]");
+            std::process::exit(2);
+        }
+        e.exit();
+    });
     if let Some(s) = &cli.socket {
         std::env::set_var(cys::ENV_SOCKET, s);
     }
@@ -1441,16 +1464,40 @@ fn run(command: Command) -> i32 {
         Command::List => request("surface.list", json!({})).map(|r| {
             for s in r["surfaces"].as_array().cloned().unwrap_or_default() {
                 println!(
-                    "{}\trole={}\tpid={}\texited={}\t{}\t{}",
+                    "{}\trole={}\tpid={}\texited={}\tlabel={}\t{}\t{}",
                     s["surface_ref"].as_str().unwrap_or("?"),
                     s["role"].as_str().unwrap_or("-"),
                     s["pid"],
                     s["exited"],
+                    s["label"].as_str().unwrap_or(""),
                     s["title"].as_str().unwrap_or(""),
                     s["cwd"].as_str().unwrap_or(""),
                 );
             }
         }),
+
+        Command::Rename { help: _, surface, clear, name } => {
+            let result = (|| -> Result<(), String> {
+                if clear && name.is_some() { return Err("이름과 --clear를 함께 쓸 수 없습니다".into()); }
+                let label = if clear { "" } else { name.as_deref().ok_or("이름을 입력하거나 --clear를 쓰세요")? };
+                let sid = target_surface(&surface, &None)
+                    .map_err(|_| "창 번호를 찾을 수 없습니다. --surface surface:N을 확인하세요".to_string())?;
+                request("surface.set_label", json!({"surface_id": sid, "label": label}))
+                    .map_err(|e| if e.starts_with("label_denied:") {
+                        "이 창에서 실행된 앱은 다른 창 이름을 못 바꿉니다".to_string()
+                    } else if e.starts_with("not_found:") {
+                        "창을 찾을 수 없습니다".to_string()
+                    } else {
+                        "창 이름을 바꾸지 못했습니다".to_string()
+                    })?;
+                println!("창 이름을 바꿨습니다: {}", surface_ref(sid));
+                Ok(())
+            })();
+            return match result {
+                Ok(()) => 0,
+                Err(e) => { eprintln!("{e}"); 1 }
+            };
+        }
 
         Command::Send { surface, to, queued, clear_first, text } => {
             resolve_targets(&surface, &to).and_then(|sids| {
@@ -5806,6 +5853,11 @@ fn run_node_recover(surface: Option<String>, role: Option<String>) -> i32 {
 }
 
 /// T2-6 조직 복원: 토폴로지 스냅샷 기준으로 죽은 역할 일괄 재기동 (작업 재개는 master 판단)
+fn restore_surface_label(sid: u64, entry: &Value) -> Result<(), String> {
+    let Some(label) = entry["label"].as_str() else { return Ok(()); };
+    request("surface.set_label", json!({"surface_id": sid, "label": label})).map(|_| ())
+}
+
 fn run_restore(cwd: Option<String>, include_master: bool, no_resume: bool) -> i32 {
     let result = (|| -> Result<(usize, usize), String> {
         let topo = request("system.topology", json!({}))?;
@@ -5866,8 +5918,13 @@ fn run_restore(cwd: Option<String>, include_master: bool, no_resume: bool) -> i3
                 println!("· {role}: 다른 호출이 기동 중인 좌석을 재사용 — 완료를 기다리지 못함(실패로 세지 않음)");
             } else if rc == 0 {
                 ok += 1;
-                if let Ok(r) = request("system.resolve_role", json!({"role": role})) {
-                    if let Some(sid) = r["surface_id"].as_u64() {
+                let restored_sid = request("system.resolve_role", json!({"role": role}))
+                    .ok().and_then(|r| r["surface_id"].as_u64());
+                if let Some(sid) = restored_sid {
+                        if let Err(e) = restore_surface_label(sid, &entry) {
+                            eprintln!("· {role}: 창 이름 복원 실패: {e}");
+                            fail += 1;
+                        }
                         // ⑪ pack-reinject 마커 seed — session_id를 resume 핀으로 복원하는 것과
                         // 동일 지점. 영속된 마커를 재생성 surface에 reinject.mark(단일 write path)로
                         // 다시 심어, 복원 후에도 동일 팩 버전 중복 재주입을 막는다. 부재(구 topology)면 skip.
@@ -5889,7 +5946,9 @@ fn run_restore(cwd: Option<String>, include_master: bool, no_resume: bool) -> i3
                             "[RESTORE] 조직 복원 절차다. _round/SESSION_STATE.md와 자기 TODO를 읽고 상태를 복원하라. ★작업 재개는 하지 말고 master의 지시를 기다려라."
                         };
                         let _ = inject_text(sid, directive);
-                    }
+                } else if entry["label"].is_string() {
+                    eprintln!("· {role}: 새 창을 찾지 못해 이름을 복원하지 못했습니다");
+                    fail += 1;
                 }
             } else {
                 fail += 1;
@@ -7699,6 +7758,45 @@ extern "C" fn scoped_cleanup_handler(sig: libc::c_int) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn label_scope_rename_denial_returns_nonzero() {
+        use super::*;
+        let mut app = <Cli as clap::CommandFactory>::command();
+        let help = app.find_subcommand_mut("rename").unwrap().render_long_help().to_string();
+        assert!(help.contains("사용법:") && help.contains("이름을 비우려면 --clear"));
+        assert!(!help.contains("Arguments:") && !help.contains("Options:") && !help.contains("Socket path"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::net::UnixListener;
+            let path = std::env::temp_dir().join(format!("cys-label-{}-{}.sock", std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            let listener = UnixListener::bind(&path).unwrap();
+            let server = std::thread::spawn(move || {
+                for (expected, response) in [
+                    ("\"surface_id\":123", "{\"id\":1,\"ok\":false,\"error\":{\"code\":\"label_denied\",\"message\":\"다른 창 이름 변경 거부\"}}\n"),
+                    ("\"surface_id\":456", "{\"id\":1,\"ok\":true,\"result\":{\"surface_id\":456,\"label\":\"복원 이름\"}}\n"),
+                ] {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let mut line = String::new();
+                    BufReader::new(stream.try_clone().unwrap()).read_line(&mut line).unwrap();
+                    assert!(line.contains("surface.set_label") && line.contains(expected));
+                    if expected.contains("456") { assert!(line.contains("복원 이름")); }
+                    stream.write_all(response.as_bytes()).unwrap();
+                }
+            });
+            let old = std::env::var("CYS_SOCKET").ok();
+            std::env::set_var("CYS_SOCKET", &path);
+            let code = run(Command::Rename { help: false, surface: Some("surface:123".into()),
+                clear: false, name: Some("이름".into()) });
+            assert!(restore_surface_label(456, &json!({"label":"복원 이름"})).is_ok());
+            if let Some(value) = old { std::env::set_var("CYS_SOCKET", value); }
+            else { std::env::remove_var("CYS_SOCKET"); }
+            server.join().unwrap();
+            let _ = std::fs::remove_file(path);
+            assert_eq!(code, 1);
+        }
+    }
+
     #[test]
     fn user_id_from_env_keeps_non_ascii_and_falls_back() {
         use super::user_id_from_env;

@@ -1212,6 +1212,12 @@ async fn rename_surface(socket: Option<String>, surface_id: u64, title: String) 
 }
 
 #[tauri::command]
+async fn set_surface_label(socket: Option<String>, surface_id: u64, label: String) -> Result<(), String> {
+    rpc_on(&resolve_socket(&socket), "surface.set_label",
+        json!({"surface_id": surface_id, "label": label})).await.map(|_| ())
+}
+
+#[tauri::command]
 async fn resize_surface(
     socket: Option<String>,
     surface_id: u64,
@@ -2525,6 +2531,7 @@ fn main() {
             log_ime,
             ime_debug_enabled,
             rename_surface,
+            set_surface_label,
             resize_surface,
             close_surface,
             attach_surface,

@@ -933,6 +933,7 @@ pub fn persist_topology(daemon: &Arc<Daemon>) {
                 json!({"role": role, "agent": meta.as_ref().map(|(n, _)| n.clone()),
                        "agent_bin": meta.map(|(_, b)| b),
                        "cwd": s.cwd, "title": s.title.lock().unwrap().clone(),
+                       "label": s.label.lock().unwrap().clone(),
                        "session_id": s.agent_session_id.lock().unwrap().clone(),
                        // (W1) 원 계정 config_dir 영속 — restore가 이 값을 launch 문자열에 인라인해
                        // 데몬 env 변동에도 원 대화(.jsonl)로 정확히 재개한다. 구 topology(필드 없음)는

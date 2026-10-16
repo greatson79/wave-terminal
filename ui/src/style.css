@@ -247,6 +247,7 @@ body.ws-reordering { cursor: grabbing; -webkit-user-select: none; user-select: n
   white-space: nowrap;
 }
 .pane .pane-title-text { overflow: hidden; text-overflow: ellipsis; }
+.pane .pane-title-text[contenteditable="true"] { min-width: 8em; outline: 1px solid var(--accent); }
 .pane .pane-title-text .warn { color: #d29922; }
 .pane .pane-title-text .crit { color: #f85149; font-weight: 600; }
 /* 역할 신호 점(제목 앞): Control Center cc-dot의 깜박임(cc-blink) 재사용 — 역할색은 JS(setRoleDot)가 채운다 */

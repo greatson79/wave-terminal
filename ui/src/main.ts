@@ -14,7 +14,7 @@ import { ccEffectiveZoom } from "./ccscale";
 import { clampWsbarWidth, clampWsbarFont, WSBAR_W_DEFAULT, WSBAR_FONT_STEP } from "./wsbar";
 import { composeFontFamily, FONT_CHOICES, ROLE_COLOR, roleDotColor } from "./appearance";
 import { safeHelpText } from "./help";
-import { paneHeading } from "./paneheading";
+import { paneHeading, splitPaneHeading } from "./paneheading";
 import { sidebarUsage } from "./usagebar";
 import { inputSource } from "./inputsource";
 import { sendPreparedHelp } from "./helpflow";
@@ -143,15 +143,16 @@ const LAYOUT_KEY = "cys-layout-v2";
 // pane 식별 복합키 — 서로 다른 데몬이 같은 surface_id를 독립 발급하므로 (socket, sid)로 구분한다.
 const paneKey = (sid: number, socket?: string): string => `${socket ?? ""}#${sid}`;
 function displayPaneHeading(el: HTMLElement, sid: number, state?: PaneTitleState) {
-  const heading = paneHeading({ sid, role: state?.role, model: state?.model,
+  if (el.isContentEditable) return;
+  const heading = paneHeading({ sid, role: state?.role, label: state?.label, model: state?.model,
     ctx: state?.usage?.ctx_pct, approximate: !!state?.usage && state.usage.source !== "statusline", tail: state?.reported });
-  const [prefix, context] = heading.split(" · CTX ");
+  const [prefix, context] = splitPaneHeading(heading);
   const ctx = document.createElement("span");
   ctx.textContent = `CTX ${context.split(" · ")[0]}`;
   const pct = state?.usage?.ctx_pct;
   if (pct != null) ctx.className = sevClass(pct, 75, 85);
   el.replaceChildren(prefix + " · ", ctx, context.includes(" · ") ? ` · ${context.split(" · ").slice(1).join(" · ")}` : "", state?.exited ? " [종료]" : "");
-  el.title = pct == null ? `${heading}\n첫 응답 뒤 표시` : state?.usage?.model ? heading : `${heading}\n시작 시 모델`;
+  el.title = "두 번 눌러 이름 바꾸기";
 }
 
 interface PaneRuntime {
@@ -1396,7 +1397,7 @@ let groups: GroupMeta[] = []; // 06: 그룹 메타 배열(진실원=localStorage
 let groupCounter = 1; // 06: 그룹 id 발급(ws의 wsCounter와 분리)
 let focusedSid: number | null = null;
 const panes = new Map<string, PaneRuntime>(); // 키 = paneKey(sid, socket)
-interface PaneTitleState { reported: string | null; exited: boolean; role?: string | null; model?: string | null; usage?: ObservedUsage | null }
+interface PaneTitleState { reported: string | null; exited: boolean; role?: string | null; label?: string | null; model?: string | null; usage?: ObservedUsage | null }
 const paneTitleState = new Map<string, PaneTitleState>();
 // 부서 데몬 socket_slug(F3 백엔드 단일진실) → socket 경로. launch_dept_daemon 반환·daemon-event로 채운다.
 const socketForSlug = new Map<string, string>();
@@ -1568,6 +1569,7 @@ async function refreshPaneTitles() {
           surface_id: number;
           title: string;
           role: string | null;
+          label?: string | null;
           model?: string | null;
           live_cwd: string | null;
           exited: boolean;
@@ -1581,7 +1583,7 @@ async function refreshPaneTitles() {
         renderUsage(rt.usageEl, s.exited ? null : s.usage); // 종료 pane은 배지 제거 (혼동 방지)
         setRoleDot(rt.roleEl, s.exited ? null : s.role); // 역할 점도 동일 주기 갱신
         const state = { reported: tasks.get(s.surface_id) ?? null, exited: s.exited,
-          role: s.role, model: s.usage?.model ?? s.model, usage: s.usage };
+          role: s.role, label: s.label, model: s.usage?.model ?? s.model, usage: s.usage };
         paneTitleState.set(paneKey(s.surface_id, sk), state);
         displayPaneHeading(rt.titleEl, s.surface_id, state);
       }
@@ -1655,6 +1657,44 @@ async function makePane(sid: number, title: string, socket?: string): Promise<Pa
   const titleEl = document.createElement("span");
   titleEl.className = "pane-title-text";
   displayPaneHeading(titleEl, sid);
+  const startPaneRename = () => {
+    if (titleEl.isContentEditable) return;
+    const key = paneKey(sid, socket);
+    titleEl.textContent = paneTitleState.get(key)?.label ?? "";
+    titleEl.contentEditable = "true";
+    titleEl.focus();
+    window.getSelection()?.selectAllChildren(titleEl);
+    let cancelled = false;
+    const onKey = (ke: KeyboardEvent) => {
+      ke.stopPropagation();
+      if (ke.isComposing || ke.keyCode === 229) return;
+      if (ke.key === "Escape") { cancelled = true; ke.preventDefault(); titleEl.blur(); }
+      else if (ke.key === "Enter") { ke.preventDefault(); titleEl.blur(); }
+    };
+    const finish = async () => {
+      titleEl.removeEventListener("keydown", onKey);
+      titleEl.contentEditable = "false";
+      if (cancelled) { displayPaneHeading(titleEl, sid, paneTitleState.get(key)); return; }
+      try {
+        const label = titleEl.textContent ?? "";
+        await invoke("set_surface_label", { socket, surfaceId: sid, label });
+        const state = paneTitleState.get(key);
+        if (state) state.label = label || null;
+        await refreshPaneTitles();
+      } catch (e) {
+        toast("health", String(e).includes("다른 창 이름을 못 바꿉니다")
+          ? "이 창에서 실행된 앱은 다른 창 이름을 못 바꿉니다" : "창 이름을 바꾸지 못했습니다", "");
+      }
+      displayPaneHeading(titleEl, sid, paneTitleState.get(key));
+    };
+    titleEl.addEventListener("keydown", onKey);
+    titleEl.addEventListener("blur", finish, { once: true });
+  };
+  titleEl.addEventListener("dblclick", (e) => { e.stopPropagation(); startPaneRename(); });
+  header.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    showCtxMenu(e.clientX, e.clientY, [{ label: "이름 바꾸기", action: startPaneRename }]);
+  });
   const usageEl = document.createElement("span");
   usageEl.className = "pane-usage";
   // 배지 위 mousedown이 pane 드래그로 번지지 않게 — tooltip(hover) 확인 중 오발 방지

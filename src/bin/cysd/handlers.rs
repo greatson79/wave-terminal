@@ -46,6 +46,18 @@ fn param_str(params: &Value, key: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+fn normalize_surface_label(input: &str) -> Option<String> {
+    let clean: String = input.chars().filter(|c| !c.is_control())
+        .map(|c| if c == '·' { '-' } else { c }).collect();
+    let clean = clean.trim();
+    if clean.is_empty() { return None; }
+    if clean.chars().count() > 20 {
+        Some(format!("{}…", clean.chars().take(19).collect::<String>()))
+    } else {
+        Some(clean.to_string())
+    }
+}
+
 fn param_u64(params: &Value, key: &str) -> Option<u64> {
     params.get(key).and_then(|v| {
         v.as_u64()
@@ -908,6 +920,7 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                         "surface_id": s.id,
                         "surface_ref": surface_ref(s.id),
                         "title": s.title.lock().unwrap().clone(),
+                        "label": s.label.lock().unwrap().clone(),
                         "role": s.role.lock().unwrap().clone(),
                         "cmd": s.cmd,
                         "cwd": s.cwd,
@@ -1376,6 +1389,33 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
             };
             *surface.title.lock().unwrap() = title.clone();
             Reply::Single(ok_response(&id, json!({"surface_id": sid, "title": title})))
+        }
+
+        "surface.set_label" => {
+            let Some(sid) = resolve_surface_id(&params) else {
+                return Reply::Single(err_response(&id, "invalid_params", "창 번호가 필요합니다"));
+            };
+            let Some(input) = params.get("label").and_then(Value::as_str) else {
+                return Reply::Single(err_response(&id, "invalid_params", "이름 글자가 필요합니다"));
+            };
+            let Some(surface) = daemon.get_surface(sid) else {
+                return Reply::Single(err_response(&id, "not_found", "창을 찾을 수 없습니다"));
+            };
+            let caller_sid = caller_pid.and_then(|pid| resolve_caller_surface(daemon, pid));
+            if caller_sid.is_some_and(|cs| cs != sid)
+                && !(authoritative_caller_ok(daemon, caller_sid, caller_pid)
+                    && check_send_acl(daemon, caller_pid, &surface).is_ok()) {
+                daemon.bus.publish("surface.label_denied", "surface", Some(sid),
+                    json!({"caller_surface": caller_sid, "caller_pid": caller_pid}));
+                return Reply::Single(err_response(&id, "label_denied",
+                    "이 창에서 실행된 앱은 다른 창 이름을 못 바꿉니다"));
+            }
+            let label = normalize_surface_label(input);
+            *surface.label.lock().unwrap() = label.clone();
+            crate::governance::persist_topology(daemon);
+            daemon.bus.publish("surface.label_changed", "surface", Some(sid),
+                json!({"label": label}));
+            Reply::Single(ok_response(&id, json!({"surface_id": sid, "label": label})))
         }
 
         "surface.close" => {
@@ -2714,6 +2754,7 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                         "surface_ref": surface_ref(s.id),
                         "role": s.role.lock().unwrap().clone(),
                         "title": s.title.lock().unwrap().clone(),
+                        "label": s.label.lock().unwrap().clone(),
                         "cwd": s.cwd.clone(),
                         "live_cwd": live_cwd,
                         "exited": s.exited.load(Ordering::Relaxed),
@@ -4200,6 +4241,130 @@ mod tests {
             .lock()
             .unwrap()
             .insert(pid, (Some(sid), crate::state::now_epoch(), None));
+    }
+
+    fn set_label(daemon: &Arc<Daemon>, sid: u64, label: &str, pid: Option<u32>) -> Value {
+        let req = Request { id: json!(1), method: "surface.set_label".into(),
+            params: json!({"surface_id": sid, "label": label}) };
+        let Reply::Single(resp) = dispatch(daemon, req, pid) else { panic!("single reply") };
+        resp
+    }
+
+    #[test]
+    fn label_scope_self_allowed() {
+        let daemon = isolated_daemon();
+        let sid = make_surface(&daemon, Some("worker-1"));
+        bind_caller(&daemon, 996_001, sid);
+        assert_eq!(set_label(&daemon, sid, "내 창", Some(996_001))["result"]["label"], json!("내 창"));
+    }
+
+    #[test]
+    fn label_scope_outside_allowed() {
+        let daemon = isolated_daemon();
+        let sid = make_surface(&daemon, Some("worker-1"));
+        assert_eq!(set_label(&daemon, sid, "사람 이름", None)["ok"], json!(true));
+    }
+
+    #[test]
+    fn label_scope_authoritative_acl_allowed() {
+        let daemon = isolated_daemon();
+        let master = make_surface(&daemon, Some("master"));
+        let sid = make_surface(&daemon, Some("worker-1"));
+        bind_caller(&daemon, 996_002, master);
+        assert_eq!(set_label(&daemon, sid, "지시 이름", Some(996_002))["ok"], json!(true));
+    }
+
+    #[test]
+    fn label_scope_authoritative_acl_denied() {
+        let _lock = ACL_ENV_LOCK.lock().unwrap();
+        let (daemon, dir, _dirs) = daemon_with_acl("label", r#"{"default":"deny"}"#);
+        let master = make_surface(&daemon, Some("master"));
+        let sid = make_surface(&daemon, Some("worker-1"));
+        bind_caller(&daemon, 996_003, master);
+        assert_eq!(set_label(&daemon, sid, "막힘", Some(996_003))["error"]["code"], json!("label_denied"));
+        assert!(daemon.get_surface(sid).unwrap().label.lock().unwrap().is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn label_scope_worker_foreign_denied() {
+        let daemon = isolated_daemon();
+        let worker = make_surface(&daemon, Some("worker-1"));
+        let sid = make_surface(&daemon, Some("worker-2"));
+        bind_caller(&daemon, 996_004, worker);
+        assert_eq!(set_label(&daemon, sid, "침범", Some(996_004))["error"]["code"], json!("label_denied"));
+    }
+
+    #[test]
+    fn label_scope_mapped_app_foreign_denied() {
+        let daemon = isolated_daemon();
+        let shell = make_surface(&daemon, None);
+        let sid = make_surface(&daemon, Some("worker-1"));
+        bind_caller(&daemon, 996_005, shell);
+        assert_eq!(set_label(&daemon, sid, "앱 침범", Some(996_005))["error"]["code"], json!("label_denied"));
+    }
+
+    #[test]
+    fn label_scope_empty_clears() {
+        let daemon = isolated_daemon();
+        let sid = make_surface(&daemon, Some("worker-1"));
+        assert_eq!(set_label(&daemon, sid, "이름", None)["result"]["label"], json!("이름"));
+        assert_eq!(set_label(&daemon, sid, "", None)["result"]["label"], Value::Null);
+    }
+
+    #[test]
+    fn label_scope_whitespace_trims() {
+        assert_eq!(normalize_surface_label("  이름  ").as_deref(), Some("이름"));
+        assert_eq!(normalize_surface_label(" \t "), None);
+    }
+
+    #[test]
+    fn label_scope_korean_char_limit() {
+        let raw = "가".repeat(21);
+        assert_eq!(normalize_surface_label(&raw), Some(format!("{}…", "가".repeat(19))));
+    }
+
+    #[test]
+    fn label_scope_control_chars_removed() {
+        assert_eq!(normalize_surface_label("A\nB\u{0007}C").as_deref(), Some("ABC"));
+    }
+
+    #[test]
+    fn label_scope_separator_replaced() {
+        assert_eq!(normalize_surface_label("계획·검토").as_deref(), Some("계획-검토"));
+    }
+
+    #[test]
+    fn label_scope_topology_restore_roundtrip() {
+        let daemon = isolated_daemon();
+        let sid = make_surface(&daemon, Some("worker-1"));
+        assert_eq!(set_label(&daemon, sid, "복원 이름", None)["ok"], json!(true));
+        let saved = crate::governance::load_topology(&daemon);
+        let entry = saved.as_array().unwrap().iter()
+            .find(|e| e["role"] == "worker-1").unwrap();
+        assert_eq!(entry["label"], json!("복원 이름"));
+        let restored = make_surface(&daemon, Some("worker-2"));
+        assert_eq!(set_label(&daemon, restored, entry["label"].as_str().unwrap(), None)["ok"], json!(true));
+        assert_eq!(*daemon.get_surface(restored).unwrap().label.lock().unwrap(), Some("복원 이름".into()));
+    }
+
+    #[test]
+    fn label_scope_routing_by_role_and_surface_unchanged() {
+        let daemon = isolated_daemon();
+        let sid = make_surface(&daemon, Some("worker-1"));
+        assert_eq!(set_label(&daemon, sid, "보이는 이름", None)["ok"], json!(true));
+        let resolve = Request { id: json!(1), method: "system.resolve_role".into(),
+            params: json!({"role":"worker-1"}) };
+        let Reply::Single(role) = dispatch(&daemon, resolve, None) else { panic!("single reply") };
+        assert_eq!(role["result"]["surface_id"], json!(sid));
+        let by_role = Request { id: json!(2), method: "surface.send_text".into(),
+            params: json!({"surface_id": role["result"]["surface_id"], "text":"역할 주소 도착"}) };
+        let Reply::Single(sent_by_role) = dispatch(&daemon, by_role, None) else { panic!("single reply") };
+        assert_eq!(sent_by_role["ok"], json!(true), "{sent_by_role}");
+        let send = Request { id: json!(3), method: "surface.send_text".into(),
+            params: json!({"surface_id": format!("s{sid}"), "text":"도착 확인"}) };
+        let Reply::Single(sent) = dispatch(&daemon, send, None) else { panic!("single reply") };
+        assert_eq!(sent["ok"], json!(true), "{sent}");
     }
 
     #[test]

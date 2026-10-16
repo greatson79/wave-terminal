@@ -7,6 +7,8 @@ use base64::Engine;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Mutex;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_updater::UpdaterExt;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
@@ -1595,6 +1597,14 @@ fn inject_runtime_path(cmd: &mut std::process::Command) {
     }
 }
 
+#[cfg(target_os = "macos")]
+static KICKSTART_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(any(test, target_os = "macos"))]
+fn should_kickstart(attempt: usize) -> bool { (1..=3).contains(&attempt) }
+
+const DAEMON_CONNECTION_ERROR: &str = "데몬에 연결하지 못했습니다 · 도움 요청으로 보내 주세요";
+
 /// Ensure aitermd is running: try to connect, otherwise spawn the bundled/sibling binary.
 async fn ensure_daemon() -> Result<(), String> {
     if connect().await.is_ok() {
@@ -1602,7 +1612,10 @@ async fn ensure_daemon() -> Result<(), String> {
     }
     #[cfg(target_os = "macos")]
     if cys::launchd::is_loaded() {
-        if cys::launchd::kickstart() && wait_for_connect(150).await {
+        // ponytail: 반복 연결 실패가 launchd를 계속 재시작하지 않도록 앱 실행당 세 번만 kickstart한다.
+        let attempt = KICKSTART_ATTEMPTS.fetch_add(1, Ordering::Relaxed) + 1;
+        let ready_to_wait = !should_kickstart(attempt) || cys::launchd::kickstart();
+        if ready_to_wait && wait_for_connect(150).await {
             return Ok(());
         }
         return Err("launchd-owned cysd did not come up".into());
@@ -2633,10 +2646,8 @@ fn main() {
                     }
                 }
                 if let Err(e) = result {
-                    let _ = handle.emit(
-                        "daemon-error",
-                        format!("{e} — 데몬을 시작하지 못했습니다. 시스템 설정 → 일반 → 로그인 항목에서 cys 백그라운드 항목을 허용한 뒤 앱을 다시 여세요."),
-                    );
+                    eprintln!("[cys-app] daemon connection failed: {e}");
+                    let _ = handle.emit("daemon-error", DAEMON_CONNECTION_ERROR);
                     return;
                 }
                 let _ = handle.emit("daemon-ready", ());
@@ -2674,6 +2685,20 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn kickstart_stops_after_three_attempts() {
+        assert!(!super::should_kickstart(0));
+        for attempt in 1..=3 { assert!(super::should_kickstart(attempt)); }
+        assert!(!super::should_kickstart(4));
+        assert!(!super::should_kickstart(usize::MAX));
+    }
+
+    #[test]
+    fn daemon_connection_error_is_one_korean_line() {
+        assert_eq!(super::DAEMON_CONNECTION_ERROR, "데몬에 연결하지 못했습니다 · 도움 요청으로 보내 주세요");
+        assert!(!super::DAEMON_CONNECTION_ERROR.contains('\n'));
+    }
+
     #[test]
     fn help_test_url_rejects_userinfo_external_host() {
         assert_eq!(super::help_test_url("http://127.0.0.1:80@external.example/"), None);

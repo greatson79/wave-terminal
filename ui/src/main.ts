@@ -4151,7 +4151,7 @@ async function start() {
   await new Promise<void>((resolve) => {
     listen("daemon-ready", () => resolve());
     listen("daemon-error", (e) => {
-      info.textContent = `daemon error: ${e.payload}`;
+      info.textContent = String(e.payload);
     });
     // ★신선 머신 부트 수리 짝(오너 2026-07-15): 백엔드 재시도 4회째 발화 — 상단바 텍스트는
     // 초보자가 놓치므로 sticky 토스트로 로그인 항목 승인 안내(데몬이 뜨면 daemon-ready가 진행).

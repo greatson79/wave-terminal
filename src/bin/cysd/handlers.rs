@@ -3079,16 +3079,17 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
             let caller_sid = caller_pid.and_then(|p| resolve_caller_surface(daemon, p));
             let existing = surface.agent_meta.lock().unwrap().clone();
             if caller_sid != Some(sid) && existing.is_some() {
-                let allowed = authoritative_caller_ok(daemon, caller_sid, caller_pid)
-                    && check_send_acl(daemon, caller_pid, &surface).is_ok()
-                    && existing.as_ref().is_some_and(|(name, _)| name == &agent)
+                let allowed = existing.as_ref().is_some_and(|(name, _)| name == &agent)
                     && surface.agent_exit_notified.load(Ordering::Relaxed);
+                let allowed = allowed && (caller_sid.is_none() ||
+                    authoritative_caller_ok(daemon, caller_sid, caller_pid)
+                        && check_send_acl(daemon, caller_pid, &surface).is_ok());
                 if !allowed {
                     daemon.bus.publish("meta.set_denied", "system", Some(sid),
                         json!({"agent": agent, "requested_surface": sid,
                                "caller_surface": caller_sid, "caller_pid": caller_pid}));
                     return Reply::Single(err_response(&id, "meta_denied",
-                        "set_meta denied: foreign recovery requires authoritative caller, send ACL, same agent, and observed exit"));
+                        "set_meta denied: recovery requires same agent and observed exit; pane callers also require authority and send ACL"));
                 }
             }
             *surface.agent_meta.lock().unwrap() = Some((agent.clone(), agent_bin));
@@ -5150,9 +5151,9 @@ mod tests {
         );
     }
 
-    /// 익명 외부 호출은 다른 창의 기존 메타를 재등록할 권위가 없다.
+    /// 창 밖 복구도 사망 관측 전에는 기존 메타를 재등록할 수 없다.
     #[test]
-    fn recover_scope_anonymous_recovery_denied() {
+    fn recover_scope_anonymous_running_recovery_denied() {
         let daemon = claim_daemon();
         let node = make_surface(&daemon, Some("worker-3"));
         *daemon.surfaces.lock().unwrap()[&node].agent_meta.lock().unwrap() =
@@ -5163,6 +5164,28 @@ mod tests {
             resp["error"]["code"], json!("meta_denied"),
             "익명 재등록이 통과했다 (응답: {resp})"
         );
+    }
+
+    #[test]
+    fn recover_scope_anonymous_observed_death_allowed() {
+        let daemon = isolated_daemon();
+        let node = make_surface(&daemon, Some("worker-3"));
+        let surface = daemon.get_surface(node).unwrap();
+        *surface.agent_meta.lock().unwrap() = Some(("claude".into(), "claude".into()));
+        surface.agent_exit_notified.store(true, Ordering::Relaxed);
+        assert_eq!(set_meta(&daemon, node, "claude", None)["ok"], json!(true));
+        assert!(!surface.agent_exit_notified.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn recover_scope_anonymous_other_agent_denied() {
+        let daemon = isolated_daemon();
+        let node = make_surface(&daemon, Some("worker-3"));
+        let surface = daemon.get_surface(node).unwrap();
+        *surface.agent_meta.lock().unwrap() = Some(("claude".into(), "claude".into()));
+        surface.agent_exit_notified.store(true, Ordering::Relaxed);
+        assert_eq!(set_meta(&daemon, node, "gemini", None)["error"]["code"], json!("meta_denied"));
+        assert!(surface.agent_exit_notified.load(Ordering::Relaxed));
     }
 
     #[test]

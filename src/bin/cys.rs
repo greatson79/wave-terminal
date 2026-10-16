@@ -4436,11 +4436,17 @@ fn launch_once_on_surface(
     // → agent_seen 영원히 false → status 허위 DEAD → task-prompt 생존게이트가 '미기동' 오판(DRILL_LIVE_1).
     // 스폰 시점에 의도가 확정되므로 여기서 등록하는 것이 정직하다(§3-1 진단의 수리).
     let bin = extract_bin(&cmd, agent).to_string();
-    request(
+    if let Err(e) = request(
         "surface.set_meta",
         json!({"surface_id": sid, "agent": agent, "agent_bin": bin,
                "model": model, "model_fallback": fell_back}),
-    )?;
+    ) {
+        if fell_back {
+            eprintln!("[launch-agent] warning: set_meta after fallback: {e}");
+        } else {
+            return Err(e.into());
+        }
+    }
     if !fresh {
         request("surface.send_key", json!({"surface_id": sid, "key": "C-u"}))?;
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -4590,6 +4596,16 @@ fn recover_scope_denial_precedes_all_shell_input() {
     let recover = source.split("fn run_node_recover(").nth(1).unwrap()
         .split("fn run_restore(").next().unwrap();
     assert!(!recover.contains("\"surface.send_key\""), "node-recover input before meta approval");
+}
+
+#[cfg(test)]
+#[test]
+fn recover_scope_model_fallback_meta_warning() {
+    let source = include_str!("cys.rs");
+    let launch = source.split("fn launch_once_on_surface(").nth(1).unwrap()
+        .split("fn run_surface_role(").next().unwrap();
+    assert!(launch.contains("if fell_back {\n            eprintln!(\"[launch-agent] warning: set_meta after fallback:"));
+    assert!(launch.contains("} else {\n            return Err(e.into());"));
 }
 
 /// 에이전트 기동 + 역할 지침 자동 주입 (어댑터: agents.json).

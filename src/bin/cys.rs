@@ -4448,21 +4448,35 @@ fn boot_agent_on_surface(
     }
 }
 
-/// 모델 오류로 살아 있는 TUI를 셸까지 내린다(C-c 두 번) — 셸 프롬프트가 보여야 재기동한다.
+/// 모델 오류로 살아 있는 TUI를 셸까지 내린다 — 셸 프롬프트가 보여야 재기동한다.
 fn stop_agent_to_shell(sid: u64) -> Result<(), String> {
+    stop_agent_to_shell_with(
+        |key| request("surface.send_key", json!({"surface_id": sid, "key": key, "authoritative": true})).map(|_| ()),
+        || request("surface.read_text", json!({"surface_id": sid}))
+            .map(|screen| screen["text"].as_str().unwrap_or("").to_string()),
+        std::thread::sleep,
+    )
+}
+
+fn stop_agent_to_shell_with(
+    mut send_key: impl FnMut(&str) -> Result<(), String>,
+    mut read_screen: impl FnMut() -> Result<String, String>,
+    mut pause: impl FnMut(std::time::Duration),
+) -> Result<(), String> {
     for _ in 0..2 {
-        request("surface.send_key", json!({"surface_id": sid, "key": "C-c", "authoritative": true}))?;
-        std::thread::sleep(std::time::Duration::from_millis(800));
+        send_key("C-c")?;
+        pause(std::time::Duration::from_millis(800));
     }
-    for _ in 0..8 {
-        let screen = request("surface.read_text", json!({"surface_id": sid}))?;
-        if screen_tail_is_shell_prompt(screen["text"].as_str().unwrap_or("")) {
-            request("surface.send_key", json!({"surface_id": sid, "key": "C-u", "authoritative": true}))?;
+    for attempt in 0..=8 {
+        if screen_tail_is_shell_prompt(&read_screen()?) {
+            send_key("C-u")?;
             return Ok(());
         }
-        std::thread::sleep(std::time::Duration::from_millis(1250));
+        if attempt == 8 { break; }
+        send_key("C-c")?;
+        pause(std::time::Duration::from_millis(1250));
     }
-    Err("model fallback: agent did not return to the shell after C-c ×2".into())
+    Err("model fallback: agent did not return to the shell after C-c ×10".into())
 }
 
 /// 1회 기동 + 지침 주입. watch_model이면 주입 뒤 모델 오류 화면을 살펴 Ok(true)로 알린다.
@@ -9277,6 +9291,44 @@ different model.\n✻ Worked for 0s\n────────\n❯ \n───�
         assert_eq!(model_step(false, true, fb), ModelStep::Done);
         assert_eq!(model_step(true, true, fb), ModelStep::Fail);
         assert_eq!(model_step(true, false, None), ModelStep::Fail);
+    }
+
+    #[test]
+    fn model_fallback_clears_input_then_exits_after_third_ctrl_c() {
+        use std::cell::Cell;
+        let ctrl_c = Cell::new(0);
+        let ctrl_u = Cell::new(0);
+        let send = |key: &str| {
+            match key {
+                "C-c" => ctrl_c.set(ctrl_c.get() + 1),
+                "C-u" => ctrl_u.set(ctrl_u.get() + 1),
+                _ => panic!("unexpected key: {key}"),
+            }
+            Ok(())
+        };
+        let read = || Ok(match ctrl_c.get() {
+            0 | 1 => "paste again to expand",
+            2 => "Press Ctrl-C again to exit",
+            _ => "user@host %",
+        }.to_string());
+        stop_agent_to_shell_with(send, read, |_| {}).unwrap();
+        assert_eq!(ctrl_c.get(), 3);
+        assert_eq!(ctrl_u.get(), 1);
+    }
+
+    #[test]
+    fn model_fallback_stops_after_eight_extra_ctrl_c() {
+        use std::cell::Cell;
+        let ctrl_c = Cell::new(0);
+        let reads = Cell::new(0);
+        let result = stop_agent_to_shell_with(
+            |key| { assert_eq!(key, "C-c"); ctrl_c.set(ctrl_c.get() + 1); Ok(()) },
+            || { reads.set(reads.get() + 1); Ok("Press Ctrl-C again to exit".into()) },
+            |_| {},
+        );
+        assert!(result.is_err());
+        assert_eq!(ctrl_c.get(), 10);
+        assert_eq!(reads.get(), 9);
     }
 
     #[test]

@@ -3079,11 +3079,17 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
             let caller_sid = caller_pid.and_then(|p| resolve_caller_surface(daemon, p));
             let existing = surface.agent_meta.lock().unwrap().clone();
             if caller_sid != Some(sid) && existing.is_some() {
-                let allowed = existing.as_ref().is_some_and(|(name, _)| name == &agent)
-                    && surface.agent_exit_notified.load(Ordering::Relaxed);
-                let allowed = allowed && (caller_sid.is_none() ||
-                    authoritative_caller_ok(daemon, caller_sid, caller_pid)
-                        && check_send_acl(daemon, caller_pid, &surface).is_ok());
+                let (registered_pid, registered_start) = *surface.agent_meta_registrar.lock().unwrap();
+                let same_registrar = match (caller_pid, registered_pid, registered_start) {
+                    (Some(pid), Some(owner), Some(start)) if pid == owner =>
+                        crate::state::peer_start_time(pid) == Some(start),
+                    _ => false,
+                };
+                let same_agent = existing.as_ref().is_some_and(|(name, _)| name == &agent);
+                let allowed = same_agent && (same_registrar ||
+                    surface.agent_exit_notified.load(Ordering::Relaxed)
+                        && (caller_sid.is_none() || authoritative_caller_ok(daemon, caller_sid, caller_pid)
+                            && check_send_acl(daemon, caller_pid, &surface).is_ok()));
                 if !allowed {
                     daemon.bus.publish("meta.set_denied", "system", Some(sid),
                         json!({"agent": agent, "requested_surface": sid,
@@ -3093,6 +3099,8 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                 }
             }
             *surface.agent_meta.lock().unwrap() = Some((agent.clone(), agent_bin));
+            *surface.agent_meta_registrar.lock().unwrap() =
+                (caller_pid, caller_pid.and_then(crate::state::peer_start_time));
             *surface.agent_model.lock().unwrap() = param_str(&params, "model")
                 .map(|m| (m, params["model_fallback"].as_bool().unwrap_or(false)));
             surface.agent_seen.store(false, Ordering::Relaxed);
@@ -5186,6 +5194,50 @@ mod tests {
         surface.agent_exit_notified.store(true, Ordering::Relaxed);
         assert_eq!(set_meta(&daemon, node, "gemini", None)["error"]["code"], json!("meta_denied"));
         assert!(surface.agent_exit_notified.load(Ordering::Relaxed));
+    }
+
+    fn fallback_meta_fixture() -> (Arc<Daemon>, u64, u32) {
+        let daemon = isolated_daemon();
+        let master = make_surface(&daemon, Some("master"));
+        let victim = make_surface(&daemon, Some("worker-1"));
+        let pid = std::process::id();
+        bind_caller(&daemon, pid, master);
+        assert_eq!(set_meta(&daemon, victim, "claude", Some(pid))["ok"], json!(true));
+        assert!(daemon.get_surface(victim).unwrap().agent_meta_registrar.lock().unwrap().1.is_some());
+        (daemon, victim, pid)
+    }
+
+    #[test]
+    fn recover_scope_same_registrar_fallback_allowed() {
+        let (daemon, victim, pid) = fallback_meta_fixture();
+        assert!(!daemon.get_surface(victim).unwrap().agent_exit_notified.load(Ordering::Relaxed));
+        assert_eq!(set_meta(&daemon, victim, "claude", Some(pid))["ok"], json!(true));
+    }
+
+    #[test]
+    fn recover_scope_other_pid_fallback_denied() {
+        let (daemon, victim, pid) = fallback_meta_fixture();
+        let other = pid.wrapping_add(1);
+        let master = *daemon.roles.lock().unwrap().get("master").unwrap();
+        bind_caller(&daemon, other, master);
+        assert_eq!(set_meta(&daemon, victim, "claude", Some(other))["error"]["code"], json!("meta_denied"));
+    }
+
+    #[test]
+    fn recover_scope_reused_pid_fallback_denied() {
+        let (daemon, victim, pid) = fallback_meta_fixture();
+        let surface = daemon.get_surface(victim).unwrap();
+        let start = surface.agent_meta_registrar.lock().unwrap().1.unwrap();
+        *surface.agent_meta_registrar.lock().unwrap() = (Some(pid), Some(start + 1));
+        assert_eq!(set_meta(&daemon, victim, "claude", Some(pid))["error"]["code"], json!("meta_denied"));
+        *surface.agent_meta_registrar.lock().unwrap() = (Some(pid), None);
+        assert_eq!(set_meta(&daemon, victim, "claude", Some(pid))["error"]["code"], json!("meta_denied"));
+    }
+
+    #[test]
+    fn recover_scope_other_agent_fallback_denied() {
+        let (daemon, victim, pid) = fallback_meta_fixture();
+        assert_eq!(set_meta(&daemon, victim, "gemini", Some(pid))["error"]["code"], json!("meta_denied"));
     }
 
     #[test]

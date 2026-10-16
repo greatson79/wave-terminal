@@ -11,7 +11,7 @@ try {
   if (args[0] !== 'test') throw Error('cargo-isolated accepts test only');
   if (args.length === 1) args.push('--quiet', '--', '--test-threads=1');
   const gate = args[1] === 'exit_code_contract_' ? ['G19 exit-code-contract PASS', 22]
-    : args[1] === 'recover_scope_' ? ['G20 recover-scope PASS', 11] : null;
+    : args[1] === 'recover_scope_' ? ['G20 recover-scope PASS', 15] : null;
   const result = spawnSync('cargo', args, { env, cwd: process.cwd(),
     stdio: gate ? 'pipe' : 'inherit', encoding: gate ? 'utf8' : undefined });
   if (gate) { process.stdout.write(result.stdout || ''); process.stderr.write(result.stderr || ''); }
@@ -21,7 +21,8 @@ try {
     const passed = [...(result.stdout || '').matchAll(/test result: ok\. (\d+) passed/g)]
       .reduce((total, match) => total + Number(match[1]), 0);
     if (passed !== gate[1]) throw Error(`expected ${gate[1]} tests, got ${passed}`);
-    console.log(gate[0]);
+    console.log(args[1] === 'exit_code_contract_'
+      ? `${gate[0]} (source-structure ${passed} · behavior 0)` : gate[0]);
   }
   else if (args[1] === 'single_owner_') console.log('G7 single-owner PASS');
 } finally {

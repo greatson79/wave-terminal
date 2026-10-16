@@ -132,6 +132,8 @@ pub struct Surface {
     pub agent_status: Mutex<Option<AgentStatus>>,
     /// T2-5 에이전트 메타: launch-agent가 등록한 (agent 이름, 실행 바이너리)
     pub agent_meta: Mutex<Option<(String, String)>>,
+    /// 마지막 메타 등록자의 커널 PID·시작 시각. 둘 다 확인될 때만 같은 호출자의 폴백 재등록을 허용한다.
+    pub agent_meta_registrar: Mutex<(Option<u32>, Option<u64>)>,
     /// 새 surface.create 응답을 받은 launch-agent만 보유하는 완료 토큰.
     pub launch_token: Mutex<Option<String>>,
     pub launch_complete: AtomicBool,
@@ -1720,6 +1722,7 @@ impl Daemon {
             pending_queue: Mutex::new(std::collections::VecDeque::new()),
             agent_status: Mutex::new(None),
             agent_meta: Mutex::new(None),
+            agent_meta_registrar: Mutex::new((None, None)),
             launch_token: Mutex::new(None),
             launch_complete: AtomicBool::new(false),
             agent_seen: AtomicBool::new(false),

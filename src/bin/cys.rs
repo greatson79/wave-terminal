@@ -4423,38 +4423,29 @@ fn launch_once_on_surface(
         compose_directive(role)?
     };
 
-    // 1) 에이전트 기동 (authoritative: launch-agent의 모든 시스템 주입은 타이핑 가드 면제)
+    // 1) 메타 승인이 명령 입력보다 먼저여야 거부된 복구가 대상 셸을 건드리지 않는다.
     // RC-3(B′): OS-aware 렌더 — unix는 `KEY="val" cmd` 인라인(기존 byte-identical·셸 전개),
     // windows는 순수 cmd(env는 surface.create가 pane env로 주입). send_env는 여기선 미사용
     // (주입은 run_launch_agent_opts의 surface.create에서 이미 수행) — send 문자열만 취한다.
     let mut env_pairs = agent_env_pairs(spec);
     apply_config_dir_override(&mut env_pairs, restore, config_dir);
     let (send, _send_env) = render_launch(&cmd, &env_pairs);
-    request(
-        "surface.send_text",
-        json!({"surface_id": sid, "text": send, "quiet": true, "authoritative": true}),
-    )?;
-    request(
-        "surface.send_key",
-        json!({"surface_id": sid, "key": "Return", "authoritative": true}),
-    )?;
     // ★Phase 5 ①a: agent_meta를 기동 직후(readiness 폴링 前)에 등록한다. 등록이 폴링 뒤(step 5)에만
     // 있으면 readiness 미확인·restore 중 stall 시 meta=None으로 남아 → 사망감지 스킵(governance.rs)
     // → agent_seen 영원히 false → status 허위 DEAD → task-prompt 생존게이트가 '미기동' 오판(DRILL_LIVE_1).
     // 스폰 시점에 의도가 확정되므로 여기서 등록하는 것이 정직하다(§3-1 진단의 수리).
     let bin = extract_bin(&cmd, agent).to_string();
-    let meta = request(
+    request(
         "surface.set_meta",
         json!({"surface_id": sid, "agent": agent, "agent_bin": bin,
                "model": model, "model_fallback": fell_back}),
-    );
-    match meta {
-        // 폴백 재기동의 재등록 거부(타 pane 발신 meta_denied)로 살아 있는 좌석을 닫지 않는다.
-        Err(e) if fell_back => eprintln!("[launch-agent] warning: set_meta after fallback: {e}"),
-        r => {
-            r?;
-        }
+    )?;
+    if !fresh {
+        request("surface.send_key", json!({"surface_id": sid, "key": "C-u"}))?;
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
+    request("surface.send_text", json!({"surface_id": sid, "text": send, "quiet": true, "authoritative": true}))?;
+    request("surface.send_key", json!({"surface_id": sid, "key": "Return", "authoritative": true}))?;
     eprintln!(
         "[launch-agent] {agent} starting… (polling readiness, max {}s)",
         delay.max(30) * 2
@@ -4582,6 +4573,21 @@ fn launch_once_on_surface(
         }
     }
     Ok(false)
+}
+
+#[cfg(test)]
+#[test]
+fn recover_scope_denial_precedes_all_shell_input() {
+    let source = include_str!("cys.rs");
+    let launch = source.split("fn launch_once_on_surface(").nth(1).unwrap()
+        .split("fn run_surface_role(").next().unwrap();
+    let meta = launch.find("\"surface.set_meta\"").unwrap();
+    for input in ["\"surface.send_key\"", "\"surface.send_text\""] {
+        assert!(meta < launch.find(input).unwrap(), "{input} before meta approval");
+    }
+    let recover = source.split("fn run_node_recover(").nth(1).unwrap()
+        .split("fn run_restore(").next().unwrap();
+    assert!(!recover.contains("\"surface.send_key\""), "node-recover input before meta approval");
 }
 
 /// 에이전트 기동 + 역할 지침 자동 주입 (어댑터: agents.json).
@@ -5731,7 +5737,7 @@ fn run_node_recover(surface: Option<String>, role: Option<String>) -> i32 {
             .to_string();
         if entry["agent_alive"].as_bool() == Some(true) {
             return Err(format!(
-                "agent '{agent}'가 살아있는 것으로 보임 — 강제 재기동은 close-surface 후 launch-agent"
+                "agent '{agent}'가 살아있는 것으로 보임 — 종료를 확인한 뒤 같은 surface에 node-recover를 다시 실행하라"
             ));
         }
         // RC-3 잔여(T2.1·codex CONFIRMED): Windows node-recover는 기존 pane에 **순수 cmd**를 재기동한다
@@ -5743,15 +5749,13 @@ fn run_node_recover(surface: Option<String>, role: Option<String>) -> i32 {
             return Err(format!(
                 "surface:{sid}는 env 미주입 pane(수동 생성·구세션) — Windows에선 순수 cmd 재기동 시 \
                  CLAUDE_CONFIG_DIR 등이 실리지 않아 안전하지 않다. `cys restore` 또는 \
-                 `cys close-surface {sid}` 후 `cys launch-agent`로 재기동하라"
+                 master에게 이 pane의 새 생성·복원을 요청하라"
             ));
         }
         let role_name = entry["role"].as_str().unwrap_or("worker").to_string();
         let spec = load_agent_spec(&agent)?;
         eprintln!("[node-recover] surface:{sid} 위에 {agent} 재기동 (role={role_name})");
-        // 셸 입력 잔재 정리 후 기동 (resume 플래그로 대화 기억 복원 시도)
-        request("surface.send_key", json!({"surface_id": sid, "key": "C-u"}))?;
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        // 입력 잔재 정리는 set_meta 승인 뒤 launch_once_on_surface에서 한다.
         // (4b) topology에 영속된 session_id가 있으면 정확한 세션 재개(없으면 fallback)
         let sess = entry["session_id"].as_str().map(String::from);
         // (W1) 같은 pane 재기동(restore=false → 인라인 없음)이나 resume 게이트엔 기록된 config_dir·cwd를 쓴다.

@@ -3076,34 +3076,19 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
             if agent.is_empty() {
                 return Reply::Single(err_response(&id, "invalid_params", "missing agent"));
             }
-            // 신원·소유 게이트: agent_meta는 사망 감지(governance.rs agent_seen/exit_notified)와
-            // 승인 격상 스캔(check_approvals가 agents.json[agent].approval_patterns로 그 surface
-            // 화면을 정규식 매칭)의 기반이라, 다른 pane이 임의 surface의 메타를 덮어쓰면 ① 타 노드의
-            // 승인 패턴/feed 알림을 임의로 켜거나 ② agent_seen/exit_notified를 리셋해 사망 감지를
-            // 교란할 수 있다 (claim_role과 동일한 '임의 surface 무인증 쓰기' 부류). 발신 pane은
-            // 커널 peer pid로만 확정한다(client 자기신고 surface_id 불신). 정당 경로는 그대로 통과:
-            // ① 자기 메타 갱신(cs == sid) ② 오케스트레이터가 갓 만든 자식 surface 초기화
-            //   (대상 agent_meta == None — 아직 미등록) ③ 데몬이 spawn한 node-recover(발신 pane
-            //   없음 = caller_sid None — 이미 메타가 있는 surface에 동일 에이전트 재등록).
-            // 차단 대상은 오직 '발신 pane이 자기 소유 아닌, 이미 살아있는 타 노드의 메타를 덮어쓰는'
-            // 단일 케이스다.
             let caller_sid = caller_pid.and_then(|p| resolve_caller_surface(daemon, p));
-            if let Some(cs) = caller_sid {
-                if cs != sid && surface.agent_meta.lock().unwrap().is_some() {
-                    daemon.bus.publish(
-                        "meta.set_denied",
-                        "system",
-                        Some(sid),
+            let existing = surface.agent_meta.lock().unwrap().clone();
+            if caller_sid != Some(sid) && existing.is_some() {
+                let allowed = authoritative_caller_ok(daemon, caller_sid, caller_pid)
+                    && check_send_acl(daemon, caller_pid, &surface).is_ok()
+                    && existing.as_ref().is_some_and(|(name, _)| name == &agent)
+                    && surface.agent_exit_notified.load(Ordering::Relaxed);
+                if !allowed {
+                    daemon.bus.publish("meta.set_denied", "system", Some(sid),
                         json!({"agent": agent, "requested_surface": sid,
-                               "caller_surface": cs, "caller_pid": caller_pid}),
-                    );
-                    return Reply::Single(err_response(
-                        &id,
-                        "meta_denied",
-                        &format!(
-                            "set_meta denied: caller (surface {cs}) may not overwrite the live agent meta of another surface {sid}"
-                        ),
-                    ));
+                               "caller_surface": caller_sid, "caller_pid": caller_pid}));
+                    return Reply::Single(err_response(&id, "meta_denied",
+                        "set_meta denied: foreign recovery requires authoritative caller, send ACL, same agent, and observed exit"));
                 }
             }
             *surface.agent_meta.lock().unwrap() = Some((agent.clone(), agent_bin));
@@ -5170,11 +5155,9 @@ mod tests {
         );
     }
 
-    /// 대조군 ③: 데몬 spawn node-recover(발신 pane 없음 = caller_pid None)는 이미 메타가 있는
-    /// surface에 동일 에이전트를 재등록한다 — 익명이지만 정당 경로이므로 통과해야 한다.
-    /// (pane은 커널 peer pid가 항상 자기 surface로 해석되므로 익명을 위조할 수 없다 = 안전.)
+    /// 익명 외부 호출은 다른 창의 기존 메타를 재등록할 권위가 없다.
     #[test]
-    fn set_meta_allows_anonymous_recovery_on_existing_meta() {
+    fn recover_scope_anonymous_recovery_denied() {
         let daemon = claim_daemon();
         let node = make_surface(&daemon, Some("worker-3"));
         *daemon.surfaces.lock().unwrap()[&node].agent_meta.lock().unwrap() =
@@ -5182,9 +5165,46 @@ mod tests {
 
         let resp = set_meta(&daemon, node, "claude", None);
         assert_eq!(
-            resp["ok"], json!(true),
-            "데몬 내부 복구(익명) 재등록이 막혔다 (응답: {resp})"
+            resp["error"]["code"], json!("meta_denied"),
+            "익명 재등록이 통과했다 (응답: {resp})"
         );
+    }
+
+    #[test]
+    fn recover_scope_foreign_meta_truth_table() {
+        let daemon = isolated_daemon();
+        let master = make_surface(&daemon, Some("master"));
+        let worker = make_surface(&daemon, Some("worker-1"));
+        let victim = make_surface(&daemon, Some("worker-2"));
+        bind_caller(&daemon, 991_401, master);
+        bind_caller(&daemon, 991_402, worker);
+        let surface = daemon.get_surface(victim).unwrap();
+        *surface.agent_meta.lock().unwrap() = Some(("claude".into(), "claude".into()));
+
+        // agent_seen=false is startup, not proof of death.
+        assert_eq!(set_meta(&daemon, victim, "claude", Some(991_401))["error"]["code"], json!("meta_denied"));
+        surface.agent_seen.store(true, Ordering::Relaxed);
+        assert_eq!(set_meta(&daemon, victim, "claude", Some(991_401))["error"]["code"], json!("meta_denied"));
+        surface.agent_exit_notified.store(true, Ordering::Relaxed);
+        assert_eq!(set_meta(&daemon, victim, "gemini", Some(991_401))["error"]["code"], json!("meta_denied"));
+        assert_eq!(set_meta(&daemon, victim, "claude", Some(991_402))["error"]["code"], json!("meta_denied"));
+        assert_eq!(set_meta(&daemon, victim, "claude", Some(991_401))["ok"], json!(true));
+        assert!(!surface.agent_exit_notified.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn recover_scope_acl_denies_authoritative_meta() {
+        let _g = ACL_ENV_LOCK.lock().unwrap();
+        let (daemon, dir, _dirs) = daemon_with_acl("recover", r#"{"default":"deny"}"#);
+        let master = make_surface(&daemon, Some("master"));
+        let victim = make_surface(&daemon, Some("worker-1"));
+        bind_caller(&daemon, 991_403, master);
+        let surface = daemon.get_surface(victim).unwrap();
+        *surface.agent_meta.lock().unwrap() = Some(("claude".into(), "claude".into()));
+        surface.agent_exit_notified.store(true, Ordering::Relaxed);
+        assert_eq!(set_meta(&daemon, victim, "claude", Some(991_403))["error"]["code"], json!("meta_denied"));
+        assert!(surface.agent_exit_notified.load(Ordering::Relaxed));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn status_set(

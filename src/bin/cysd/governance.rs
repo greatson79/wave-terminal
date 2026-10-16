@@ -358,10 +358,11 @@ fn check_agent_death(
         *count += 1;
         let sid = s.id;
         let attempts = *count;
+        let daemon = daemon.clone();
         tokio::spawn(async move {
             use crate::state::HideConsole;
             let cli = crate::state::sibling_cli_path();
-            let _ = tokio::time::timeout(
+            let outcome = tokio::time::timeout(
                 Duration::from_secs(180),
                 tokio::process::Command::new(cli)
                     .arg("node-recover")
@@ -371,7 +372,17 @@ fn check_agent_death(
                     .output(),
             )
             .await;
-            let _ = attempts;
+            let (code, first) = match outcome {
+                Ok(Ok(output)) => (output.status.code(), String::from_utf8_lossy(&output.stderr)
+                    .lines().next().unwrap_or("").chars().take(200).collect::<String>()),
+                Ok(Err(error)) => (None, error.to_string()),
+                Err(_) => (None, "timeout".into()),
+            };
+            eprintln!("[cysd] node-recover surface:{sid} attempt={attempts} exit={code:?} stderr={first}");
+            if code != Some(0) {
+                daemon.bus.publish("agent.recover_failed", "surface", Some(sid),
+                    json!({"attempt": attempts, "exit_code": code, "stderr": first}));
+            }
         });
     }
 }

@@ -13,6 +13,7 @@ import { deptPlaceholderLabel } from "./deptlabel";
 import { ccEffectiveZoom } from "./ccscale";
 import { clampWsbarWidth, clampWsbarFont, WSBAR_W_DEFAULT, WSBAR_FONT_STEP } from "./wsbar";
 import { composeFontFamily, FONT_CHOICES, ROLE_COLOR, roleDotColor } from "./appearance";
+import { BAR_IDS, DEFAULT_SETTINGS, readSettings, SETTINGS_KEY } from "./settings";
 import { safeHelpText } from "./help";
 import { bindPaneRename, paneHeading, splitPaneHeading } from "./paneheading";
 import { sidebarUsage } from "./usagebar";
@@ -1354,9 +1355,14 @@ function applyZoom(delta: number | null) {
 
 // 터미널 폰트 선택(cys-font-face · 오너 요청 2026-07-12) — 선택 폰트를 기본 스택 앞에 합성
 // (composeFontFamily · CJK 폴백 보존), null=기본. 폰트 메트릭 변화 → 셀 재계산(applyZoom과 동일 패턴).
-let fontFace: string | null = localStorage.getItem("cys-font-face");
+let settings = readSettings(localStorage.getItem(SETTINGS_KEY), localStorage.getItem("cys-bg-color"), localStorage.getItem("cys-font-face"));
+function saveSettings() { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); }
+saveSettings(); // first run migrates the two legacy values; the old keys stay available for rollback
+let fontFace: string | null = settings.look.font;
 function applyFontFace(face: string | null) {
   fontFace = face && face.trim() ? face : null;
+  settings.look.font = fontFace;
+  saveSettings();
   if (fontFace === null) localStorage.removeItem("cys-font-face");
   else localStorage.setItem("cys-font-face", fontFace);
   for (const rt of panes.values()) {
@@ -1397,6 +1403,7 @@ let groups: GroupMeta[] = []; // 06: 그룹 메타 배열(진실원=localStorage
 let groupCounter = 1; // 06: 그룹 id 발급(ws의 wsCounter와 분리)
 let focusedSid: number | null = null;
 const panes = new Map<string, PaneRuntime>(); // 키 = paneKey(sid, socket)
+applyFontFace(fontFace); // keep the rollback key synchronized with the new settings key
 interface PaneTitleState { reported: string | null; exited: boolean; role?: string | null; label?: string | null; model?: string | null; usage?: ObservedUsage | null }
 const paneTitleState = new Map<string, PaneTitleState>();
 // 부서 데몬 socket_slug(F3 백엔드 단일진실) → socket 경로. launch_dept_daemon 반환·daemon-event로 채운다.
@@ -1411,10 +1418,12 @@ const root = document.getElementById("root")!;
 // 색 선택 시 앱 캔버스(--bg)·캔버스 글자(--canvas-text)·모든 pane xterm 테마를 동기 적용 → 화면 일치.
 // null = 기본(다크) 복원. 밝은 배경(휘도>0.5)이면 글자를 어둡게 자동 보정(가독).
 // ★크롬 글자 --text는 건드리지 않는다 — 상단바·모달 등 배경이 안 바뀌는 var(--bar) 표면 가독 유지.
-let bgColor: string | null = localStorage.getItem("cys-bg-color");
+let bgColor: string | null = settings.look.bg;
 const currentBg = (): string => bgColor ?? DEFAULT_BG;
 function applyBgColor(color: string | null): void {
   bgColor = color;
+  settings.look.bg = color;
+  saveSettings();
   const bg = color ?? DEFAULT_BG;
   const fg = readableForeground(bg);
   document.documentElement.style.setProperty("--bg", bg);
@@ -1540,7 +1549,7 @@ const paneTitle = (title: string | null | undefined, liveCwd?: string | null) =>
 // pane 헤더 역할 점 — CC 깜박이 점(cc-blink)을 역할색으로 제목 앞에 표시(무역할 셸·종료 pane은 숨김).
 function setRoleDot(el: HTMLElement, role: string | null) {
   const color = roleDotColor(role);
-  el.style.display = color ? "" : "none";
+  el.style.display = color && settings.look.titleIcon ? "" : "none";
   if (color) {
     el.style.background = color;
     el.title = `역할: ${role}`;
@@ -1727,6 +1736,7 @@ async function makePane(sid: number, title: string, socket?: string): Promise<Pa
     // 폰트: 기본 스택(Latin 등폭을 CJK보다 앞에 — 셀 폭 측정 왜곡 방지)·선택 폰트 합성 = appearance.ts.
     fontFamily: composeFontFamily(fontFace),
     fontSize,
+    fontWeight: settings.look.bodyWeight,
     // 배경 테마: 하드코딩 리터럴 대신 현재 색 상태 참조 — 새 pane도 커스텀 색으로 생성된다.
     theme: { background: currentBg(), foreground: readableForeground(currentBg()) },
     scrollback: 5000,
@@ -2864,17 +2874,41 @@ function showCtxMenu(x: number, y: number, items: { label: string; action: () =>
   window.addEventListener("keydown", onKey, true);
 }
 
-// 배경 테마 팝오버 — 컬러피커 + 기본값 복원. showCtxMenu의 바깥클릭·Esc 닫기 패턴 재사용.
-// 컬러피커 input 이벤트마다 applyBgColor 라이브 적용(localStorage 영속은 applyBgColor 내부).
-function openThemePopover(anchor: HTMLElement) {
-  document.getElementById("theme-pop")?.remove();
+function applyLook() {
+  const root = document.documentElement;
+  root.style.setProperty("--pane-title-size", `${settings.look.titleSize}px`);
+  root.style.setProperty("--pane-title-weight", String(settings.look.titleWeight));
+  root.style.setProperty("--menu-weight", String(settings.look.menuWeight));
+  root.style.setProperty("--menu-scale", String(settings.look.menuScale / 100));
+  for (const rt of panes.values()) {
+    rt.term.options.fontWeight = settings.look.bodyWeight;
+    setRoleDot(rt.roleEl, paneTitleState.get(paneKey(rt.sid, rt.socket))?.role ?? null);
+  }
+}
+
+function applyBar() {
+  const anchor = document.getElementById("btn-settings")!;
+  for (const id of settings.bar.order) {
+    const button = document.getElementById(`btn-${id}`)!;
+    button.hidden = settings.bar.hidden.includes(id);
+    anchor.before(button);
+  }
+}
+
+let closeSettingsMenu: (() => void) | null = null;
+function openSettingsMenu(anchor: HTMLElement) {
+  closeSettingsMenu?.();
   const pop = document.createElement("div");
-  pop.id = "theme-pop";
+  pop.id = "settings-pop";
+  pop.setAttribute("role", "dialog");
+  pop.setAttribute("aria-label", "설정");
   const close = () => {
     pop.remove();
     window.removeEventListener("mousedown", dismiss, true);
     window.removeEventListener("keydown", onKey, true);
+    closeSettingsMenu = null;
   };
+  closeSettingsMenu = close;
   const dismiss = (e?: Event) => {
     if (e instanceof MouseEvent && pop.contains(e.target as globalThis.Node)) return;
     close();
@@ -2882,51 +2916,116 @@ function openThemePopover(anchor: HTMLElement) {
   const onKey = (e: KeyboardEvent) => {
     if (e.key === "Escape") close();
   };
-
-  const row = document.createElement("label");
-  row.className = "theme-pop-row";
-  row.textContent = "배경색";
-  const picker = document.createElement("input");
-  picker.type = "color";
-  picker.value = currentBg();
-  picker.addEventListener("input", () => applyBgColor(picker.value));
-  row.appendChild(picker);
-
-  // 폰트 선택(오너 요청 2026-07-12) — 선택지=appearance.ts FONT_CHOICES, 변경 즉시 전 pane 적용.
-  const fontRow = document.createElement("label");
-  fontRow.className = "theme-pop-row";
-  fontRow.textContent = "폰트";
-  const fontSel = document.createElement("select");
-  for (const c of FONT_CHOICES) {
-    const o = document.createElement("option");
-    o.value = c.face ?? "";
-    o.textContent = c.label;
-    fontSel.appendChild(o);
-  }
-  fontSel.value = FONT_CHOICES.some((c) => c.face === fontFace) ? (fontFace ?? "") : "";
-  fontSel.addEventListener("change", () => applyFontFace(fontSel.value || null));
-  fontRow.appendChild(fontSel);
-
-  const reset = document.createElement("button");
-  reset.className = "theme-pop-reset";
-  reset.textContent = "기본값 복원";
-  reset.addEventListener("click", () => {
-    applyBgColor(null);
-    picker.value = DEFAULT_BG;
-    applyFontFace(null);
-    fontSel.value = "";
-  });
-
-  pop.append(row, fontRow, reset);
-
-  // 앵커(테마 버튼) 하단에 배치 후 화면 밖으로 나가면 안쪽으로 보정.
+  const renderMenu = () => {
+    pop.replaceChildren();
+    const section = (title: string) => {
+      const details = document.createElement("details");
+      details.open = true;
+      const summary = document.createElement("summary");
+      summary.textContent = title;
+      details.append(summary);
+      pop.append(details);
+      return details;
+    };
+    const row = (parent: HTMLElement, label: string, control: HTMLElement) => {
+      const el = document.createElement("label");
+      el.className = "settings-row";
+      el.append(label, control);
+      parent.append(el);
+    };
+    const button = (parent: HTMLElement, text: string, action: () => void) => {
+      const el = document.createElement("button");
+      el.textContent = text;
+      el.addEventListener("click", action);
+      parent.append(el);
+      return el;
+    };
+    const look = section("글자·배경");
+    const picker = document.createElement("input");
+    picker.type = "color";
+    picker.value = currentBg();
+    picker.addEventListener("input", () => applyBgColor(picker.value));
+    row(look, "배경색", picker);
+    const font = document.createElement("select");
+    for (const c of FONT_CHOICES) font.add(new Option(c.label, c.face ?? ""));
+    font.value = settings.look.font ?? "";
+    font.addEventListener("change", () => applyFontFace(font.value || null));
+    row(look, "폰트", font);
+    const number = (label: string, key: "titleSize" | "menuScale", min: number, max: number) => {
+      const input = document.createElement("input");
+      input.type = "number"; input.min = String(min); input.max = String(max);
+      input.value = String(settings.look[key]);
+      input.addEventListener("change", () => {
+        const v = Number(input.value);
+        if (Number.isInteger(v) && v >= min && v <= max) { settings.look[key] = v; saveSettings(); applyLook(); }
+        else input.value = String(settings.look[key]);
+      });
+      row(look, label, input);
+    };
+    const weight = (label: string, key: "titleWeight" | "bodyWeight" | "menuWeight") => {
+      const select = document.createElement("select");
+      for (const n of [400, 500, 600, 700]) select.add(new Option(`${n}`, String(n)));
+      select.value = String(settings.look[key]);
+      select.addEventListener("change", () => { settings.look[key] = Number(select.value); saveSettings(); applyLook(); });
+      row(look, label, select);
+    };
+    number("제목 크기 (px)", "titleSize", 9, 24);
+    weight("제목 굵기", "titleWeight");
+    const icon = document.createElement("input");
+    icon.type = "checkbox"; icon.checked = settings.look.titleIcon;
+    icon.addEventListener("change", () => { settings.look.titleIcon = icon.checked; saveSettings(); applyLook(); });
+    row(look, "제목+아이콘", icon);
+    weight("본문 굵기", "bodyWeight");
+    weight("메뉴 굵기", "menuWeight");
+    number("메뉴 크기 (%)", "menuScale", 70, 150);
+    button(look, "이 구역만 기본값", () => {
+      settings.look = { ...DEFAULT_SETTINGS.look };
+      applyBgColor(null); applyFontFace(null); applyLook(); renderMenu();
+    });
+    const bar = section("상단 단추");
+    for (const id of settings.bar.order) {
+      const controls = document.createElement("span");
+      const index = settings.bar.order.indexOf(id);
+      for (const [symbol, delta] of [["▲", -1], ["▼", 1]] as const) {
+        const move = button(controls, symbol, () => {
+          const next = index + delta;
+          [settings.bar.order[index], settings.bar.order[next]] = [settings.bar.order[next], settings.bar.order[index]];
+          saveSettings(); applyBar(); renderMenu();
+        });
+        move.disabled = index + delta < 0 || index + delta >= settings.bar.order.length;
+        move.setAttribute("aria-label", `${document.getElementById(`btn-${id}`)?.textContent?.trim()} ${symbol === "▲" ? "위로" : "아래로"}`);
+      }
+      const visible = document.createElement("input");
+      visible.type = "checkbox"; visible.checked = !settings.bar.hidden.includes(id);
+      visible.addEventListener("change", () => {
+        settings.bar.hidden = visible.checked ? settings.bar.hidden.filter((v) => v !== id) : [...settings.bar.hidden, id];
+        saveSettings(); applyBar();
+      });
+      controls.append(visible);
+      visible.setAttribute("aria-label", `${document.getElementById(`btn-${id}`)?.textContent?.trim()} 보임`);
+      const barRow = document.createElement("div");
+      barRow.className = "settings-row";
+      barRow.append(document.getElementById(`btn-${id}`)?.textContent?.trim() ?? id, controls);
+      bar.append(barRow);
+    }
+    const always = document.createElement("p");
+    always.textContent = "설정 ▾ 은 항상 보입니다";
+    bar.append(always);
+    button(bar, "이 구역만 기본값", () => {
+      settings.bar = { order: [...BAR_IDS], hidden: [] };
+      saveSettings(); applyBar(); renderMenu();
+    });
+    const reset = section("기본값 복원");
+    button(reset, "모두 기본값으로", () => {
+      settings = structuredClone(DEFAULT_SETTINGS);
+      applyBgColor(null); applyFontFace(null); applyLook(); applyBar(); renderMenu();
+    });
+  };
+  renderMenu();
   const r = anchor.getBoundingClientRect();
-  pop.style.left = `${r.left}px`;
+  pop.style.right = `${Math.max(4, window.innerWidth - r.right)}px`;
   pop.style.top = `${r.bottom + 4}px`;
   document.body.appendChild(pop);
-  const pr = pop.getBoundingClientRect();
-  if (pr.right > window.innerWidth) pop.style.left = `${window.innerWidth - pr.width - 4}px`;
-
   window.addEventListener("mousedown", dismiss, true);
   window.addEventListener("keydown", onKey, true);
 }
@@ -4580,9 +4679,11 @@ document.getElementById("cc-sessions-redact")!.addEventListener("click", (e) => 
 });
 document.getElementById("btn-update")!.addEventListener("click", () => onUpdateButton());
 document.getElementById("btn-restart-daemon")!.addEventListener("click", () => void manualRestartAllDaemons());
-document.getElementById("btn-theme")!.addEventListener("click", (e) =>
-  openThemePopover(e.currentTarget as HTMLElement),
+document.getElementById("btn-settings")!.addEventListener("click", (e) =>
+  openSettingsMenu(e.currentTarget as HTMLElement),
 );
+applyLook();
+applyBar();
 // 역할 분리(오너 2026-06-29 결정): "새 워크스페이스"(btn-ws-new) = 기본/현재 데몬의 일반 워크스페이스
 // (addWorkspace) — 부서가 아니다. 격리 부서 데몬 생성은 "+부서"(btn-ws-dept→addDeptWorkspace) 전담.
 // 새 ws를 master로 선언 시 공유 데몬 claim 충돌은 데몬 레벨 claim_denied(cysd handlers.rs·kill 없음)가

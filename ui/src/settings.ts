@@ -29,8 +29,8 @@ export function readSettings(raw: string | null, legacyBg: string | null, legacy
   try { parsed = raw ? JSON.parse(raw) : null; } catch { /* damaged settings use defaults */ }
   const look = parsed?.ver === 1 ? parsed.look : null;
   const bar = parsed?.ver === 1 ? parsed.bar : null;
-  const bg = look?.bg === null ? null : validColor(look?.bg) ? look.bg : validColor(legacyBg) ? legacyBg : null;
-  const font = look?.font === null ? null : validFont(look?.font) ? look.font : validFont(legacyFont) ? legacyFont : null;
+  const bg = validColor(legacyBg) ? legacyBg : legacyBg === null ? null : validColor(look?.bg) ? look.bg : null;
+  const font = validFont(legacyFont) ? legacyFont : legacyFont === null ? null : validFont(look?.font) ? look.font : null;
   const savedOrder = Array.isArray(bar?.order) ? bar.order : [];
   const savedHidden = Array.isArray(bar?.hidden) ? bar.hidden : [];
   const order = [...new Set([...savedOrder.filter((id: unknown) => ids.includes(id as string)), ...ids])];

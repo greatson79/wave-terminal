@@ -2883,7 +2883,9 @@ function applyLook() {
   for (const rt of panes.values()) {
     rt.term.options.fontWeight = settings.look.bodyWeight;
     setRoleDot(rt.roleEl, paneTitleState.get(paneKey(rt.sid, rt.socket))?.role ?? null);
+    fitPane(rt);
   }
+  requestAnimationFrame(() => { for (const rt of panes.values()) fitPane(rt); });
 }
 
 function applyBar() {

@@ -9,6 +9,16 @@ describe("settings", () => {
     expect(s.bar.order).toEqual(BAR_IDS);
   });
 
+  it("keeps changes made in 0.2.4 during a rollback and return to 0.2.5", () => {
+    const saved = JSON.stringify({ ver: 1, look: { bg: "#123abc", font: "Menlo" } });
+    const changed = readSettings(saved, "#abcdef", "Monaco");
+    expect(changed.look.bg).toBe("#abcdef");
+    expect(changed.look.font).toBe("Monaco");
+    const reset = readSettings(saved, null, null);
+    expect(reset.look.bg).toBeNull();
+    expect(reset.look.font).toBeNull();
+  });
+
   it("uses defaults for broken JSON and rejects individual out-of-range values", () => {
     expect(readSettings("{", null, null)).toEqual(DEFAULT_SETTINGS);
     const s = readSettings(JSON.stringify({ ver: 1, look: {

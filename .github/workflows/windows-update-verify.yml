@@ -89,7 +89,7 @@ jobs:
         shell: pwsh
         run: ./scripts/gates-v024/win-g5-guard.ps1
       - name: G23 Windows label and routing
-        if: env.RELEASE_VERSION == '0.2.4'
+        if: contains(fromJSON('["0.2.4","0.2.5"]'), env.RELEASE_VERSION)
         shell: pwsh
         run: ./scripts/gates-v024/win-g23-label.ps1
       - name: Pack provenance after daemon start

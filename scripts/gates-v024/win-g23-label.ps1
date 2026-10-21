@@ -14,10 +14,11 @@ function Assert-Screen([string]$marker) {
   $deadline = (Get-Date).AddSeconds(15)
   do {
     $screen = (& $cys read-screen --surface $ref --lines 100 2>&1) -join "`n"
-    if ($LASTEXITCODE -ne 0) { throw 'read-screen failed' }
+    if ($LASTEXITCODE -ne 0) { Write-Host "G23 screen dump (read failed):`n$screen"; throw 'read-screen failed' }
     if ($screen.Contains($marker)) { return }
     Start-Sleep -Milliseconds 300
   } while ((Get-Date) -lt $deadline)
+  Write-Host "G23 screen dump (missing $marker):`n$screen"
   throw "message not on screen: $marker"
 }
 

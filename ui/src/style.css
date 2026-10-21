@@ -524,6 +524,9 @@ body.pane-dragging .pane .pane-title { cursor: grabbing; }
   font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.5);
 }
 .toast .toast-name { font-weight: 700; margin-right: 6px; }
+.toast .toast-detail { white-space: pre-line; }
+.toast button { margin-left: 8px; cursor: pointer; }
+.toast.preserved { max-height: 60vh; overflow: auto; }
 .toast.health { border-color: var(--error); }
 .toast.watchdog { border-color: var(--warn); }
 .toast.feed { border-color: var(--accent); }

@@ -4239,8 +4239,16 @@ async function start() {
   const showPreserved = (message: string) => {
     if (seenPreserved.has(message)) return;
     seenPreserved.add(message);
-    setTimeout(() => seenPreserved.delete(message), 10000);
-    toast("feed", "수정한 팩 파일 보존", message);
+    stickyToast("preserved", "feed", "수정한 팩 파일 보존", [...seenPreserved].join("\n"));
+    const notice = stickyToasts.get("preserved")!;
+    notice.classList.add("preserved");
+    notice.setAttribute("role", "alert");
+    if (!notice.querySelector("button")) {
+      const close = document.createElement("button");
+      close.textContent = "확인";
+      close.addEventListener("click", () => { dismissToast("preserved"); seenPreserved.clear(); });
+      notice.append(close);
+    }
   };
   await listen("update-preserved", (e) => {
     if (typeof e.payload === "string") showPreserved(e.payload);

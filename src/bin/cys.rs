@@ -307,6 +307,9 @@ enum Command {
     Run {
         #[arg(long)]
         surface: Option<String>,
+        /// Compatibility spelling; every run is already scoped.
+        #[arg(long)]
+        scoped: bool,
         /// Command and arguments (after --)
         #[arg(required = true, last = true)]
         command: Vec<String>,
@@ -2021,7 +2024,7 @@ fn run(command: Command) -> i32 {
             .ok_or_else(|| format!("invalid surface ref: {surface}"))
             .and_then(attach),
 
-        Command::Run { surface, command } => {
+        Command::Run { surface, command, scoped: _ } => {
             // 자식의 종료 코드를 그대로 프로세스 exit code로 전달
             return match run_scoped(surface, command) {
                 Ok(code) => code,
@@ -7811,6 +7814,15 @@ extern "C" fn scoped_cleanup_handler(sig: libc::c_int) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn run_scoped_flag_accepts_the_existing_scoped_path() {
+        use super::*;
+        assert!(matches!(Cli::try_parse_from(["cys", "run", "--scoped", "--", "true"]).unwrap().command,
+            Command::Run { scoped: true, command, .. } if command == ["true"]));
+        assert!(matches!(Cli::try_parse_from(["cys", "run", "--", "true"]).unwrap().command,
+            Command::Run { scoped: false, command, .. } if command == ["true"]));
+    }
+
     #[test]
     fn label_scope_rename_parse_errors_are_korean_only() {
         use super::*;

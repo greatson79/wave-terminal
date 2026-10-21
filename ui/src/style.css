@@ -40,6 +40,10 @@ html, body {
   padding: 3px 10px; cursor: pointer; font-size: calc(12px * var(--menu-scale, 1));
   font-weight: var(--menu-weight, 400);
 }
+#btn-settings { flex-shrink: 0; }
+#topbar button:not(#btn-settings), #brand, #brand-attribution, #daemon-info {
+  min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
 #topbar button[hidden] { display: none; }
 #topbar button:hover { border-color: var(--accent); }
 .badge {

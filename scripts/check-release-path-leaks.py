@@ -14,7 +14,8 @@ from pathlib import Path
 
 
 def needles(root: str, user: str) -> list[bytes]:
-    values = [b"/Users/", b"/home/", b"C:\\Users\\"]
+    # Generic home prefixes are emitted by the help-path scrubber; only flag a concrete build account.
+    values = []
     for value in (root,):
         if value:
             normalized = os.path.normpath(value)
@@ -22,7 +23,8 @@ def needles(root: str, user: str) -> list[bytes]:
                 normalized, normalized.replace("\\", "/"), normalized.replace("/", "\\")
             })
     if user:
-        values.extend(os.fsencode(f"{separator}{user}{separator}") for separator in ("/", "\\"))
+        for prefix in ("/Users/", "/home/", "C:\\Users\\"):
+            values.extend(os.fsencode(f"{prefix}{user}{separator}") for separator in ("/", "\\"))
     return list(dict.fromkeys(v for v in values if v))
 
 

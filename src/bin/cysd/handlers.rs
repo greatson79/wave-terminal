@@ -2470,6 +2470,8 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
         }
 
         // ─── T5 사용량 관측: 세션 트랜스크립트 경로 등록 (SessionStart hook의 결정론 매핑) ───
+        "usage.accounts" => Reply::Single(ok_response(&id, crate::usage::account_rows(daemon))),
+
         "usage.register" => {
             let Some(sid) = resolve_surface_id(&params) else {
                 return Reply::Single(err_response(&id, "invalid_params", "missing surface_id"));

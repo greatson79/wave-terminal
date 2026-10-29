@@ -1,33 +1,36 @@
-export interface UsageSample {
-  agent: string;
-  updated_at: number;
-  rate_updated_at?: number | null;
+export interface UsageAccount {
+  provider: string;
+  account_id: string;
+  label: string;
+  updated_at: number | null;
   rate: { label: string; used_pct: number; resets_at: number | null }[];
 }
 
-export function sidebarUsage(samples: UsageSample[], now = Date.now() / 1000) {
-  const groups = new Map<string, Map<string, { remaining: number; updated: number; reset: boolean }>>();
-  for (const sample of samples) {
-    const agent = sample.agent.toLowerCase();
-    if (agent !== "claude" && agent !== "codex") continue;
-    if (!groups.has(agent)) groups.set(agent, new Map());
-    for (const rate of sample.rate ?? []) {
-      if (rate.label !== "5h" && rate.label !== "7d" || !Number.isFinite(rate.used_pct)) continue;
-      const rows = groups.get(agent)!;
+export interface SidebarUsageRow {
+  key: string;
+  label: string;
+  window: string;
+  remaining: number | null;
+  reset: boolean;
+  age: number | null;
+  severity: "ok" | "warn" | "crit" | "none";
+}
+
+export function sidebarUsage(accounts: readonly UsageAccount[], hidden: readonly string[] = [], now = Date.now() / 1000,
+  owners: Readonly<Record<string, string>> = {}): SidebarUsageRow[] {
+  const rows: SidebarUsageRow[] = [];
+  for (const account of accounts) {
+    const key = `${account.provider}:${account.account_id}`;
+    if (hidden.includes(key)) continue;
+    for (const rate of account.rate ?? []) {
+      if (!rate.label || !Number.isFinite(rate.used_pct)) continue;
       const remaining = Math.max(0, Math.min(100, Math.round(100 - rate.used_pct)));
-      const old = rows.get(rate.label);
+      const age = typeof account.updated_at === "number" ? Math.max(0, Math.floor((now - account.updated_at) / 60)) : null;
       const reset = rate.resets_at != null && rate.resets_at <= now;
-      const updated = sample.rate_updated_at ?? sample.updated_at;
-      if (!old || old.reset && !reset || old.reset === reset && remaining < old.remaining || old.reset === reset && remaining === old.remaining && updated > old.updated) rows.set(rate.label, {
-        remaining, updated,
-        reset,
-      });
+      rows.push({ key: `${key}:${rate.label}`, label: owners[key]?.trim() || account.label || account.provider,
+        window: rate.label, remaining: reset ? null : remaining, reset, age,
+        severity: reset ? "none" : remaining > 50 ? "ok" : remaining >= 20 ? "warn" : "crit" });
     }
   }
-  return [...groups].map(([agent, rows]) => ({ agent, rows: ["5h", "7d"].map((label) => {
-    const row = rows.get(label);
-    return { label, remaining: row?.remaining ?? null, reset: row?.reset ?? false,
-      age: row ? Math.max(0, Math.floor((now - row.updated) / 60)) : null,
-      severity: row ? row.remaining > 50 ? "ok" : row.remaining >= 20 ? "warn" : "crit" : "none" };
-  }) }));
+  return rows;
 }

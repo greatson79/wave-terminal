@@ -10,6 +10,11 @@ export interface Settings {
     titleIcon: boolean; bodyWeight: number; menuWeight: number; menuScale: number;
   };
   bar: { order: string[]; hidden: string[] };
+  layout: { sidebarSide: "left" | "right" };
+  panels: { helpCollapsed: boolean };
+  header: { daemonCollapsed: boolean };
+  usage: { enabled: boolean; hiddenAccounts: string[] };
+  moai: { enabled: boolean };
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -17,6 +22,11 @@ export const DEFAULT_SETTINGS: Settings = {
   look: { bg: null, font: null, titleSize: 11, titleWeight: 400,
     titleIcon: true, bodyWeight: 400, menuWeight: 400, menuScale: 100 },
   bar: { order: [...BAR_IDS], hidden: [] },
+  layout: { sidebarSide: "left" },
+  panels: { helpCollapsed: false },
+  header: { daemonCollapsed: true },
+  usage: { enabled: true, hiddenAccounts: [] },
+  moai: { enabled: true },
 };
 
 const validColor = (v: unknown): v is string => typeof v === "string" && /^#[0-9a-fA-F]{6}$/.test(v);
@@ -29,6 +39,11 @@ export function readSettings(raw: string | null, legacyBg: string | null, legacy
   try { parsed = raw ? JSON.parse(raw) : null; } catch { /* damaged settings use defaults */ }
   const look = parsed?.ver === 1 ? parsed.look : null;
   const bar = parsed?.ver === 1 ? parsed.bar : null;
+  const layout = parsed?.ver === 1 ? parsed.layout : null;
+  const panels = parsed?.ver === 1 ? parsed.panels : null;
+  const header = parsed?.ver === 1 ? parsed.header : null;
+  const usage = parsed?.ver === 1 ? parsed.usage : null;
+  const moai = parsed?.ver === 1 ? parsed.moai : null;
   const bg = validColor(legacyBg) ? legacyBg : legacyBg === null ? null : validColor(look?.bg) ? look.bg : null;
   const font = validFont(legacyFont) ? legacyFont : legacyFont === null ? null : validFont(look?.font) ? look.font : null;
   const savedOrder = Array.isArray(bar?.order) ? bar.order : [];
@@ -46,5 +61,15 @@ export function readSettings(raw: string | null, legacyBg: string | null, legacy
       menuScale: numberIn(look?.menuScale, 70, 150) ? look.menuScale : DEFAULT_SETTINGS.look.menuScale,
     },
     bar: { order, hidden: [...new Set(savedHidden.filter((id: unknown) => ids.includes(id as string))) ] },
+    layout: { sidebarSide: layout?.sidebarSide === "right" ? "right" : "left" },
+    panels: { helpCollapsed: typeof panels?.helpCollapsed === "boolean" ? panels.helpCollapsed : false },
+    header: { daemonCollapsed: typeof header?.daemonCollapsed === "boolean" ? header.daemonCollapsed : true },
+    usage: {
+      enabled: typeof usage?.enabled === "boolean" ? usage.enabled : true,
+      hiddenAccounts: Array.isArray(usage?.hiddenAccounts)
+        ? [...new Set(usage.hiddenAccounts.filter((v: unknown) => typeof v === "string" && v.length <= 256))]
+        : [],
+    },
+    moai: { enabled: typeof moai?.enabled === "boolean" ? moai.enabled : true },
   };
 }

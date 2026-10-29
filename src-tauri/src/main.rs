@@ -13,6 +13,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_updater::UpdaterExt;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
+mod user_settings;
+
 type Stream = Box<dyn AsyncReadWrite>;
 trait AsyncReadWrite: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncReadWrite for T {}
@@ -181,6 +183,49 @@ async fn daemon_status(socket: Option<String>) -> Result<Value, String> {
     rpc_on(&resolve_socket(&socket), "system.identify", json!({"caller": "ui"})).await
 }
 
+#[tauri::command]
+fn set_custom_header(enabled: bool, window: tauri::WebviewWindow) -> Result<(), String> {
+    window.set_title(if enabled { "Wave - Wave Javis Terminal" } else { "Wave Terminal" })
+        .map_err(|e| e.to_string())
+}
+
+fn executable_on_path(path: &std::ffi::OsStr, name: &str) -> bool {
+    let candidates: &[&str] = if cfg!(windows) { &[".exe", ".cmd", ".bat"] } else { &[""] };
+    std::env::split_paths(path).any(|dir| candidates.iter().any(|suffix| {
+        let file = dir.join(format!("{name}{suffix}"));
+        let Ok(meta) = std::fs::metadata(file) else { return false };
+        if !meta.is_file() { return false; }
+        #[cfg(unix)]
+        { use std::os::unix::fs::PermissionsExt; return meta.permissions().mode() & 0o111 != 0; }
+        #[cfg(windows)]
+        { true }
+    }))
+}
+
+#[tauri::command]
+fn moai_available() -> bool {
+    std::env::var_os("PATH").is_some_and(|path| executable_on_path(&path, "moai"))
+}
+
+fn user_settings_file(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path().app_config_dir().map(|dir| dir.join("user-settings.json")).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn owner_custom_header(app: AppHandle) -> Result<bool, String> {
+    user_settings::custom_header(&user_settings_file(&app)?)
+}
+
+#[tauri::command]
+fn account_owners(app: AppHandle) -> Result<std::collections::HashMap<String, String>, String> {
+    user_settings::account_owners(&user_settings_file(&app)?)
+}
+
+#[tauri::command]
+fn set_account_owner(app: AppHandle, key: String, owner: String) -> Result<std::collections::HashMap<String, String>, String> {
+    user_settings::set_account_owner(&user_settings_file(&app)?, &key, &owner)
+}
+
 /// GUI(cys-app) 자기 버전 — 데몬 버전(system.identify .version)과 비교해 rename-swap 후
 /// lame-duck 스큐(구 데몬 + 새 앱)를 UI 배지로 알리는 용도(P2 · 비차단·강제 재시작 없음).
 #[tauri::command]
@@ -191,6 +236,37 @@ fn app_version() -> String {
 #[tauri::command]
 async fn list_surfaces(socket: Option<String>) -> Result<Value, String> {
     rpc_on(&resolve_socket(&socket), "surface.list", json!({})).await
+}
+
+/// Account-rate view across the base daemon and live department daemons.
+#[tauri::command]
+async fn usage_accounts_all() -> Result<Value, String> {
+    let mut targets = vec![default_socket()];
+    if let Ok(registry) = list_depts() {
+        if let Some(depts) = registry.get("depts").and_then(Value::as_object) {
+            for (name, meta) in depts {
+                targets.push(meta.get("socket").and_then(Value::as_str)
+                    .map(std::path::PathBuf::from).unwrap_or_else(|| dept_socket_path(name)));
+            }
+        }
+    }
+    let mut merged: std::collections::HashMap<(String, String), Value> = std::collections::HashMap::new();
+    for socket in targets {
+        let Ok(Ok(response)) = tokio::time::timeout(
+            std::time::Duration::from_secs(2), rpc_oneshot(&socket, "usage.accounts", json!({})),
+        ).await else { continue };
+        for account in response["accounts"].as_array().into_iter().flatten() {
+            let key = (account["provider"].as_str().unwrap_or("").to_string(),
+                account["account_id"].as_str().unwrap_or("").to_string());
+            let newer = merged.get(&key).and_then(|old| old["updated_at"].as_f64()).unwrap_or(0.0)
+                <= account["updated_at"].as_f64().unwrap_or(0.0);
+            if newer { merged.insert(key, account.clone()); }
+        }
+    }
+    let mut accounts: Vec<Value> = merged.into_values().collect();
+    accounts.sort_by(|a, b| (a["provider"].as_str().unwrap_or(""), a["label"].as_str().unwrap_or(""))
+        .cmp(&(b["provider"].as_str().unwrap_or(""), b["label"].as_str().unwrap_or(""))));
+    Ok(json!({"accounts": accounts}))
 }
 
 /// org.status 브리지 — 사이드바 라이브 신호(B3)·command palette(07) 공유 소스.
@@ -2537,7 +2613,13 @@ fn main() {
             ceo_pending,
             promote_pending_ceo,
             daemon_status,
+            set_custom_header,
+            moai_available,
+            account_owners,
+            owner_custom_header,
+            set_account_owner,
             list_surfaces,
+            usage_accounts_all,
             org_status,
             help_username,
             prepare_help,
@@ -2685,6 +2767,26 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn moai_path_probe_requires_a_file_and_unix_execute_bit() {
+        let dir = std::env::temp_dir().join(format!("wave-moai-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let binary = dir.join(if cfg!(windows) { "moai.exe" } else { "moai" });
+        std::fs::write(&binary, b"test").unwrap();
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(!super::executable_on_path(dir.as_os_str(), "moai"));
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        #[cfg(windows)]
+        assert!(super::executable_on_path(dir.as_os_str(), "moai"));
+        #[cfg(unix)]
+        assert!(super::executable_on_path(dir.as_os_str(), "moai"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn kickstart_stops_after_three_attempts() {
         assert!(!super::should_kickstart(0));

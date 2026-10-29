@@ -24,8 +24,12 @@ html, body {
   -webkit-user-select: none; user-select: none;
 }
 #brand { font-weight: 700; color: var(--accent); }
-#brand-attribution { color: var(--muted); font-size: 11px; margin-left: 6px; }
 #daemon-info { color: #8b949e; font-size: 11px; }
+#header-folder { flex: 0 1 auto; min-width: 0; max-width: 36vw; color: var(--muted); font-size: 11px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+#moai-status { color: var(--muted); font-size: 11px; }
+#header-daemon { color: #8b949e; font-size: 11px; }
+#header-daemon summary { cursor: pointer; }
+#header-daemon[open] { display: flex; align-items: center; gap: 5px; min-width: 0; }
 /* P2 버전 스큐 배지 — lame-duck 데몬(세션 보존) 안내. 경고색이되 위협적이지 않게(불안 방지가 목적).
    클릭 = 데몬 교대(manualRotateSkewed — 메인+부서 순차). */
 .ver-skew-badge {
@@ -41,7 +45,7 @@ html, body {
   font-weight: var(--menu-weight, 400);
 }
 #btn-settings { flex-shrink: 0; }
-#topbar button:not(#btn-settings), #brand, #brand-attribution, #daemon-info {
+#topbar button:not(#btn-settings), #brand, #header-folder, #moai-status, #daemon-info {
   min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
 }
 #topbar button[hidden] { display: none; }
@@ -63,6 +67,11 @@ html, body {
   -webkit-user-select: none; user-select: none;
   overflow: hidden;
 }
+#body-row.sidebar-right #wsbar { border-right: 0; border-left: 1px solid var(--hairline); }
+#body-row.sidebar-right #wsbar { order: 3; }
+#body-row.sidebar-right #wsbar-drag { order: 4; }
+#body-row.sidebar-right #wsbar-drag { margin-left: 0; margin-right: -2px; }
+#body-row.sidebar-right #root { order: 1; }
 #wsbar-drag {
   flex: none; width: 5px; cursor: col-resize; margin-left: -2px;
   background: transparent; z-index: 5;
@@ -94,7 +103,10 @@ body.wsbar-resizing { cursor: col-resize; -webkit-user-select: none; user-select
 #sidebar-usage .usage-row.none { color: var(--text); }
 #sidebar-usage .usage-row.stale { opacity: .45; }
 #sidebar-usage small { display: block; margin-bottom: 8px; opacity: .7; }
-#sidebar-help { flex: none; display: flex; flex-direction: column; gap: 6px; padding: 9px; border-top: 1px solid var(--hairline); font-size: 12px; }
+#sidebar-help { flex: none; font-size: 12px; }
+#help-panel-details { border-top: 1px solid var(--hairline); padding: 9px; }
+#help-panel-details > summary { cursor: pointer; font-weight: 600; }
+#help-panel-content { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; }
 #sidebar-help textarea { min-height: 76px; max-height: 22vh; resize: vertical; }
 #sidebar-help textarea, #sidebar-help select { min-width: 0; width: 100%; box-sizing: border-box; background: var(--bar); color: var(--text); border: 1px solid var(--hairline); border-radius: 4px; user-select: text; -webkit-user-select: text; }
 #sidebar-help pre { max-height: 18vh; overflow: auto; white-space: pre-wrap; word-break: break-word; user-select: text; -webkit-user-select: text; }

@@ -2,15 +2,16 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8" />
-  <title>Wave Terminal — CYSJavis Terminal</title>
+  <title>Wave Terminal</title>
   <link rel="stylesheet" href="./xterm.css" />
   <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
   <header id="topbar">
-    <span id="brand" title="Wave Terminal은 CYSJavis(idoforgod)의 cys-terminal(MIT)을 기반으로 Wave AI Networks가 빌드·배포하는 파생본입니다.">Wave Terminal</span>
-    <span id="brand-attribution">CYSJavis / cys-terminal 파생본</span>
-    <span id="daemon-info">daemon: connecting…</span>
+    <span id="brand">Wave Terminal</span>
+    <span id="header-folder" hidden></span>
+    <span id="moai-status" hidden>MoAI 사용 가능</span>
+    <details id="header-daemon"><summary>daemon ▸</summary><span id="daemon-info"></span></details>
     <span class="spacer"></span>
     <button id="btn-new" title="새 surface (⌘T)">+ New</button>
     <button id="btn-split-h" title="오른쪽 분할 (⌘D)">Split →</button>
@@ -29,13 +30,17 @@
       <div id="ws-tabs"></div>
       <section id="sidebar-usage" aria-label="남은 사용량"><div>측정 안 됨 — 첫 응답 뒤 표시됩니다</div></section>
       <section id="sidebar-help" aria-label="도움 요청 · 피드백">
-        <strong>도움 요청 · 피드백</strong>
-        <select id="help-kind" aria-label="종류"><option value="help">도움 요청</option><option value="feedback">피드백</option></select>
-        <textarea id="help-message" aria-label="보내는 글" placeholder="도움이 필요한 내용이나 의견을 적어 주세요"></textarea>
-        <div id="help-limit" hidden>500자까지만 보냅니다</div>
-        <details id="help-preview-details"><summary>보낼 내용 보기</summary><pre id="help-preview"></pre></details>
-        <button id="help-send" disabled>보내기</button>
-        <div id="help-result" role="status"></div>
+        <details id="help-panel-details" open>
+          <summary>도움 요청 · 피드백</summary>
+          <div id="help-panel-content">
+            <select id="help-kind" aria-label="종류"><option value="help">도움 요청</option><option value="feedback">피드백</option></select>
+            <textarea id="help-message" aria-label="보내는 글" placeholder="도움이 필요한 내용이나 의견을 적어 주세요"></textarea>
+            <div id="help-limit" hidden>500자까지만 보냅니다</div>
+            <details id="help-preview-details"><summary>보낼 내용 보기</summary><pre id="help-preview"></pre></details>
+            <button id="help-send" disabled>보내기</button>
+            <div id="help-result" role="status"></div>
+          </div>
+        </details>
       </section>
     </nav>
     <div id="wsbar-drag" title="드래그로 사이드바 폭 조절 · 더블클릭=기본폭"></div>

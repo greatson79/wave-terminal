@@ -16,7 +16,7 @@ import { composeFontFamily, FONT_CHOICES, ROLE_COLOR, roleDotColor } from "./app
 import { BAR_IDS, DEFAULT_SETTINGS, readSettings, SETTINGS_KEY } from "./settings";
 import { safeHelpText } from "./help";
 import { bindPaneRename, paneHeading, splitPaneHeading } from "./paneheading";
-import { sidebarUsage } from "./usagebar";
+import { sidebarUsage, type UsageAccount } from "./usagebar";
 import { inputSource } from "./inputsource";
 import { sendPreparedHelp } from "./helpflow";
 
@@ -215,37 +215,47 @@ function renderUsage(el: HTMLElement, u: ObservedUsage | null | undefined) {
   el.classList.toggle("stale", age > 120);
 }
 
-function renderSidebarUsage(samples: ObservedUsage[]) {
+let sidebarUsageAccounts: UsageAccount[] = [];
+let accountOwners: Record<string, string> = {};
+function renderSidebarUsage(accounts: UsageAccount[]) {
   const box = document.getElementById("sidebar-usage")!;
   box.replaceChildren();
-  const groups = sidebarUsage(samples);
-  if (!groups.length) {
-    box.textContent = "측정 안 됨 — 첫 응답 뒤 표시됩니다";
+  box.hidden = !settings.usage.enabled;
+  if (box.hidden) return;
+  const rows = sidebarUsage(accounts, settings.usage.hiddenAccounts, Date.now() / 1000, accountOwners);
+  if (!rows.length) {
+    box.textContent = "측정 불가";
     return;
   }
-  for (const group of groups) {
-    const name = document.createElement("strong");
-    name.textContent = group.agent === "claude" ? "Claude" : "Codex";
-    box.append(name);
-    if (group.agent === "claude" && group.rows.every((row) => row.remaining == null)) {
-      const note = document.createElement("div");
-      note.textContent = "이 부서는 사용량 연결이 안 돼 있습니다";
-      box.append(note);
-    }
-    for (const row of group.rows) {
-      const line = document.createElement("div");
-      line.className = `usage-row ${row.severity}${row.age != null && row.age >= 10 ? " stale" : ""}`;
-      const value = row.reset ? "리셋됨 — 새 측정 대기" : row.remaining == null ? "측정 안 됨" : `남음 ${row.remaining}%`;
-      const bars = row.remaining == null || row.reset ? "" : `${"▓".repeat(Math.round(row.remaining / 12.5))}${"░".repeat(8 - Math.round(row.remaining / 12.5))}  `;
-      line.textContent = `${row.label === "5h" ? "5시간" : "7일"}  ${bars}${value}`;
-      box.append(line);
-      if (row.age != null) {
-        const stamp = document.createElement("small");
-        stamp.textContent = `측정 ${row.age === 0 ? "방금" : `${row.age}분 전`}`;
-        box.append(stamp);
-      }
+  for (const row of rows) {
+    const line = document.createElement("div");
+    line.className = `usage-row ${row.severity}${row.age != null && row.age >= 10 ? " stale" : ""}`;
+    const bars = row.remaining == null ? "" : `${"▓".repeat(Math.round(row.remaining / 12.5))}${"░".repeat(8 - Math.round(row.remaining / 12.5))}  `;
+    const value = row.reset ? "리셋됨 — 새 측정 대기" : row.remaining == null ? "측정 불가" : `남음 ${row.remaining}%`;
+    line.textContent = `${row.label} · ${row.window}  ${bars}${value}`;
+    box.append(line);
+    if (row.age != null) {
+      const stamp = document.createElement("small");
+      stamp.textContent = `측정 ${row.age === 0 ? "방금" : `${row.age}분 전`}`;
+      box.append(stamp);
     }
   }
+}
+
+async function refreshSidebarUsage() {
+  try {
+    const data = await invoke("usage_accounts_all") as { accounts?: UsageAccount[] };
+    sidebarUsageAccounts = Array.isArray(data?.accounts) ? data.accounts : [];
+  } catch {
+    sidebarUsageAccounts = [];
+  }
+  renderSidebarUsage(sidebarUsageAccounts);
+}
+
+async function refreshMoaiStatus() {
+  const status = document.getElementById("moai-status")!;
+  if (!settings.moai.enabled) { status.hidden = true; return; }
+  status.hidden = !(await invoke("moai_available").catch(() => false));
 }
 
 // ---------- T6 Control Center (전용 풀 패널 — 네이티브 실시간 모니터링) ----------
@@ -1358,6 +1368,18 @@ function applyZoom(delta: number | null) {
 let settings = readSettings(localStorage.getItem(SETTINGS_KEY), localStorage.getItem("cys-bg-color"), localStorage.getItem("cys-font-face"));
 function saveSettings() { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); }
 saveSettings(); // first run migrates the two legacy values; the old keys stay available for rollback
+function applyUsageSettings() { renderSidebarUsage(sidebarUsageAccounts); }
+applyUsageSettings();
+const helpPanelDetails = document.getElementById("help-panel-details") as HTMLDetailsElement;
+function applyLayoutSettings() {
+  document.getElementById("body-row")!.classList.toggle("sidebar-right", settings.layout.sidebarSide === "right");
+  helpPanelDetails.open = !settings.panels.helpCollapsed;
+}
+helpPanelDetails.addEventListener("toggle", () => {
+  settings.panels.helpCollapsed = !helpPanelDetails.open;
+  saveSettings();
+});
+applyLayoutSettings();
 let fontFace: string | null = settings.look.font;
 function applyFontFace(face: string | null) {
   fontFace = face && face.trim() ? face : null;
@@ -1404,7 +1426,7 @@ let groupCounter = 1; // 06: 그룹 id 발급(ws의 wsCounter와 분리)
 let focusedSid: number | null = null;
 const panes = new Map<string, PaneRuntime>(); // 키 = paneKey(sid, socket)
 applyFontFace(fontFace); // keep the rollback key synchronized with the new settings key
-interface PaneTitleState { reported: string | null; exited: boolean; role?: string | null; label?: string | null; model?: string | null; usage?: ObservedUsage | null }
+interface PaneTitleState { reported: string | null; exited: boolean; role?: string | null; label?: string | null; model?: string | null; usage?: ObservedUsage | null; cwd?: string | null }
 const paneTitleState = new Map<string, PaneTitleState>();
 // 부서 데몬 socket_slug(F3 백엔드 단일진실) → socket 경로. launch_dept_daemon 반환·daemon-event로 채운다.
 const socketForSlug = new Map<string, string>();
@@ -1435,6 +1457,36 @@ function applyBgColor(color: string | null): void {
 applyBgColor(bgColor); // 마운트 시 저장된 배경색 복원(없으면 기본 유지)
 
 const current = (): Workspace => workspaces[activeWs];
+
+const headerFolder = document.getElementById("header-folder")!;
+const headerDaemon = document.getElementById("header-daemon") as HTMLDetailsElement;
+const headerDaemonSummary = headerDaemon.querySelector("summary")!;
+const headerDaemonInfo = document.getElementById("daemon-info")!;
+let ownerCustomHeader = false;
+function renderHeader() {
+  const cwd = focusedSid == null ? null : paneTitleState.get(paneKey(focusedSid, current()?.socket))?.cwd;
+  const label = !cwd ? "" : ownerCustomHeader
+    ? cwd
+    : (cwd.split(/[\\/]/).filter(Boolean).at(-1) ?? "");
+  headerFolder.textContent = label;
+  headerFolder.hidden = !label;
+}
+function applyHeaderSettings() {
+  headerDaemon.open = !settings.header.daemonCollapsed;
+  headerDaemonSummary.textContent = headerDaemon.open ? "daemon ▾" : "daemon ▸";
+  void invoke("set_custom_header", { enabled: ownerCustomHeader }).catch(() => {});
+  renderHeader();
+}
+headerDaemon.addEventListener("toggle", () => {
+  settings.header.daemonCollapsed = !headerDaemon.open;
+  headerDaemonSummary.textContent = headerDaemon.open ? "daemon ▾" : "daemon ▸";
+  saveSettings();
+});
+applyHeaderSettings();
+void invoke("owner_custom_header").then((enabled) => {
+  ownerCustomHeader = enabled === true;
+  applyHeaderSettings();
+}).catch(() => {});
 
 // 그룹의 anchor(부서) ws — anchorSocket이 일치하는 ws. 부서 그룹만 존재.
 const anchorWsOf = (g: GroupMeta): Workspace | undefined =>
@@ -1561,7 +1613,6 @@ function setRoleDot(el: HTMLElement, role: string | null) {
 //   이게 없으면 노드가 데몬 안에서 헤드리스로만 돌고 화면에 보이지 않는다.
 let refreshing = false;
 let started = false; // start()의 세션 복원이 끝나기 전 인터벌 자동 입양 차단 (이중 생성 방지)
-const sidebarUsageCache = new Map<string, ObservedUsage[]>();
 async function refreshPaneTitles() {
   if (!started || refreshing) return; // 겹친 호출의 이중 입양 방지
   refreshing = true;
@@ -1569,7 +1620,6 @@ async function refreshPaneTitles() {
     // 멀티마스터 F4: workspace별 소켓을 순회 — 각 데몬의 surface를 그 소켓 ws에만 귀속시킨다.
     const sockets = [...new Set(workspaces.map((w) => w.socket))];
     let adopted = false;
-    const allUsage: ObservedUsage[] = [];
     for (const sk of sockets) {
       const org = (await invoke("org_status", { socket: sk }).catch(() => ({ surfaces: [] }))) as { surfaces?: { surface_id: number; status?: { task?: string | null } }[] };
       const tasks = new Map((org.surfaces || []).map((s) => [s.surface_id, s.status?.task ?? null]));
@@ -1585,14 +1635,13 @@ async function refreshPaneTitles() {
           usage?: ObservedUsage | null;
         }[];
       };
-      for (const s of r.surfaces) if (!s.exited && s.usage) allUsage.push(s.usage);
       for (const s of r.surfaces) {
         const rt = panes.get(paneKey(s.surface_id, sk));
         if (!rt) continue;
         renderUsage(rt.usageEl, s.exited ? null : s.usage); // 종료 pane은 배지 제거 (혼동 방지)
         setRoleDot(rt.roleEl, s.exited ? null : s.role); // 역할 점도 동일 주기 갱신
         const state = { reported: tasks.get(s.surface_id) ?? null, exited: s.exited,
-          role: s.role, label: s.label, model: s.usage?.model ?? s.model, usage: s.usage };
+          role: s.role, label: s.label, model: s.usage?.model ?? s.model, usage: s.usage, cwd: s.live_cwd };
         paneTitleState.set(paneKey(s.surface_id, sk), state);
         displayPaneHeading(rt.titleEl, s.surface_id, state);
       }
@@ -1613,9 +1662,7 @@ async function refreshPaneTitles() {
         adopted = true;
       }
     }
-    for (const agent of new Set(allUsage.map((u) => u.agent)))
-      sidebarUsageCache.set(agent, allUsage.filter((u) => u.agent === agent));
-    renderSidebarUsage([...sidebarUsageCache.values()].flat());
+    renderHeader();
     if (adopted) {
       render();
       // 자동입양으로 pane이 생긴 활성 ws에 유효 포커스가 없으면 그 첫 pane에 포커스(포커스 회수, 탈취 아님).
@@ -2079,6 +2126,7 @@ function setFocus(sid: number) {
   for (const [id, rt] of panes) rt.el.classList.toggle("focused", id === key);
   panes.get(key)?.term.focus();
   updateFtRoot(); // 파일 트리가 열려 있으면 선택한 surface의 폴더로 전환
+  renderHeader();
 }
 
 // 드롭 물리좌표(디바이스 픽셀)를 CSS px로 환산해 그 지점을 포함하는 pane 런타임을 찾는다.
@@ -3017,10 +3065,96 @@ function openSettingsMenu(anchor: HTMLElement) {
       settings.bar = { order: [...BAR_IDS], hidden: [] };
       saveSettings(); applyBar(); renderMenu();
     });
+    const layout = section("정렬·패널");
+    const sidebarSide = document.createElement("select");
+    sidebarSide.add(new Option("왼쪽", "left"));
+    sidebarSide.add(new Option("오른쪽", "right"));
+    sidebarSide.value = settings.layout.sidebarSide;
+    sidebarSide.addEventListener("change", () => {
+      settings.layout.sidebarSide = sidebarSide.value === "right" ? "right" : "left";
+      saveSettings(); applyLayoutSettings();
+    });
+    row(layout, "사이드바 위치", sidebarSide);
+    const helpCollapsed = document.createElement("input");
+    helpCollapsed.type = "checkbox";
+    helpCollapsed.checked = settings.panels.helpCollapsed;
+    helpCollapsed.addEventListener("change", () => { helpPanelDetails.open = !helpCollapsed.checked; });
+    row(layout, "도움 패널 접기", helpCollapsed);
+    button(layout, "이 구역만 기본값", () => {
+      settings.layout = { ...DEFAULT_SETTINGS.layout };
+      settings.panels = { ...DEFAULT_SETTINGS.panels };
+      saveSettings(); applyLayoutSettings(); renderMenu();
+    });
+    const usage = section("사용량");
+    const usageEnabled = document.createElement("input");
+    usageEnabled.type = "checkbox";
+    usageEnabled.checked = settings.usage.enabled;
+    usageEnabled.addEventListener("change", () => {
+      settings.usage.enabled = usageEnabled.checked;
+      saveSettings(); applyUsageSettings();
+    });
+    row(usage, "사용량 패널 표시", usageEnabled);
+    for (const account of sidebarUsageAccounts) {
+      const key = `${account.provider}:${account.account_id}`;
+      const visible = document.createElement("input");
+      visible.type = "checkbox";
+      visible.checked = !settings.usage.hiddenAccounts.includes(key);
+      visible.addEventListener("change", () => {
+        settings.usage.hiddenAccounts = visible.checked
+          ? settings.usage.hiddenAccounts.filter((v) => v !== key)
+          : [...settings.usage.hiddenAccounts, key];
+        saveSettings(); renderSidebarUsage(sidebarUsageAccounts);
+      });
+      const accountControls = document.createElement("span");
+      const owner = document.createElement("input");
+      owner.type = "text";
+      owner.maxLength = 64;
+      owner.value = accountOwners[key] ?? "";
+      owner.placeholder = account.label || account.provider;
+      owner.setAttribute("aria-label", `${account.provider} 계정 표시명`);
+      owner.addEventListener("change", async () => {
+        try {
+          accountOwners = await invoke("set_account_owner", { key, owner: owner.value }) as Record<string, string>;
+          renderSidebarUsage(sidebarUsageAccounts);
+        } catch (error) {
+          owner.value = accountOwners[key] ?? "";
+          toast("health", "계정 표시명 저장 실패", String(error));
+        }
+      });
+      accountControls.append(visible, owner);
+      row(usage, account.label || account.provider, accountControls);
+    }
+    button(usage, "이 구역만 기본값", () => {
+      settings.usage = { ...DEFAULT_SETTINGS.usage, hiddenAccounts: [] };
+      saveSettings(); applyUsageSettings(); renderMenu();
+    });
+    const moai = section("MoAI");
+    const moaiEnabled = document.createElement("input");
+    moaiEnabled.type = "checkbox";
+    moaiEnabled.checked = settings.moai.enabled;
+    moaiEnabled.addEventListener("change", () => {
+      settings.moai.enabled = moaiEnabled.checked;
+      saveSettings(); void refreshMoaiStatus();
+    });
+    row(moai, "PATH에서 자동 감지", moaiEnabled);
+    button(moai, "이 구역만 기본값", () => {
+      settings.moai = { ...DEFAULT_SETTINGS.moai };
+      saveSettings(); void refreshMoaiStatus(); renderMenu();
+    });
+    const header = section("헤더");
+    const daemonCollapsed = document.createElement("input");
+    daemonCollapsed.type = "checkbox";
+    daemonCollapsed.checked = settings.header.daemonCollapsed;
+    daemonCollapsed.addEventListener("change", () => { headerDaemon.open = !daemonCollapsed.checked; });
+    row(header, "daemon 상세 접기", daemonCollapsed);
+    button(header, "이 구역만 기본값", () => {
+      settings.header = { ...DEFAULT_SETTINGS.header };
+      saveSettings(); applyHeaderSettings(); renderMenu();
+    });
     const reset = section("기본값 복원");
     button(reset, "모두 기본값으로", () => {
       settings = structuredClone(DEFAULT_SETTINGS);
-      applyBgColor(null); applyFontFace(null); applyLook(); applyBar(); renderMenu();
+      applyBgColor(null); applyFontFace(null); applyLook(); applyBar(); applyLayoutSettings(); applyUsageSettings(); applyHeaderSettings(); renderMenu();
     });
   };
   renderMenu();
@@ -4286,6 +4420,12 @@ async function start() {
 
   const status = (await invoke("daemon_status")) as Record<string, unknown>;
   info.textContent = `daemon pid=${status.daemon_pid} sock=${status.socket_path}`;
+  headerDaemonInfo.textContent = `pid=${status.daemon_pid} sock=${status.socket_path}`;
+  accountOwners = await invoke("account_owners").catch(() => ({})) as Record<string, string>;
+  void refreshSidebarUsage();
+  setInterval(() => void refreshSidebarUsage(), 30_000);
+  void refreshMoaiStatus();
+  setInterval(() => void refreshMoaiStatus(), 60_000);
 
   // 버전 스큐 세대교체(메인 + 부서 데몬) — 시작 1회 + 5분 주기 재검(B). 무중단 rename-swap의 짝으로
   // 구 데몬(lame-duck) 스큐를 비차단 배지로 알리고, 잃을 세션 0인 노드는 무손실 자동 교대한다.
@@ -4771,9 +4911,10 @@ const wsbarDrag = document.getElementById("wsbar-drag");
 wsbarDrag?.addEventListener("mousedown", (e0: MouseEvent) => {
   e0.preventDefault();
   const startX = e0.clientX, startW = wsbarW;
+  const fromRight = document.getElementById("body-row")!.classList.contains("sidebar-right");
   document.body.classList.add("wsbar-resizing");
   const move = (e: MouseEvent) => {
-    wsbarW = clampWsbarWidth(startW + (e.clientX - startX));
+    wsbarW = clampWsbarWidth(startW + (fromRight ? startX - e.clientX : e.clientX - startX));
     applyWsbarVars(); // 드래그 중 실시간 반영 — pane ResizeObserver가 연속 refit(60ms 디바운스)
   };
   const up = () => {

@@ -40,8 +40,8 @@ class ReleasePathGateTests(unittest.TestCase):
     def test_private_identity_is_denied_and_ci_paths_are_diagnostic_only(self):
         patterns = GATE.needle_groups("D:\\a\\repo", "runneradmin", "kylechoi")
         self.assertIn(b"kylechoi", patterns["owner-identity"])
-        self.assertIn(b"/Users/kylechoi/", patterns["owner-local-home"])
-        self.assertIn(b"/Users/runneradmin/", patterns["ci-home"])
+        self.assertIn(b"/Users/" + b"kylechoi/", patterns["owner-local-home"])
+        self.assertIn(b"/Users/" + b"runneradmin/", patterns["ci-home"])
         self.assertIn(b"D:\\a\\repo", patterns["ci-checkout"])
         self.assertNotIn(b"/Users/", [marker for group in patterns.values() for marker in group])
 

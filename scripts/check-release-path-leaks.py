@@ -15,12 +15,14 @@ from pathlib import Path
 
 def needles(root: str, user: str) -> list[bytes]:
     values = [b"/Users/", b"/home/", b"C:\\Users\\"]
-    for value in (root, user):
+    for value in (root,):
         if value:
             normalized = os.path.normpath(value)
             values.extend(os.fsencode(v) for v in {
                 normalized, normalized.replace("\\", "/"), normalized.replace("/", "\\")
             })
+    if user:
+        values.extend(os.fsencode(f"{separator}{user}{separator}") for separator in ("/", "\\"))
     return list(dict.fromkeys(v for v in values if v))
 
 

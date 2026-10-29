@@ -37,6 +37,12 @@ class ReleasePathGateTests(unittest.TestCase):
             self.assertEqual(scanned, 1)
             self.assertEqual(hits, ["binary.exe"])
 
+    def test_username_is_checked_as_a_path_segment_not_common_prose(self):
+        patterns = GATE.needles("/build/work", "runner")
+        self.assertIn(b"/runner/", patterns)
+        self.assertIn(b"\\runner\\", patterns)
+        self.assertNotIn(b"runner", patterns)
+
 
 if __name__ == "__main__":
     unittest.main()

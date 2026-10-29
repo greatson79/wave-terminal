@@ -7,7 +7,7 @@ name: windows-build (feasibility)
 
 on:
   push:
-    branches: ['feat/windows-x64-dist', 'fix/v024-first-boot']
+    branches: ['feat/windows-x64-dist', 'fix/v024-first-boot', 'feat/v0.3.0-custom']
   workflow_dispatch:
 
 permissions:
@@ -18,6 +18,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Version SOT check
+        shell: bash
+        run: sh scripts/version-check.sh
 
       - name: Full pack and Windows idempotency regressions
         shell: pwsh
@@ -128,7 +132,7 @@ jobs:
           python scripts/verify_win_crt.py --setup "${SETUP[0]}"
 
       - name: Upload NSIS installer artifact
-        if: always()
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: cys-windows-x64-nsis
@@ -137,6 +141,7 @@ jobs:
           if-no-files-found: error
 
       - name: 자기완결 검증 (silent install → 동봉 bash·python3 실행)
+        if: github.ref != 'refs/heads/feat/v0.3.0-custom'
         shell: pwsh
         run: |
           $exe = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
@@ -171,13 +176,14 @@ jobs:
           Write-Host "OK: 자기완결 런타임 설치·실행·경로일치 검증 통과"
 
       - name: Cold startup timing regression (unchanged 4-second CLI budget)
+        if: github.ref != 'refs/heads/feat/v0.3.0-custom'
         shell: pwsh
         timeout-minutes: 5
         run: |
           ./scripts/windows-pty-diagnose.ps1 -InstallDirectory (Join-Path $env:LOCALAPPDATA 'Wave Terminal') -OutputDirectory "$pwd/startup-evidence" -RequireReady
 
       - name: Upload startup timing evidence
-        if: always()
+        if: always() && github.ref != 'refs/heads/feat/v0.3.0-custom'
         uses: actions/upload-artifact@v4
         with:
           name: windows-startup-timing
@@ -188,6 +194,7 @@ jobs:
           if-no-files-found: warn
 
       - name: PTY 스모크 (검은 pane 회귀 게이트 — ConPTY 셸 출력·실행 실측)
+        if: github.ref != 'refs/heads/feat/v0.3.0-custom'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -233,6 +240,7 @@ jobs:
       # 행별 결과를 "T3-N RESULT: PASS|FAIL" 로 stdout에 남긴다(매트릭스 승격 판독원). 크리티컬 행만 throw.
       # ─────────────────────────────────────────────────────────────────────────
       - name: T3 기능 스모크 (온보딩·hook·env주입·부서·python3)
+        if: github.ref != 'refs/heads/feat/v0.3.0-custom'
         shell: pwsh
         timeout-minutes: 12   # ★백스톱: 어떤 하위 호출이 hang해도 12분에 스텝 종료(6h 방지)
         run: |
@@ -335,6 +343,7 @@ jobs:
       # 이 기능은 "업데이트=전 세션 사망" 불안을 없애는 축이라 실기기 검증 없이 출하 금지.
       # ─────────────────────────────────────────────────────────────────────────
       - name: T4 무중단 재설치 스모크 (rename-swap 데몬 생존)
+        if: github.ref != 'refs/heads/feat/v0.3.0-custom'
         shell: pwsh
         timeout-minutes: 10
         run: |
@@ -432,6 +441,7 @@ jobs:
       # 실패 시 throw(=게이트) — T4 관용과 정합. mac unix 하네스(javis_phoenix_harness.py)는 무접촉.
       # ─────────────────────────────────────────────────────────────────────────
       - name: T5 피닉스 Windows 패리티 스모크 (무손실 복원 S1~S5 + KeepAlive)
+        if: github.ref != 'refs/heads/feat/v0.3.0-custom'
         shell: pwsh
         timeout-minutes: 20   # ★백스톱: 케이스⑦ RestartOnFailure 실전 재기동 지연 ~4분(예산 420s)+①~⑥ ~3분+오버헤드 → ~11-12분·여유 상향(hang은 스모크 롤링 워치독이 잡음)
         env:

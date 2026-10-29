@@ -4,7 +4,7 @@ name: macOS runtime build and DMG measurement
 on:
   workflow_dispatch:
   push:
-    branches: ['fix/w3-boot']
+    branches: ['fix/w3-boot', 'feat/v0.3.0-custom']
     paths:
       - '.github/workflows/macos-runtime-build.yml'
       - 'scripts/**'
@@ -38,6 +38,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
+      - name: Configure Rust path remapping
+        shell: bash
+        run: echo "RUSTFLAGS=--remap-path-prefix=$GITHUB_WORKSPACE=. --remap-path-prefix=$HOME=/build-home" >> "$GITHUB_ENV"
       - uses: swatinem/rust-cache@v2
         with:
           key: w3-macos-runtime
@@ -65,6 +68,20 @@ jobs:
                           '--out', os.path.join(os.environ['RUNNER_TEMP'], 'w3-macos-evidence', 'dmg'),
                           '--target', os.environ['CYS_TARGET']], check=True)
           PY
+      - name: Create app archive and scan path leaks
+        shell: bash
+        run: |
+          set -euo pipefail
+          PRODUCT="$(python3 -c 'import json; print(json.load(open("src-tauri/tauri.conf.json"))["productName"])')"
+          VERSION="$(python3 -c 'import json; print(json.load(open("src-tauri/tauri.conf.json"))["version"])')"
+          ASSET="$(sh scripts/make-update-manifest.sh --asset-name "$VERSION" "$CYS_TARGET")"
+          APP="target/$CYS_TARGET/release/bundle/macos/$PRODUCT.app"
+          DMG=(target/$CYS_TARGET/release/bundle/dmg/*.dmg)
+          [ -d "$APP" ] && [ ${#DMG[@]} -eq 1 ] || { echo 'Expected app bundle and one DMG' >&2; exit 1; }
+          mkdir -p dist-update
+          (cd "$(dirname "$APP")" && COPYFILE_DISABLE=1 tar czf "$GITHUB_WORKSPACE/dist-update/$ASSET" "$(basename "$APP")")
+          python3 scripts/check-release-path-leaks.py --mac-tar "dist-update/$ASSET" --mac-dmg "${DMG[0]}" \
+            --deny-root "$GITHUB_WORKSPACE" --deny-user "$USER"
       - name: Upload build and measurement evidence only
         if: always()
         uses: actions/upload-artifact@v4
@@ -73,5 +90,6 @@ jobs:
           path: |
             ${{ runner.temp }}/w3-macos-evidence/
             target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+            dist-update/*.app.tar.gz
           if-no-files-found: error
           retention-days: 7

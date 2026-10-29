@@ -14,8 +14,6 @@ name: release
 
 on:
   push:
-    branches:
-      - feat/v0.3.0-custom
     tags:
       - 'v*'
   workflow_dispatch:

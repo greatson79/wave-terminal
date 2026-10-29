@@ -34,10 +34,11 @@ def needle_groups(root: str, user: str) -> dict[str, list[bytes]]:
 
 
 def scan_tree(tree: Path, patterns: list[bytes] | dict[str, list[bytes]],
-              case_insensitive: bool = False) -> tuple[int, list[str], dict[str, int]]:
+              case_insensitive: bool = False) -> tuple[int, list[str], dict[str, int], dict[str, int]]:
     scanned = 0
     hits = []
     groups_count: dict[str, int] = {}
+    component_counts: dict[str, int] = {}
     groups = patterns if isinstance(patterns, dict) else {"matched": patterns}
     groups = {name: ([pattern.lower() for pattern in markers] if case_insensitive else markers)
               for name, markers in groups.items()}
@@ -60,7 +61,9 @@ def scan_tree(tree: Path, patterns: list[bytes] | dict[str, list[bytes]],
             hits.append(path.name)
             for name in matched:
                 groups_count[name] = groups_count.get(name, 0) + 1
-    return scanned, hits, groups_count
+            component = "/".join(path.relative_to(tree).parts[:4])
+            component_counts[component] = component_counts.get(component, 0) + 1
+    return scanned, hits, groups_count, component_counts
 
 
 def extract_asset(kind: str, asset: Path, destination: Path) -> Path:
@@ -97,13 +100,13 @@ def extract_asset(kind: str, asset: Path, destination: Path) -> Path:
     raise ValueError("unknown asset kind")
 
 
-def check_asset(kind: str, asset: Path, patterns: dict[str, list[bytes]]) -> tuple[int, int, dict[str, int]]:
+def check_asset(kind: str, asset: Path, patterns: dict[str, list[bytes]]) -> tuple[int, int, dict[str, int], dict[str, int]]:
     with tempfile.TemporaryDirectory(prefix="release-path-gate-") as tmp:
         root = Path(tmp)
         tree = extract_asset(kind, asset, root / "contents")
         try:
-            scanned, hits, categories = scan_tree(tree, patterns, case_insensitive=kind == "win")
-            return scanned, len(hits), categories
+            scanned, hits, categories, components = scan_tree(tree, patterns, case_insensitive=kind == "win")
+            return scanned, len(hits), categories, components
         finally:
             if kind == "mac-dmg" and sys.platform == "darwin":
                 subprocess.run(["hdiutil", "detach", str(tree), "-quiet"], check=True)
@@ -126,7 +129,7 @@ def main() -> int:
     failed = False
     for kind, asset in assets:
         try:
-            scanned, leaks, categories = check_asset(kind, asset, patterns)
+            scanned, leaks, categories, components = check_asset(kind, asset, patterns)
         except (OSError, ValueError, tarfile.TarError, zipfile.BadZipFile, subprocess.SubprocessError):
             print(f"FAIL {kind}: extraction/scan error (fail-closed)")
             failed = True
@@ -135,6 +138,8 @@ def main() -> int:
         if leaks:
             summary = ", ".join(f"{name}={count}" for name, count in categories.items() if count)
             print(f"  path marker classes: {summary}")
+            bundle_parts = ", ".join(f"{name}={count}" for name, count in components.items())
+            print(f"  bundle components: {bundle_parts}")
         failed |= not scanned or bool(leaks)
     return 1 if failed else 0
 

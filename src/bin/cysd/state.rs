@@ -144,6 +144,10 @@ pub struct Surface {
     pub human_burst: Mutex<Option<(Instant, Instant, u32, bool)>>,
     /// T3-14 단조 라인 커서: scrollback FIFO와 무관하게 증가하는 누적 완성 라인 수
     pub line_count: AtomicU64,
+    /// cys가 알고 있는 마지막 제출 이후의 미제출 입력 바이트 수.
+    pub composer_pending_bytes: AtomicU64,
+    /// 입력이 끝에만 추가되는 동안에만 유지하는 드래프트. None이면 카운트는 보수적 하한이다.
+    pub composer_pending_text: Mutex<Option<String>>,
     /// T4-17 헬스 조치: 이 시각까지 queued 배달 일시정지 (직접 send는 통과)
     pub queue_paused_until: Mutex<Option<Instant>>,
     /// T4-17 에코 제외: 마지막 원격 주입 시각 (주입 직후 에코 라인은 룰 매칭 제외)
@@ -1731,6 +1735,8 @@ impl Daemon {
             last_human_input: Mutex::new(None),
             human_burst: Mutex::new(None),
             line_count: AtomicU64::new(0),
+            composer_pending_bytes: AtomicU64::new(0),
+            composer_pending_text: Mutex::new(Some(String::new())),
             queue_paused_until: Mutex::new(None),
             last_injected: Mutex::new(None),
             observed_usage: Mutex::new(None),

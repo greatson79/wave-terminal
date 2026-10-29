@@ -114,7 +114,7 @@ jobs:
           $setup = Get-ChildItem target/release/bundle/nsis/*-setup.exe
           if ($setup.Count -ne 1) { throw 'Expected exactly one NSIS setup.exe' }
           python scripts/check-release-path-leaks.py --win $setup.FullName `
-            --deny-root $env:GITHUB_WORKSPACE --deny-user $env:USERNAME
+            --ci-root $env:GITHUB_WORKSPACE --ci-user $env:USERNAME --owner-user kylechoi
           if ($LASTEXITCODE -ne 0) { throw 'Release path leak gate failed' }
 
       # ★CRT 게이트(운영판 9eacc2e 이식): 산출 setup.exe 를 7z 로 풀어 전 exe 의 PE 임포트 표를 스윕한다.

@@ -81,7 +81,7 @@ jobs:
           mkdir -p dist-update
           (cd "$(dirname "$APP")" && COPYFILE_DISABLE=1 tar czf "$GITHUB_WORKSPACE/dist-update/$ASSET" "$(basename "$APP")")
           python3 scripts/check-release-path-leaks.py --mac-tar "dist-update/$ASSET" --mac-dmg "${DMG[0]}" \
-            --deny-root "$GITHUB_WORKSPACE" --deny-user "$USER"
+            --ci-root "$GITHUB_WORKSPACE" --ci-user "$USER" --owner-user kylechoi
       - name: Upload build and measurement evidence only
         if: always()
         uses: actions/upload-artifact@v4

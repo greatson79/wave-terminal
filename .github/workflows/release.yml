@@ -224,7 +224,7 @@ jobs:
           python3 scripts/check-release-path-leaks.py \
             --mac-tar "dist-update/$(sh scripts/make-update-manifest.sh --asset-name "$VERSION" "${{ matrix.target }}")" \
             --mac-dmg "target/${{ matrix.target }}/release/bundle/dmg/cys_${VERSION}_${ARCH}.dmg" \
-            --deny-root "$GITHUB_WORKSPACE" --deny-user "$USER"
+            --ci-root "$GITHUB_WORKSPACE" --ci-user "$USER" --owner-user kylechoi
 
       # Windows도 릴리스 액션에 넘기기 전에 실제 설치 payload를 만들고 경로 검사한다.
       # workflow_dispatch/브랜치 push는 이 artifact만 올리고 release API는 호출하지 않는다.
@@ -244,7 +244,7 @@ jobs:
           SETUP=(target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe)
           [ ${#SETUP[@]} -eq 1 ] && [ -f "${SETUP[0]}" ] || { echo "setup.exe candidate count invalid" >&2; exit 1; }
           python scripts/check-release-path-leaks.py --win "${SETUP[0]}" \
-            --deny-root "$(cygpath -w "$GITHUB_WORKSPACE")" --deny-user "${USERNAME:-$USER}"
+            --ci-root "$(cygpath -w "$GITHUB_WORKSPACE")" --ci-user "${USERNAME:-$USER}" --owner-user kylechoi
 
       # Scanner 성공 후 tag push에서만 draft release를 만든다. 앱/설치기 실사용은 여기서 하지 않는다.
       - name: Build and draft release (unsigned)

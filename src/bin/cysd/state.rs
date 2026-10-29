@@ -770,6 +770,16 @@ mod panic_isolation_tests {
     }
 
     #[test]
+    fn row89_panic_is_absorbed_and_reinitialized() {
+        let mut parser = vt100::Parser::new(10, 26, SCROLLBACK_LINES);
+        assert!(drive_row89_panic(&mut parser));
+        assert_eq!(parser.screen().size(), (10, 25));
+        let (_, panicked) = process_chunk_isolated(&mut parser, b"\x1b[2J\x1b[1;1Halive", false);
+        assert!(!panicked);
+        assert!(parser.screen().contents().contains("alive"));
+    }
+
+    #[test]
     fn dsr_response_survives_isolation() {
         // needs_dsr 경로도 격리 헬퍼를 통과 — 정상 시 커서 위치 응답을 반환한다.
         let mut p = vt100::Parser::new(10, 26, SCROLLBACK_LINES);

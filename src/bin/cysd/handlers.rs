@@ -158,6 +158,51 @@ fn update_composer_pending_key(surface: &crate::state::Surface, key: &str) {
     }
 }
 
+fn screen_contents_with_suggestion_markers(screen: &vt100::Screen) -> String {
+    let (rows, cols) = screen.size();
+    let mut contents = String::new();
+    let mut suggestion_open = false;
+    for row in 0..rows {
+        let mut prev_col = 0;
+        let mut prev_was_wide = false;
+        for col in 0..cols {
+            let Some(cell) = screen.cell(row, col) else { continue };
+            if prev_was_wide {
+                prev_was_wide = false;
+                continue;
+            }
+            prev_was_wide = cell.is_wide();
+            if !cell.has_contents() {
+                continue;
+            }
+            contents.extend(std::iter::repeat_n(' ', usize::from(col - prev_col)));
+            if cell.dim() && !suggestion_open {
+                contents.push_str("「제안 글」");
+                suggestion_open = true;
+            } else if !cell.dim() && suggestion_open {
+                contents.push_str("「/제안 글」");
+                suggestion_open = false;
+            }
+            contents.push_str(cell.contents());
+            prev_col = col + if cell.is_wide() { 2 } else { 1 };
+        }
+        if !screen.row_wrapped(row) {
+            if suggestion_open {
+                contents.push_str("「/제안 글」");
+                suggestion_open = false;
+            }
+            contents.push('\n');
+        }
+    }
+    if suggestion_open {
+        contents.push_str("「/제안 글」");
+    }
+    while contents.ends_with('\n') {
+        contents.pop();
+    }
+    contents
+}
+
 /// feed.push 자동 request_id의 프로세스 내 유일성 보장 카운터
 static FEED_REQ_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -1348,12 +1393,8 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                     .join("\n")
             } else {
                 // Accurate visible screen, reconstructed by the vt100 grid.
-                surface
-                    .parser
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .screen()
-                    .contents()
+                let parser = surface.parser.lock().unwrap_or_else(|e| e.into_inner());
+                screen_contents_with_suggestion_markers(parser.screen())
             };
             Reply::Single(ok_response(
                 &id,
@@ -1403,6 +1444,7 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                         .parser
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
+                        .screen_mut()
                         .set_size(rows, cols);
                     Reply::Single(ok_response(
                         &id,
@@ -3627,6 +3669,17 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_text_marks_only_dim_suggestion_cells() {
+        let mut parser = vt100::Parser::new(2, 40, 0);
+        parser.process("프롬프트 ".as_bytes());
+        parser.process("\x1b[2m자동 제안\x1b[22m 일반 입력".as_bytes());
+        assert_eq!(
+            screen_contents_with_suggestion_markers(parser.screen()),
+            "프롬프트 「제안 글」자동 제안「/제안 글」 일반 입력"
+        );
+    }
 
     #[test]
     fn composer_pending_bytes_tracks_deletes_and_loses_exactness_safely() {

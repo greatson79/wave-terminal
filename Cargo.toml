@@ -28,7 +28,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # ★벤더링 + 패치: ConPTY 자식 생성에 CREATE_NO_WINDOW 추가(Win11 검은 창 flash 차단). vendor/portable-pty/ 참조.
 portable-pty = { path = "vendor/portable-pty" }
-vt100 = "0.15"
+vt100 = "0.16.2"
 clap = { version = "4", features = ["derive"] }
 regex = "1"
 sysinfo = "0.33"

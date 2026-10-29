@@ -548,8 +548,8 @@ pub fn live_worker_count(roles: &HashMap<String, u64>, is_alive: impl Fn(u64) ->
 
 /// (W4) PTY 청크를 vt100 파서에 반영하되, 파서 내부 인덱스 패닉을 격리한다.
 ///
-/// vt100 0.15.2는 와이드(CJK·이모지) 문자의 선두 셀이 마지막 열에 놓인 상태에서 그 셀을
-/// 지우거나 덮어쓰면 `row.rs:89 clear_wide`가 `cells[col+1]`을 경계 밖 인덱싱해 패닉한다
+/// vt100 0.16.2는 와이드(CJK·이모지) 문자의 선두 셀이 마지막 열에 놓인 상태에서 그 셀을
+/// 지우거나 덮어쓰면 `screen.rs:870`이 다음 셀을 경계 밖으로 조회해 패닉한다
 /// (좁은 pane으로의 resize가 선두 와이드 셀을 마지막 열로 밀어내는 경로 — 한국어 CLI 출력에서
 /// 실재, cysd.log 누적 29회). 이 패닉이 reader 스레드를 죽이면 해당 pane의 PTY 배수가 정지해
 /// pane 속 CLI가 write 블록으로 동결된다("절대 불사"의 죽음의 경로).
@@ -720,14 +720,14 @@ mod dedup_tests {
 mod panic_isolation_tests {
     use super::{process_chunk_isolated, SCROLLBACK_LINES};
 
-    /// row.rs:89 clear_wide OOB 재현 시퀀스: 와이드(CJK) 문자의 선두 셀을 26열 그리드 끝에 놓고
+    /// clear_wide OOB 재현 시퀀스: 와이드(CJK) 문자의 선두 셀을 26열 그리드 끝에 놓고
     /// 25열로 축소하면 선두 와이드 셀이 마지막 열(index 24, len 25)로 밀린다. 그 셀을 덮어쓰면
-    /// vt100 0.15.2가 `cells[col+1]`=cells[25]를 경계 밖 인덱싱해 패닉한다(프로덕션 "len 25 index 25").
+    /// vt100 0.16.2가 다음 셀을 경계 밖 조회해 패닉한다(프로덕션 "len 25 index 25").
     /// 좁은 pane으로의 resize + 한국어 CLI 출력이라는 실제 경로를 그대로 박제한다.
     fn drive_row89_panic(parser: &mut vt100::Parser) -> bool {
         process_chunk_isolated(parser, b"\x1b[1;25H", false);
         process_chunk_isolated(parser, "\u{ac00}".as_bytes(), false); // '가'(wide)
-        parser.set_size(10, 25); // 축소 → 선두 와이드 셀이 마지막 열로
+        parser.screen_mut().set_size(10, 25); // 축소 → 선두 와이드 셀이 마지막 열로
         let (_, panicked) = process_chunk_isolated(parser, b"\x1b[1;25Ha", false);
         panicked
     }
@@ -1869,7 +1869,7 @@ impl Daemon {
                         let dsr_resp = {
                             // poison된 락도 복구 — 단일 패닉이 데몬 전체를 마비시키지 않게 한다.
                             let mut parser = surf.parser.lock().unwrap_or_else(|e| e.into_inner());
-                            // (W4) vt100 0.15.2(row.rs:89 clear_wide 등) 내부 인덱스 패닉을 격리한다:
+                            // (W4) vt100 내부 인덱스 패닉을 격리한다:
                             // 패닉 시 그 청크 파싱만 포기하고 파서를 fresh로 재초기화(rows/cols 보존)한다.
                             // reader 스레드는 죽지 않고, 아래 out_tx.send(원시 바이트 broadcast)와
                             // 후속 ingest 경로는 계속 태워 PTY 배수를 절대 멈추지 않는다.

@@ -19,7 +19,7 @@ class ReleasePathGateTests(unittest.TestCase):
             payload.mkdir()
             (payload / "clean").write_bytes(b"portable")
             (payload / "binary").write_bytes(b"prefix /checkout/private suffix")
-            scanned, hits = GATE.scan_tree(payload, [b"/checkout/private"])
+            scanned, hits, _ = GATE.scan_tree(payload, [b"/checkout/private"])
             self.assertEqual(scanned, 2)
             self.assertEqual(hits, ["binary"])
 
@@ -33,7 +33,7 @@ class ReleasePathGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "binary.exe").write_bytes(b"D:\\A\\WORK\\REPO\\SRC")
-            scanned, hits = GATE.scan_tree(root, [b"d:\\a\\work\\repo"], case_insensitive=True)
+            scanned, hits, _ = GATE.scan_tree(root, [b"d:\\a\\work\\repo"], case_insensitive=True)
             self.assertEqual(scanned, 1)
             self.assertEqual(hits, ["binary.exe"])
 
@@ -44,6 +44,17 @@ class ReleasePathGateTests(unittest.TestCase):
         self.assertIn(b"C:\\Users\\runner\\", patterns)
         self.assertNotIn(b"/Users/", patterns)
         self.assertNotIn(b"runner", patterns)
+
+    def test_marker_diagnostics_count_classes_without_echoing_marker_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "binary").write_bytes(b"/Users/runner/private")
+            scanned, hits, categories = GATE.scan_tree(root, {
+                "mac-home": [b"/Users/runner/"], "checkout-root": [b"/checkout/private"],
+            })
+            self.assertEqual(scanned, 1)
+            self.assertEqual(hits, ["binary"])
+            self.assertEqual(categories, {"mac-home": 1})
 
 
 if __name__ == "__main__":

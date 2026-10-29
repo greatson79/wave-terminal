@@ -15,24 +15,32 @@ from pathlib import Path
 
 def needles(root: str, user: str) -> list[bytes]:
     # Generic home prefixes are emitted by the help-path scrubber; only flag a concrete build account.
-    values = []
+    return [pattern for group in needle_groups(root, user).values() for pattern in group]
+
+
+def needle_groups(root: str, user: str) -> dict[str, list[bytes]]:
+    groups = {"checkout-root": [], "mac-home": [], "linux-home": [], "windows-home": []}
     for value in (root,):
         if value:
             normalized = os.path.normpath(value)
-            values.extend(os.fsencode(v) for v in {
+            groups["checkout-root"].extend(os.fsencode(v) for v in {
                 normalized, normalized.replace("\\", "/"), normalized.replace("/", "\\")
             })
     if user:
-        for prefix in ("/Users/", "/home/", "C:\\Users\\"):
-            values.extend(os.fsencode(f"{prefix}{user}{separator}") for separator in ("/", "\\"))
-    return list(dict.fromkeys(v for v in values if v))
+        for category, prefix in (("mac-home", "/Users/"), ("linux-home", "/home/"),
+                                 ("windows-home", "C:\\Users\\")):
+            groups[category].extend(os.fsencode(f"{prefix}{user}{separator}") for separator in ("/", "\\"))
+    return {category: list(dict.fromkeys(values)) for category, values in groups.items()}
 
 
-def scan_tree(tree: Path, patterns: list[bytes], case_insensitive: bool = False) -> tuple[int, list[str]]:
+def scan_tree(tree: Path, patterns: list[bytes] | dict[str, list[bytes]],
+              case_insensitive: bool = False) -> tuple[int, list[str], dict[str, int]]:
     scanned = 0
     hits = []
-    if case_insensitive:
-        patterns = [pattern.lower() for pattern in patterns]
+    groups_count: dict[str, int] = {}
+    groups = patterns if isinstance(patterns, dict) else {"matched": patterns}
+    groups = {name: ([pattern.lower() for pattern in markers] if case_insensitive else markers)
+              for name, markers in groups.items()}
     for path in tree.rglob("*"):
         if path.is_symlink():
             data = os.fsencode(os.readlink(path))
@@ -47,9 +55,12 @@ def scan_tree(tree: Path, patterns: list[bytes], case_insensitive: bool = False)
         scanned += 1
         if case_insensitive:
             data = data.lower()
-        if any(pattern in data for pattern in patterns):
+        matched = [name for name, markers in groups.items() if any(pattern in data for pattern in markers)]
+        if matched:
             hits.append(path.name)
-    return scanned, hits
+            for name in matched:
+                groups_count[name] = groups_count.get(name, 0) + 1
+    return scanned, hits, groups_count
 
 
 def extract_asset(kind: str, asset: Path, destination: Path) -> Path:
@@ -86,13 +97,13 @@ def extract_asset(kind: str, asset: Path, destination: Path) -> Path:
     raise ValueError("unknown asset kind")
 
 
-def check_asset(kind: str, asset: Path, patterns: list[bytes]) -> tuple[int, int]:
+def check_asset(kind: str, asset: Path, patterns: dict[str, list[bytes]]) -> tuple[int, int, dict[str, int]]:
     with tempfile.TemporaryDirectory(prefix="release-path-gate-") as tmp:
         root = Path(tmp)
         tree = extract_asset(kind, asset, root / "contents")
         try:
-            scanned, hits = scan_tree(tree, patterns, case_insensitive=kind == "win")
-            return scanned, len(hits)
+            scanned, hits, categories = scan_tree(tree, patterns, case_insensitive=kind == "win")
+            return scanned, len(hits), categories
         finally:
             if kind == "mac-dmg" and sys.platform == "darwin":
                 subprocess.run(["hdiutil", "detach", str(tree), "-quiet"], check=True)
@@ -111,16 +122,19 @@ def main() -> int:
     if not assets:
         parser.error("provide at least one release asset")
 
-    patterns = needles(os.path.realpath(args.deny_root), args.deny_user)
+    patterns = needle_groups(os.path.realpath(args.deny_root), args.deny_user)
     failed = False
     for kind, asset in assets:
         try:
-            scanned, leaks = check_asset(kind, asset, patterns)
+            scanned, leaks, categories = check_asset(kind, asset, patterns)
         except (OSError, ValueError, tarfile.TarError, zipfile.BadZipFile, subprocess.SubprocessError):
             print(f"FAIL {kind}: extraction/scan error (fail-closed)")
             failed = True
             continue
         print(f"{'PASS' if scanned and not leaks else 'FAIL'} {kind}: {scanned} files scanned, {leaks} files matched")
+        if leaks:
+            summary = ", ".join(f"{name}={count}" for name, count in categories.items() if count)
+            print(f"  path marker classes: {summary}")
         failed |= not scanned or bool(leaks)
     return 1 if failed else 0
 

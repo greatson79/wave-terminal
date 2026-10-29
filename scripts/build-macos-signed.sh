@@ -24,6 +24,8 @@
 # exit 0=서명·공증·검증 통과 / 1=공증 검증 실패 / 2=자격증명·환경 미비
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
+# Remap checkout paths in every Rust crate compiled by Tauri and bundle-prep.
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$(pwd)=. --remap-path-prefix=$HOME=/build-home"
 PRODUCT="$(python3 -c 'import json; print(json.load(open("src-tauri/tauri.conf.json"))["productName"])')"
 VERSION=$(grep -m1 '"version"' src-tauri/tauri.conf.json | sed -E 's/.*"([0-9][0-9.]*)".*/\1/')
 

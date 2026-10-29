@@ -14,6 +14,8 @@ name: release
 
 on:
   push:
+    branches:
+      - feat/v0.3.0-custom
     tags:
       - 'v*'
   workflow_dispatch:
@@ -77,6 +79,16 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Configure Rust path remapping
+        shell: bash
+        run: |
+          set -euo pipefail
+          flags="--remap-path-prefix=$GITHUB_WORKSPACE=. --remap-path-prefix=$HOME=/build-home"
+          if [ "$RUNNER_OS" = Windows ]; then
+            flags="$flags --remap-path-prefix=$USERPROFILE=/build-home --remap-path-prefix=$(cygpath -u "$GITHUB_WORKSPACE")=. --remap-path-prefix=$(cygpath -m "$GITHUB_WORKSPACE")=. -C target-feature=+crt-static"
+          fi
+          echo "RUSTFLAGS=$flags" >> "$GITHUB_ENV"
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -200,13 +212,45 @@ jobs:
           rm -rf "$STAGE"
           echo "✓ macOS slim 산출물 준비(미서명): $BUNDLE/dmg/cys_${VERSION}_${ARCH}.dmg + dist-update/$(sh scripts/make-update-manifest.sh --asset-name "$VERSION" "$TRIPLE")"
 
-      # tauri build → beforeBuildCommand(bundle-prep.sh)가 UI 번들 + cys/cysd 릴리스 빌드 + externalBin
-      # 배치 → 번들(dmg/app) → createUpdaterArtifacts(.app.tar.gz + .sig + latest.json) → 비공개 repo 릴리스 업로드.
-      # Windows: NSIS setup.exe + .sig — tauri-action이 같은 릴리스의 latest.json에 platforms.windows-x86_64를 병합.
-      # ★macOS는 위 스텝이 slim 산출물을 이미 만들었으므로 tauriScript=true 로 빌드를 no-op 시킨다(재빌드=fat 재역참조
-      #   방지). tauri-action은 표준 경로의 그 산출물을 수집·업로드·latest.json 병합만 수행한다. Windows는 tauriScript=''
-      #   → getRunner가 falsy로 무시하고 기본 러너로 정상 빌드(동작 불변 — tauri-action src/runner.ts 실측 확인).
+      - name: Release path leak gate (macOS app archive + DMG)
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(grep -m1 '"version"' src-tauri/tauri.conf.json | sed -E 's/.*"([0-9][0-9.]*)".*/\1/')"
+          case "${{ matrix.target }}" in
+            aarch64-apple-darwin) ARCH=aarch64 ;;
+            x86_64-apple-darwin) ARCH=x64 ;;
+            *) exit 1 ;;
+          esac
+          python3 scripts/check-release-path-leaks.py \
+            --mac-tar "dist-update/$(sh scripts/make-update-manifest.sh --asset-name "$VERSION" "${{ matrix.target }}")" \
+            --mac-dmg "target/${{ matrix.target }}/release/bundle/dmg/cys_${VERSION}_${ARCH}.dmg" \
+            --deny-root "$GITHUB_WORKSPACE" --deny-user "$USER"
+
+      # Windows도 릴리스 액션에 넘기기 전에 실제 설치 payload를 만들고 경로 검사한다.
+      # workflow_dispatch/브랜치 push는 이 artifact만 올리고 release API는 호출하지 않는다.
+      - name: Build Windows bundle before path gate
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        env:
+          CYS_TARGET: ${{ matrix.target }}
+          PYTHONUTF8: '1'
+        run: bunx @tauri-apps/cli@2 build --target "${{ matrix.target }}" --no-sign
+
+      - name: Release path leak gate (Windows NSIS payload)
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          SETUP=(target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe)
+          [ ${#SETUP[@]} -eq 1 ] && [ -f "${SETUP[0]}" ] || { echo "setup.exe candidate count invalid" >&2; exit 1; }
+          python scripts/check-release-path-leaks.py --win "${SETUP[0]}" \
+            --deny-root "$(cygpath -w "$GITHUB_WORKSPACE")" --deny-user "${USERNAME:-$USER}"
+
+      # Scanner 성공 후 tag push에서만 draft release를 만든다. 앱/설치기 실사용은 여기서 하지 않는다.
       - name: Build and draft release (unsigned)
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -218,8 +262,8 @@ jobs:
           # ★빈 APPLE_* env 를 넘기면 tauri 번들러가 빈 인증서를 security import 하려다 실패하므로,
           #   인증서가 없는 동안에는 APPLE_* 를 아예 전달하지 않는다(=미서명 빌드 → Gatekeeper 경고 감수).
         with:
-          # macOS='true'(빌드 no-op → 위 스텝의 slim 산출물 수집) · Windows=''(falsy → 기본 러너 정상 빌드, 불변).
-          tauriScript: ${{ matrix.platform == 'macos-latest' && 'true' || '' }}
+          # 모든 플랫폼을 앞에서 빌드·검사한 뒤 no-op 수집한다.
+          tauriScript: 'true'
           tagName: ${{ github.ref_name }}
           # Phase 2(릴리스 통합·2026-07-03): 소스 repo가 public이 되면서 이 릴리스가 곧 공개 배포다.
           releaseName: 'cys ${{ github.ref_name }}'

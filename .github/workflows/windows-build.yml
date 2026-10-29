@@ -43,6 +43,12 @@ jobs:
       - name: Setup Rust (x86_64-pc-windows-msvc = 러너 네이티브)
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Configure Rust path remapping
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "RUSTFLAGS=--remap-path-prefix=$GITHUB_WORKSPACE=. --remap-path-prefix=$HOME=/build-home --remap-path-prefix=$USERPROFILE=/build-home --remap-path-prefix=$(cygpath -u "$GITHUB_WORKSPACE")=. --remap-path-prefix=$(cygpath -m "$GITHUB_WORKSPACE")=. -C target-feature=+crt-static" >> "$GITHUB_ENV"
+
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
@@ -97,6 +103,15 @@ jobs:
           # createUpdaterArtifacts=false 인라인 override — 이 잡은 서명키 없는 가능성 빌드라
           # updater 서명 산출을 끈다(릴리스 경로 release.yml은 windows conf 기본값 true+서명키 사용).
           bunx @tauri-apps/cli@2 build --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      - name: Release path leak gate (Windows NSIS payload)
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem target/release/bundle/nsis/*-setup.exe
+          if ($setup.Count -ne 1) { throw 'Expected exactly one NSIS setup.exe' }
+          python scripts/check-release-path-leaks.py --win $setup.FullName `
+            --deny-root $env:GITHUB_WORKSPACE --deny-user $env:USERNAME
+          if ($LASTEXITCODE -ne 0) { throw 'Release path leak gate failed' }
 
       # ★CRT 게이트(운영판 9eacc2e 이식): 산출 setup.exe 를 7z 로 풀어 전 exe 의 PE 임포트 표를 스윕한다.
       #   cys.exe·cysd.exe·cys-app.exe 가 VCRUNTIME140*.dll 을 임포트하면 exit 1 → 잡 실패

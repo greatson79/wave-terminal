@@ -8,6 +8,11 @@
 
 import { hexToRgb } from "./theme";
 
+function colorRgb(hex: string): [number, number, number] | null {
+  const short = /^#([0-9a-fA-F]{3})$/.exec(hex.trim());
+  return hexToRgb(short ? `#${[...short[1]].map((c) => c + c).join("")}` : hex);
+}
+
 function srgbToLinear(channel255: number): number {
   const c = channel255 / 255;
   return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
@@ -15,7 +20,7 @@ function srgbToLinear(channel255: number): number {
 
 /** WCAG2 정식 상대휘도(0~1, 감마 보정 포함). 파싱 실패는 0(검정 취급). */
 export function wcagLuminance(hex: string): number {
-  const rgb = hexToRgb(hex);
+  const rgb = colorRgb(hex);
   if (!rgb) return 0;
   const [r, g, b] = rgb;
   return 0.2126 * srgbToLinear(r) + 0.7152 * srgbToLinear(g) + 0.0722 * srgbToLinear(b);
@@ -35,8 +40,8 @@ export function wcagContrast(hexA: string, hexB: string): number {
  * 직접 섞는다 — "in srgb"의 정의 그대로, linear 변환 없음). pctA는 0~100.
  */
 export function mixSrgb(hexA: string, pctA: number, hexB: string): string {
-  const a = hexToRgb(hexA);
-  const b = hexToRgb(hexB);
+  const a = colorRgb(hexA);
+  const b = colorRgb(hexB);
   if (!a || !b) return hexA;
   const t = pctA / 100;
   const mixed = a.map((ca, i) => Math.round(ca * t + b[i] * (1 - t)));

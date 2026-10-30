@@ -20,5 +20,8 @@ test("tab shell paints the local badge and border", () => {
   const brightChip = (bright.titleRow as ReturnType<typeof make>).children[0];
   expect(brightChip.style.color).toBe("#0d1117");
   expect(wcagContrast(brightChip.style.background, brightChip.style.color)).toBeGreaterThanOrEqual(4.5);
+  const shortChip = (createHqTabShell("Alpha", { 운영본부: "#fff" }, [], "", doc).titleRow as ReturnType<typeof make>).children[0];
+  expect(shortChip.style.color).toBe("#0d1117");
+  expect(wcagContrast(shortChip.style.background, shortChip.style.color)).toBeGreaterThanOrEqual(4.5);
   configureHierarchyNaming(null);
 });

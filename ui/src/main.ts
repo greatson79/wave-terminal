@@ -252,12 +252,6 @@ async function refreshSidebarUsage() {
   renderSidebarUsage(sidebarUsageAccounts);
 }
 
-async function refreshMoaiStatus() {
-  const status = document.getElementById("moai-status")!;
-  if (!settings.moai.enabled) { status.hidden = true; return; }
-  status.hidden = !(await invoke("moai_available").catch(() => false));
-}
-
 // ---------- T6 Control Center (전용 풀 패널 — 네이티브 실시간 모니터링) ----------
 let ccOpen = false;
 let ccTimer: number | null = null;
@@ -3128,19 +3122,6 @@ function openSettingsMenu(anchor: HTMLElement) {
       settings.usage = { ...DEFAULT_SETTINGS.usage, hiddenAccounts: [] };
       saveSettings(); applyUsageSettings(); renderMenu();
     });
-    const moai = section("MoAI");
-    const moaiEnabled = document.createElement("input");
-    moaiEnabled.type = "checkbox";
-    moaiEnabled.checked = settings.moai.enabled;
-    moaiEnabled.addEventListener("change", () => {
-      settings.moai.enabled = moaiEnabled.checked;
-      saveSettings(); void refreshMoaiStatus();
-    });
-    row(moai, "PATH에서 자동 감지", moaiEnabled);
-    button(moai, "이 구역만 기본값", () => {
-      settings.moai = { ...DEFAULT_SETTINGS.moai };
-      saveSettings(); void refreshMoaiStatus(); renderMenu();
-    });
     const header = section("헤더");
     const daemonCollapsed = document.createElement("input");
     daemonCollapsed.type = "checkbox";
@@ -4424,8 +4405,6 @@ async function start() {
   accountOwners = await invoke("account_owners").catch(() => ({})) as Record<string, string>;
   void refreshSidebarUsage();
   setInterval(() => void refreshSidebarUsage(), 30_000);
-  void refreshMoaiStatus();
-  setInterval(() => void refreshMoaiStatus(), 60_000);
 
   // 버전 스큐 세대교체(메인 + 부서 데몬) — 시작 1회 + 5분 주기 재검(B). 무중단 rename-swap의 짝으로
   // 구 데몬(lame-duck) 스큐를 비차단 배지로 알리고, 잃을 세션 0인 노드는 무손실 자동 교대한다.

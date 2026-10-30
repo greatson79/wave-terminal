@@ -14,7 +14,6 @@ export interface Settings {
   panels: { helpCollapsed: boolean };
   header: { daemonCollapsed: boolean };
   usage: { enabled: boolean; hiddenAccounts: string[] };
-  moai: { enabled: boolean };
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -26,7 +25,6 @@ export const DEFAULT_SETTINGS: Settings = {
   panels: { helpCollapsed: false },
   header: { daemonCollapsed: true },
   usage: { enabled: true, hiddenAccounts: [] },
-  moai: { enabled: true },
 };
 
 const validColor = (v: unknown): v is string => typeof v === "string" && /^#[0-9a-fA-F]{6}$/.test(v);
@@ -43,7 +41,6 @@ export function readSettings(raw: string | null, legacyBg: string | null, legacy
   const panels = parsed?.ver === 1 ? parsed.panels : null;
   const header = parsed?.ver === 1 ? parsed.header : null;
   const usage = parsed?.ver === 1 ? parsed.usage : null;
-  const moai = parsed?.ver === 1 ? parsed.moai : null;
   const bg = validColor(legacyBg) ? legacyBg : legacyBg === null ? null : validColor(look?.bg) ? look.bg : null;
   const font = validFont(legacyFont) ? legacyFont : legacyFont === null ? null : validFont(look?.font) ? look.font : null;
   const savedOrder = Array.isArray(bar?.order) ? bar.order : [];
@@ -70,6 +67,5 @@ export function readSettings(raw: string | null, legacyBg: string | null, legacy
         ? [...new Set(usage.hiddenAccounts.filter((v: unknown) => typeof v === "string" && v.length <= 256))]
         : [],
     },
-    moai: { enabled: typeof moai?.enabled === "boolean" ? moai.enabled : true },
   };
 }

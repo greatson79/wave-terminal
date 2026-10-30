@@ -26,7 +26,6 @@ html, body {
 #brand { font-weight: 700; color: var(--accent); }
 #daemon-info { color: #8b949e; font-size: 11px; }
 #header-folder { flex: 0 1 auto; min-width: 0; max-width: 36vw; color: var(--muted); font-size: 11px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-#moai-status { color: var(--muted); font-size: 11px; }
 #header-daemon { color: #8b949e; font-size: 11px; }
 #header-daemon summary { cursor: pointer; }
 #header-daemon[open] { display: flex; align-items: center; gap: 5px; min-width: 0; }
@@ -45,7 +44,7 @@ html, body {
   font-weight: var(--menu-weight, 400);
 }
 #btn-settings { flex-shrink: 0; }
-#topbar button:not(#btn-settings), #brand, #header-folder, #moai-status, #daemon-info {
+#topbar button:not(#btn-settings), #brand, #header-folder, #daemon-info {
   min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
 }
 #topbar button[hidden] { display: none; }

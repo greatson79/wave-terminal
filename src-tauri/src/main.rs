@@ -189,24 +189,6 @@ fn set_custom_header(enabled: bool, window: tauri::WebviewWindow) -> Result<(), 
         .map_err(|e| e.to_string())
 }
 
-fn executable_on_path(path: &std::ffi::OsStr, name: &str) -> bool {
-    let candidates: &[&str] = if cfg!(windows) { &[".exe", ".cmd", ".bat"] } else { &[""] };
-    std::env::split_paths(path).any(|dir| candidates.iter().any(|suffix| {
-        let file = dir.join(format!("{name}{suffix}"));
-        let Ok(meta) = std::fs::metadata(file) else { return false };
-        if !meta.is_file() { return false; }
-        #[cfg(unix)]
-        { use std::os::unix::fs::PermissionsExt; return meta.permissions().mode() & 0o111 != 0; }
-        #[cfg(windows)]
-        { true }
-    }))
-}
-
-#[tauri::command]
-fn moai_available() -> bool {
-    std::env::var_os("PATH").is_some_and(|path| executable_on_path(&path, "moai"))
-}
-
 fn user_settings_file(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     app.path().app_config_dir().map(|dir| dir.join("user-settings.json")).map_err(|e| e.to_string())
 }
@@ -2614,7 +2596,6 @@ fn main() {
             promote_pending_ceo,
             daemon_status,
             set_custom_header,
-            moai_available,
             account_owners,
             owner_custom_header,
             set_account_owner,
@@ -2767,26 +2748,6 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn moai_path_probe_requires_a_file_and_unix_execute_bit() {
-        let dir = std::env::temp_dir().join(format!("wave-moai-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let binary = dir.join(if cfg!(windows) { "moai.exe" } else { "moai" });
-        std::fs::write(&binary, b"test").unwrap();
-        #[cfg(unix)] {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o644)).unwrap();
-            assert!(!super::executable_on_path(dir.as_os_str(), "moai"));
-            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        #[cfg(windows)]
-        assert!(super::executable_on_path(dir.as_os_str(), "moai"));
-        #[cfg(unix)]
-        assert!(super::executable_on_path(dir.as_os_str(), "moai"));
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
     #[test]
     fn kickstart_stops_after_three_attempts() {
         assert!(!super::should_kickstart(0));

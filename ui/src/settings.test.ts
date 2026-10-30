@@ -44,15 +44,13 @@ describe("settings", () => {
       layout: { sidebarSide: "left" }, panels: { helpCollapsed: false },
       header: { daemonCollapsed: true },
       usage: { enabled: true, hiddenAccounts: [] },
-      moai: { enabled: true },
     });
     expect(readSettings(JSON.stringify({ ver: 1, layout: { sidebarSide: "right" },
       panels: { helpCollapsed: true }, header: { daemonCollapsed: false },
-      usage: { enabled: false, hiddenAccounts: ["claude:id", "codex:id"] }, moai: { enabled: false } }), null, null)).toMatchObject({
+      usage: { enabled: false, hiddenAccounts: ["claude:id", "codex:id"] } }), null, null)).toMatchObject({
       layout: { sidebarSide: "right" }, panels: { helpCollapsed: true },
       header: { daemonCollapsed: false },
       usage: { enabled: false, hiddenAccounts: ["claude:id", "codex:id"] },
-      moai: { enabled: false },
     });
     expect(readSettings(JSON.stringify({ ver: 1, layout: { sidebarSide: "outside" },
       panels: { helpCollapsed: "true" }, header: { daemonCollapsed: "yes" } }), null, null)).toMatchObject({

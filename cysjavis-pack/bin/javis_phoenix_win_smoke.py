@@ -526,7 +526,8 @@ def case8_real_autorestore():
         with open(os.path.join(ph_home, "desired_roster.json"), "w", encoding="utf-8") as f:
             json.dump({"roster": {"worker": {"role": "worker"}}, "tombstones": []}, f)
         # ★주입 금지: cysd env 에서 PHOENIX_CYS 제거 — cysd 자체 해석만으로 phoenix 를 스폰해야 한다.
-        env = _phoenix_env({"CYS_SOCKET": pipe})
+        env = _phoenix_env({"CYS_SOCKET": pipe, "CYS_AUTORESTORE": "1"})
+        env.pop("CYS_NO_AUTORESTORE", None)
         env.pop("PHOENIX_CYS", None)
         # ★진단(CI 28780215417: auto-restore 스레드 std/time.rs panic — 라인:컬럼·메시지·프레임 필요): RUST_BACKTRACE
         #   로 panic 백트레이스를 켠다 — '<unnamed>' 스레드가 auto-restore 인지 다른 부트 스레드(scheduler/watchdog/

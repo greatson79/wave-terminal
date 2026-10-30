@@ -3945,6 +3945,11 @@ fn run_agent_detect(as_json: bool) -> i32 {
                 .and_then(|out| String::from_utf8(out.stdout).ok())
                 .and_then(|out| out.lines().next().map(std::path::PathBuf::from))
         };
+        #[cfg(windows)]
+        let resolved = resolved.filter(|path| agent_binary_executable(path))
+            .or_else(|| ["APPDATA", "LOCALAPPDATA"].into_iter()
+                .filter_map(std::env::var_os)
+                .find_map(|root| windows_npm_agent(&std::path::PathBuf::from(root), bin)));
         let installed = resolved.as_ref().is_some_and(|path| agent_binary_executable(path));
         found.insert(name.clone(), json!({"installed": installed, "bin": bin,
             "resolved": resolved.filter(|_| installed),
@@ -3964,6 +3969,14 @@ fn agent_binary_executable(path: &std::path::Path) -> bool {
     { use std::os::unix::fs::PermissionsExt; path.metadata().is_ok_and(|m| m.permissions().mode() & 0o111 != 0) }
     #[cfg(not(unix))]
     { true }
+}
+
+#[cfg(windows)]
+fn windows_npm_agent(root: &std::path::Path, bin: &str) -> Option<std::path::PathBuf> {
+    let stem = std::path::Path::new(bin).file_stem()?.to_str()?;
+    ["cmd", "exe", "bat", "ps1"].into_iter()
+        .map(|ext| root.join("npm").join(format!("{stem}.{ext}")))
+        .find(|path| agent_binary_executable(path))
 }
 
 /// master의 기본 편성에 CSO·worker를 추가하고 지침을 주입한다.
@@ -9334,6 +9347,17 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert!(super::agent_binary_executable(&path));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn agent_detect_finds_npm_shim_before_path_refresh() {
+        let root = std::env::temp_dir().join(format!("cys-agent-npm-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("npm")).unwrap();
+        let shim = root.join("npm/codex.cmd");
+        std::fs::write(&shim, "@echo off\r\n").unwrap();
+        assert_eq!(super::windows_npm_agent(&root, "codex"), Some(shim));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// 사람용 statusline 한 줄 포맷 — rate는 있을 때만, 모델명 부재 시 "claude" 폴백.

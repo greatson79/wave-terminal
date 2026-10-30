@@ -44,6 +44,12 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           key: w3-macos-runtime
+      - name: Run complete Rust workspace tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CYS_PACK_DIR="$(mktemp -d)"
+          cargo test --workspace -- --test-threads=1 --skip hwmon:: 2>&1 | tee "$RUNNER_TEMP/w3-macos-evidence/cargo-tests.log"
       - name: Measurement and runtime regression tests
         shell: bash
         run: |

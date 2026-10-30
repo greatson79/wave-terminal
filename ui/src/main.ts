@@ -30,6 +30,7 @@ import { normalizeWorkspaces, shouldKeepEmptyWorkspaceOnRestore } from "./wsrest
 import { nextGhostStrike } from "./ghoststrike";
 import { transferTrees } from "./transfer";
 import { resolveEventSocket } from "./eventsocket";
+import { commitPaneRename } from "./panerename";
 
 declare global {
   interface Window {
@@ -1791,9 +1792,31 @@ async function makePane(sid: number, title: string, socket?: string): Promise<Pa
     });
   };
   titleEl.addEventListener("dblclick", (e) => { e.stopPropagation(); startPaneRename(); });
+  const startTitleRename = () => {
+    if (titleEl.isContentEditable) return;
+    const key = paneKey(sid, socket);
+    titleEl.textContent = surfaceTitles.get(key) ?? title;
+    titleEl.contentEditable = "true";
+    titleEl.focus();
+    window.getSelection()?.selectAllChildren(titleEl);
+    bindPaneRename(titleEl, async (cancelled) => {
+      if (!cancelled) {
+        const name = (titleEl.textContent ?? "").trim();
+        await commitPaneRename(
+          () => invoke("rename_surface", { socket, surfaceId: sid, title: name }),
+          () => refreshPaneTitles(),
+          (detail) => toast("health", "좌석 제목 변경 실패", detail),
+        );
+      }
+      displayPaneHeading(titleEl, sid, paneTitleState.get(key));
+    });
+  };
   header.addEventListener("contextmenu", (e) => {
     e.preventDefault();
-    showCtxMenu(e.clientX, e.clientY, [{ label: "이름 바꾸기", action: startPaneRename }]);
+    showCtxMenu(e.clientX, e.clientY, [
+      { label: "표시 이름 바꾸기", action: startPaneRename },
+      { label: "좌석 제목 바꾸기 (패널 이동)", action: startTitleRename },
+    ]);
   });
   const usageEl = document.createElement("span");
   usageEl.className = "pane-usage";

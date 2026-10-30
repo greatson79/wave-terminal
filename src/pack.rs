@@ -431,6 +431,14 @@ pub(crate) fn ownership(rel: &str) -> Ownership {
     Ownership::System
 }
 
+pub fn ownership_name(rel: &str) -> &'static str {
+    match ownership(rel) {
+        Ownership::System => "system",
+        Ownership::User => "user",
+        Ownership::SeedOnce => "seed-once",
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ★사용자 커스터마이즈 보존 계층: 비강제 설치는 수정본을 유지하고 새 판을 `.new`에 둔다.
 //   force로 system 수정본을 덮을 때만 `.user`에 백업한다.

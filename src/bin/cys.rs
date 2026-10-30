@@ -67,6 +67,15 @@ enum Command {
         #[arg(value_name = "이름")]
         name: Option<String>,
     },
+    /// Set the surface title used by the sidebar and role tools.
+    RenameSurface {
+        #[arg(long)]
+        surface: Option<String>,
+        #[arg(long)]
+        role: Option<String>,
+        #[arg(long)]
+        title: String,
+    },
     /// Inject text into a surface's stdin (no trailing newline; follow with send-key Return)
     Send {
         #[arg(long)]
@@ -132,6 +141,12 @@ enum Command {
         #[arg(long)]
         surface: Option<String>,
     },
+    /// Show account usage observed by this daemon.
+    UsageAccounts {
+        #[arg(long)]
+        json: bool,
+    },
+    LearnCheckpoint,
     /// T1-2 통합 관제 보드: 전 노드 상태를 1콜로 (read-screen 폴링 대체)
     Status {
         #[arg(long)]
@@ -188,6 +203,8 @@ enum Command {
         surface: Option<String>,
         #[arg(long)]
         role: Option<String>,
+        #[arg(long)]
+        resume: bool,
     },
     /// T2-6 조직 복원: 토폴로지 스냅샷의 죽은 역할들을 일괄 재기동·재주입 (작업 재개는 master 판단)
     Restore {
@@ -196,6 +213,8 @@ enum Command {
         /// master 역할도 재기동 대상에 포함 (기본 제외 — restore 실행자가 보통 master)
         #[arg(long)]
         include_master: bool,
+        #[arg(long)]
+        resume: bool,
         /// 에이전트 resume 플래그(agents.json resume_arg) 미사용
         #[arg(long)]
         no_resume: bool,
@@ -506,6 +525,8 @@ enum Command {
         role: String,
         #[arg(long)]
         surface: Option<String>,
+        #[arg(long)]
+        takeover_empty_seat: bool,
     },
     /// Mark a surface quiescing(=채널 inbox 주입 보류) or release it (§2.2 S5) — cycle-agent가 clear 전후 호출
     Quiesce {
@@ -526,15 +547,35 @@ enum Command {
         agent: String,
         #[arg(long)]
         cwd: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
     },
     /// Boot the standard node set — master에 CSO·worker를 추가. 리뷰어는 필요 시 명시 기동
     Boot {
         /// Working directory for launched nodes
         #[arg(long)]
         cwd: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    AgentDetect {
+        #[arg(long)]
+        json: bool,
     },
     /// Print (creating if absent) this surface's role-specific TODO file path — 복수 워커가 같은 파일을 공유하지 않도록 역할별 고유 경로를 결정론적으로 산출
-    TodoPath,
+    TodoPath {
+        #[arg(long)]
+        role: Option<String>,
+        #[arg(long)]
+        emit_decl: bool,
+    },
+    PackOwnership {
+        rel: String,
+        #[arg(long)]
+        quiet: bool,
+    },
     /// Print this surface's cysd-authoritative role (one word) — PreToolUse capability-gate hook용.
     /// CYS_SURFACE_ID로 자기 surface를 찾아 데몬 roles 맵의 role을 출력(미등록 시 빈 줄·exit 0).
     SurfaceRole,
@@ -1511,14 +1552,14 @@ fn run(command: Command) -> i32 {
         Command::List => request("surface.list", json!({})).map(|r| {
             for s in r["surfaces"].as_array().cloned().unwrap_or_default() {
                 println!(
-                    "{}\trole={}\tpid={}\texited={}\tlabel={}\t{}\t{}",
+                    "{}\trole={}\tpid={}\texited={}\t{}\t{}\tlabel={}",
                     s["surface_ref"].as_str().unwrap_or("?"),
                     s["role"].as_str().unwrap_or("-"),
                     s["pid"],
                     s["exited"],
-                    s["label"].as_str().unwrap_or(""),
                     s["title"].as_str().unwrap_or(""),
                     s["cwd"].as_str().unwrap_or(""),
+                    s["label"].as_str().unwrap_or(""),
                 );
             }
         }),
@@ -1542,6 +1583,12 @@ fn run(command: Command) -> i32 {
                 Ok(()) => 0,
                 Err(e) => { eprintln!("{e}"); 1 }
             };
+        }
+
+        Command::RenameSurface { surface, role, title } => {
+            resolve_role_or_surface(&role, &surface)
+                .and_then(|sid| request("surface.rename", json!({"surface_id": sid, "title": title})))
+                .map(|r| println!("renamed surface:{} → \"{}\"", r["surface_id"], r["title"].as_str().unwrap_or(&title)))
         }
 
         Command::Send { surface, to, queued, clear_first, text } => {
@@ -1632,6 +1679,30 @@ fn run(command: Command) -> i32 {
         }
 
         Command::UsageEventStdin { surface } => return run_usage_event_stdin(&surface),
+
+        Command::UsageAccounts { json: as_json } => request("usage.accounts", json!({}))
+            .map(|r| {
+                if as_json {
+                    println!("{}", serde_json::to_string_pretty(&r).unwrap_or_default());
+                } else {
+                    for a in r["accounts"].as_array().into_iter().flatten() {
+                        println!("{}\t{}\t{}", a["provider"].as_str().unwrap_or("?"),
+                            a["label"].as_str().unwrap_or("?"), a["rate"]);
+                    }
+                }
+            }),
+
+        Command::LearnCheckpoint => {
+            let mut input = String::new();
+            if std::io::stdin().read_to_string(&mut input).is_err() || input.trim().is_empty() {
+                return 1;
+            }
+            match serde_json::from_str::<Value>(&input) {
+                Ok(value) => request("learn.checkpoint", value)
+                    .map(|r| println!("OK round={}", r["round"].as_str().unwrap_or("?"))),
+                Err(e) => Err(format!("invalid checkpoint JSON: {e}")),
+            }
+        }
 
         Command::Status { json: as_json } => return run_status(as_json),
         Command::Fleet { json: as_json } => return run_fleet(as_json),
@@ -1744,10 +1815,10 @@ fn run(command: Command) -> i32 {
             )
         }
 
-        Command::NodeRecover { surface, role } => return run_node_recover(surface, role),
+        Command::NodeRecover { surface, role, resume } => return run_node_recover(surface, role, resume),
 
-        Command::Restore { cwd, include_master, no_resume } => {
-            return run_restore(cwd, include_master, no_resume)
+        Command::Restore { cwd, include_master, resume, no_resume } => {
+            return run_restore(cwd, include_master, resume && !no_resume)
         }
 
         Command::Reinject { role, surface, check, timeout } => {
@@ -1973,14 +2044,24 @@ fn run(command: Command) -> i32 {
             })
         }),
 
-        Command::ClaimRole { role, surface } => target_surface(&surface, &None).and_then(|sid| {
-            request("system.claim_role", json!({"role": role, "surface_id": sid}))
+        Command::ClaimRole { role, surface, takeover_empty_seat } => target_surface(&surface, &None).and_then(|sid| {
+            request("system.claim_role", json!({"role": role, "surface_id": sid,
+                "takeover_empty_seat": takeover_empty_seat}))
                 .map(|r| println!("registered: {} → surface:{}", r["role"].as_str().unwrap_or("?"), sid))
         }),
 
-        Command::LaunchAgent { role, agent, cwd } => return run_launch_agent(&role, &agent, cwd),
-        Command::Boot { cwd } => return run_boot(cwd),
-        Command::TodoPath => return run_todo_path(),
+        Command::LaunchAgent { role, agent, cwd, title, model } => {
+            return run_launch_agent(&role, &agent, cwd, title, model)
+        }
+        Command::Boot { cwd, json } => return run_boot(cwd, json),
+        Command::AgentDetect { json } => return run_agent_detect(json),
+        Command::TodoPath { role, emit_decl } => return run_todo_path(role, emit_decl),
+        Command::PackOwnership { rel, quiet } => {
+            let embedded = cys::pack::PACK.iter().any(|(path, _)| *path == rel);
+            let name = if embedded { cys::pack::ownership_name(&rel) } else { "custom" };
+            if quiet { println!("{name}"); } else { println!("{rel}: {name}"); }
+            return 0;
+        }
 
         Command::SurfaceRole => return run_surface_role(),
 
@@ -3844,8 +3925,49 @@ fn expand_tilde(p: &str) -> std::path::PathBuf {
 // bin/javis_orchestra.py:153-160 (MIT, 루트 LICENSE 유지). CSO 먼저.
 const BOOT_PLAN: &[(&str, &str)] = &[("cso", "claude"), ("worker", "claude")];
 
+fn run_agent_detect(as_json: bool) -> i32 {
+    let path = cys::pack::pack_dir().join("agents.json");
+    let agents: Value = match std::fs::read_to_string(&path)
+        .map_err(|e| e.to_string())
+        .and_then(|raw| serde_json::from_str(&raw).map_err(|e| e.to_string())) {
+        Ok(value) => value,
+        Err(e) => { eprintln!("agents.json: {e}"); return 3; }
+    };
+    let mut found = serde_json::Map::new();
+    for (name, spec) in agents.as_object().into_iter().flatten() {
+        if name.starts_with('_') { continue; }
+        let bin = spec["cmd"].as_str().map(|cmd| extract_bin(cmd, name)).unwrap_or(name);
+        let resolved = if bin.contains('/') || bin.contains('\\') || bin.starts_with('~') {
+            Some(expand_tilde(bin))
+        } else {
+            std::process::Command::new(if cfg!(windows) { "where" } else { "which" })
+                .arg(bin).output().ok().filter(|out| out.status.success())
+                .and_then(|out| String::from_utf8(out.stdout).ok())
+                .and_then(|out| out.lines().next().map(std::path::PathBuf::from))
+        };
+        let installed = resolved.as_ref().is_some_and(|path| agent_binary_executable(path));
+        found.insert(name.clone(), json!({"installed": installed, "bin": bin,
+            "resolved": resolved.filter(|_| installed),
+            "reason": if installed { "found" } else { "binary not found" }}));
+    }
+    if as_json {
+        println!("{}", json!({"agents": found}));
+    } else {
+        for (name, entry) in found { println!("{name}\t{}", if entry["installed"] == true { "installed" } else { "missing" }); }
+    }
+    0
+}
+
+fn agent_binary_executable(path: &std::path::Path) -> bool {
+    if !path.is_file() { return false; }
+    #[cfg(unix)]
+    { use std::os::unix::fs::PermissionsExt; path.metadata().is_ok_and(|m| m.permissions().mode() & 0o111 != 0) }
+    #[cfg(not(unix))]
+    { true }
+}
+
 /// master의 기본 편성에 CSO·worker를 추가하고 지침을 주입한다.
-fn run_boot(cwd: Option<String>) -> i32 {
+fn run_boot(cwd: Option<String>, as_json: bool) -> i32 {
     let agents: Value = std::fs::read_to_string(cys::pack::pack_dir().join("agents.json"))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -3863,6 +3985,7 @@ fn run_boot(cwd: Option<String>) -> i32 {
         .collect();
     let mut launched = 0;
     let mut failed = 0;
+    let mut outcomes = Vec::new();
     println!("cys boot — 기본 편성 점검 (master + CSO·worker, 리뷰어는 필요 시 명시 기동)");
     for (role, agent) in BOOT_PLAN {
         let bin = agents
@@ -3908,26 +4031,36 @@ fn run_boot(cwd: Option<String>) -> i32 {
                 _ => " (선택 노드 — 미설치면 건너뜀이 정상)",
             };
             println!("· {agent}: CLI '{bin}' 미설치 — 건너뜀{hint}");
+            outcomes.push(json!({"role": role, "agent": agent, "outcome": "missing", "mandatory": true,
+                "install_hint": hint.trim()}));
             continue;
         }
         if live_roles.contains(*role) {
             println!("· {agent}: 역할 '{role}' 이미 가동 중 — 건너뜀");
+            outcomes.push(json!({"role": role, "agent": agent, "outcome": "already_alive", "mandatory": true}));
             continue;
         }
         println!("· {agent}: 기동 시작 (role={role})…");
-        let rc = run_launch_agent(role, agent, cwd.clone());
+        let rc = run_launch_agent(role, agent, cwd.clone(), None, None);
         if rc == 0 {
             launched += 1;
+            outcomes.push(json!({"role": role, "agent": agent, "outcome": "launched", "mandatory": true}));
         } else if rc == LAUNCH_PENDING_RC {
             println!("· {agent}: 다른 호출이 기동 중인 좌석을 재사용 — 완료를 기다리지 못함(실패로 세지 않음)");
+            outcomes.push(json!({"role": role, "agent": agent, "outcome": "busy", "mandatory": true}));
         } else {
             failed += 1;
             println!("· {agent}: 기동 실패 — 나머지 노드는 계속 진행");
+            outcomes.push(json!({"role": role, "agent": agent, "outcome": "failed", "mandatory": true}));
         }
     }
     println!(
         "boot 완료: 신규 기동 {launched} · 실패 {failed} · 현황은 `cys list`로 확인 (role 열)"
     );
+    if as_json {
+        println!("{}", json!({"roles": outcomes,
+            "summary": {"launched": launched, "failed": failed}}));
+    }
     if failed > 0 {
         1
     } else {
@@ -4283,7 +4416,9 @@ fn model_for_role(spec: &Value, role: &str) -> Result<Option<String>, String> {
 fn cmd_with_model(spec: &Value, model: Option<&str>) -> Result<String, String> {
     let mut cmd = spec["cmd"].as_str().ok_or("agent cmd missing")?.to_string();
     if let Some(m) = model {
-        cmd.push_str(" --model ");
+        cmd.push(' ');
+        cmd.push_str(spec["model_arg"].as_str().unwrap_or("--model"));
+        cmd.push(' ');
         cmd.push_str(m);
     }
     Ok(cmd)
@@ -4427,8 +4562,13 @@ fn boot_agent_on_surface(
     cwd: Option<&str>,
     config_dir: Option<&str>,
     fresh: bool,
+    model_override: Option<&str>,
 ) -> Result<(), LaunchError> {
-    let (first, fallback) = model_plan(spec, role)?;
+    let (first, fallback) = if let Some(model) = model_override {
+        (Some(model.to_string()), None)
+    } else {
+        model_plan(spec, role)?
+    };
     let mut model = first;
     let mut fell_back = false;
     loop {
@@ -4749,43 +4889,42 @@ fn run_surface_role() -> i32 {
     0
 }
 
-fn run_todo_path() -> i32 {
-    let Some(sref) = cys::env_compat(ENV_SURFACE_ID) else {
-        eprintln!("CYS_SURFACE_ID 없음 — 데몬이 띄운 pane 안에서만 동작한다");
-        return 1;
-    };
-    let Some(my_sid) = parse_surface_ref(&sref) else {
-        eprintln!("CYS_SURFACE_ID 파싱 실패: {sref}");
-        return 1;
-    };
-    let role = match request("surface.list", json!({})) {
-        Ok(r) => r["surfaces"].as_array().and_then(|arr| {
-            arr.iter()
-                .find(|s| s["surface_id"].as_u64() == Some(my_sid))
-                .and_then(|s| s["role"].as_str().map(|x| x.to_string()))
-        }),
-        Err(e) => {
-            eprintln!("surface.list 실패: {e}");
+fn run_todo_path(role_opt: Option<String>, emit_decl: bool) -> i32 {
+    let foreign = role_opt.is_some();
+    let role = if let Some(role) = role_opt { role } else {
+        let Some(sref) = cys::env_compat(ENV_SURFACE_ID) else {
+            eprintln!("CYS_SURFACE_ID 없음 — 데몬 pane 안에서만 동작한다(다른 역할은 --role)");
             return 1;
+        };
+        let Some(my_sid) = parse_surface_ref(&sref) else { eprintln!("CYS_SURFACE_ID 파싱 실패"); return 1; };
+        match request("surface.list", json!({})).ok().and_then(|r| r["surfaces"].as_array()
+            .and_then(|arr| arr.iter().find(|s| s["surface_id"].as_u64() == Some(my_sid))
+                .and_then(|s| s["role"].as_str().map(str::to_string)))) {
+            Some(role) => role,
+            None => { eprintln!("이 surface에 역할 미등록"); return 1; }
         }
     };
-    let Some(role) = role else {
-        eprintln!("이 surface에 역할 미등록 — todo-path는 역할 노드(claim-role/launch-agent) 전용");
-        return 1;
-    };
-    let pack = cys::env_compat("CYS_PACK_DIR")
-        .map(std::path::PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".cys/pack")))
-        .unwrap_or_else(|| std::path::PathBuf::from(".cys/pack"));
-    let round = pack.join("round");
-    if let Err(e) = std::fs::create_dir_all(&round) {
-        eprintln!("round 디렉터리 생성 실패: {e}");
+    let pack = cys::pack::pack_dir();
+    let scope = pack.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    let valid = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'));
+    if !valid(&role) || !valid(scope) {
+        eprintln!("invalid TODO owner or scope");
         return 1;
     }
+    let declaration = format!("<!-- javis:todo v1 owner={role} scope={scope} status=active -->");
+    if emit_decl { println!("{declaration}"); return 0; }
+    let round = pack.join("round");
     let fname = format!("{}_TODO.md", role.to_uppercase().replace('-', "_"));
     let path = round.join(&fname);
-    if !path.exists() {
-        let _ = std::fs::write(&path, format!("# {role} TODO — 영속 todo (절대지침 7)\n\n"));
+    if !foreign {
+        if let Err(e) = std::fs::create_dir_all(&round) { eprintln!("round 디렉터리 생성 실패: {e}"); return 1; }
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => if let Err(e) = write!(file, "{declaration}\n\n# {role} TODO — 영속 todo\n\n") {
+                eprintln!("TODO 파일 작성 실패: {e}"); return 1;
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {},
+            Err(e) => { eprintln!("TODO 파일 생성 실패: {e}"); return 1; }
+        }
     }
     println!("{}", path.display());
     0
@@ -4806,8 +4945,8 @@ const REUSED_LAUNCH_WAIT_SECS: u64 = 120;
 /// boot/restore 는 이 값을 실패로 세지 않는다(2 = 주입 미완료와 구분).
 const LAUNCH_PENDING_RC: i32 = 3;
 
-fn run_launch_agent(role: &str, agent: &str, cwd: Option<String>) -> i32 {
-    run_launch_agent_opts(role, agent, cwd, false, None, false, None)
+fn run_launch_agent(role: &str, agent: &str, cwd: Option<String>, title: Option<String>, model: Option<String>) -> i32 {
+    run_launch_agent_opts(role, agent, cwd, false, None, false, None, title, model)
 }
 
 /// 멱등 create가 돌려준 좌석은 이 호출이 소유하지 않는다. 이전 launch-agent의 완료
@@ -4867,7 +5006,16 @@ fn run_launch_agent_opts(
     restore: bool,
     // (W1) restore가 topology에 기록된 원 계정 config_dir을 넘긴다(재해소 금지). 신규 기동은 None.
     config_dir_override: Option<String>,
+    title_override: Option<String>,
+    model_override: Option<String>,
 ) -> i32 {
+    if model_override.as_deref().is_some_and(|m| {
+        m.is_empty() || m.len() > 64 || !m.as_bytes()[0].is_ascii_alphanumeric()
+            || !m.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
+    }) {
+        eprintln!("error: invalid model slug");
+        return 2;
+    }
     // 절대지침(앵커1-b): 워커는 워크플로우 폴더에서 산다 — cwd 미지정이면 호출 폴더가
     // 워크플로우 폴더다 (데몬 기본값 home에 맡기지 않는다. 명시 --cwd는 그대로 우선).
     // 빈 문자열은 None으로 정규화 — 구버전 topology의 "cwd": "" 가 PTY 생성을 깨거나
@@ -4895,8 +5043,8 @@ fn run_launch_agent_opts(
             "la-{}-{}-{}",
             role,
             agent,
-            cwd.as_deref()
-                .unwrap_or("")
+            format!("{}|{}|{}", cwd.as_deref().unwrap_or(""),
+                title_override.as_deref().unwrap_or(""), model_override.as_deref().unwrap_or(""))
                 .chars()
                 .map(|c| c as u32)
                 .fold(0u64, |a, c| a.wrapping_mul(31).wrapping_add(c as u64))
@@ -4911,7 +5059,7 @@ fn run_launch_agent_opts(
             .collect();
         let r = request(
             "surface.create",
-            json!({"cwd": cwd, "title": workflow_title(role, agent, &cwd), "role": role,
+            json!({"cwd": cwd, "title": title_override.as_deref().unwrap_or(&workflow_title(role, agent, &cwd)), "role": role,
                    "rows": 40, "cols": 140, "idempotency_key": idem, "env": env_obj,
                    "launch_agent": true,
                    // (W1) restore 원값 전달(부재=신규는 데몬이 자기 env로 결정론 해소·기록).
@@ -4941,7 +5089,14 @@ fn run_launch_agent_opts(
             cwd.as_deref(),
             recorded_cfg.as_deref(),
             true,
+            model_override.as_deref(),
         )?;
+        if let Some(token) = launch_token {
+            if let Err(e) = request("directive.verify", json!({"surface_id": sid,
+                "verified": true, "reason": "directive injected and visible", "launch_token": token})) {
+                eprintln!("[launch-agent] directive.verify failed: {e}");
+            }
+        }
         match launch_token {
             Some(token) => {
                 request("surface.launch_complete", json!({"surface_id": sid, "launch_token": token}))?;
@@ -5267,6 +5422,9 @@ fn statusline_to_report_params(v: &Value) -> Value {
     }
     if let Some(w) = ctx_window {
         params["ctx_window"] = json!(w);
+    }
+    if let Some(path) = v.get("transcript_path").and_then(Value::as_str) {
+        params["session_file"] = json!(path);
     }
     params
 }
@@ -5855,7 +6013,7 @@ fn run_cycle_agent(
 }
 
 /// T2-5 노드 복구: 죽은 에이전트를 같은 surface에서 재기동 + 지침 재주입 + 복원 포인터
-fn run_node_recover(surface: Option<String>, role: Option<String>) -> i32 {
+fn run_node_recover(surface: Option<String>, role: Option<String>, resume: bool) -> i32 {
     let result = (|| -> Result<(), String> {
         let sid = resolve_role_or_surface(&role, &surface)?;
         let entry = surface_entry(sid)?;
@@ -5899,12 +6057,13 @@ fn run_node_recover(surface: Option<String>, role: Option<String>) -> i32 {
             &role_name,
             &agent,
             &spec,
-            true,
+            resume,
             sess.as_deref(),
             false,
             rec_cwd.as_deref(),
             rec_cfg.as_deref(),
             false,
+            None,
         )
         .map_err(|e| e.to_string())?;
         inject_text(sid, "[RECOVER] 너는 방금 재기동되었다. _round/SESSION_STATE.md와 자기 TODO 파일을 읽어 작업 기억을 복원한 뒤 master에게 복귀를 1줄 push로 보고하라. 작업 재개는 master 지시를 따른다.")?;
@@ -5926,7 +6085,7 @@ fn restore_surface_label(sid: u64, entry: &Value) -> Result<(), String> {
     request("surface.set_label", json!({"surface_id": sid, "label": label})).map(|_| ())
 }
 
-fn run_restore(cwd: Option<String>, include_master: bool, no_resume: bool) -> i32 {
+fn run_restore(cwd: Option<String>, include_master: bool, resume: bool) -> i32 {
     let result = (|| -> Result<(usize, usize), String> {
         let topo = request("system.topology", json!({}))?;
         let live: std::collections::HashSet<String> = topo["live"]
@@ -5981,7 +6140,7 @@ fn run_restore(cwd: Option<String>, include_master: bool, no_resume: bool) -> i3
             let sess = entry["session_id"].as_str().map(String::from);
             // (W1) topology에 기록된 원 계정 config_dir을 넘긴다(구 topology=None → 기존 템플릿 동작).
             let cfg = entry["claude_config_dir"].as_str().map(String::from);
-            let rc = run_launch_agent_opts(role, agent, target_cwd, !no_resume, sess, true, cfg);
+            let rc = run_launch_agent_opts(role, agent, target_cwd, resume, sess, true, cfg, None, None);
             if rc == LAUNCH_PENDING_RC {
                 println!("· {role}: 다른 호출이 기동 중인 좌석을 재사용 — 완료를 기다리지 못함(실패로 세지 않음)");
             } else if rc == 0 {
@@ -9143,6 +9302,38 @@ mod tests {
         assert_eq!(p["ctx_window"].as_u64(), Some(1000000));
         assert_eq!(p["rate"].as_array().unwrap().len(), 0);
         assert!(p.get("ctx_tokens").is_none(), "current_usage·total 없으면 ctx_tokens 생략");
+        assert!(p.get("session_file").is_none());
+    }
+
+    #[test]
+    fn statusline_transcript_path_reaches_usage_report() {
+        let p = statusline_to_report_params(&json!({
+            "transcript_path": "/tmp/profile/projects/demo/session.jsonl",
+            "rate_limits": {"five_hour": {"used_percentage": 35.0}}
+        }));
+        assert_eq!(p["session_file"], "/tmp/profile/projects/demo/session.jsonl");
+    }
+
+    #[test]
+    fn launch_and_rename_compatibility_options_parse() {
+        let cli = Cli::try_parse_from(["cys", "launch-agent", "--role", "worker", "--agent", "claude",
+            "--model", "claude-sonnet-5", "--title", "Team·Worker"]).unwrap();
+        assert!(matches!(cli.command, Command::LaunchAgent { title: Some(_), model: Some(_), .. }));
+        let cli = Cli::try_parse_from(["cys", "rename-surface", "--surface", "surface:2", "--title", "Team·Worker·s2"]).unwrap();
+        assert!(matches!(cli.command, Command::RenameSurface { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_detect_rejects_non_executable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("cys-agent-detect-{}", std::process::id()));
+        std::fs::write(&path, "exit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(!super::agent_binary_executable(&path));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(super::agent_binary_executable(&path));
+        std::fs::remove_file(path).unwrap();
     }
 
     /// 사람용 statusline 한 줄 포맷 — rate는 있을 때만, 모델명 부재 시 "claude" 폴백.

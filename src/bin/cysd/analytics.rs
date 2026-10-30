@@ -62,7 +62,11 @@ pub fn open(socket_path: &Path) -> Option<Connection> {
             payload       TEXT NOT NULL,        -- IR(JSON 등) — 형식 버전드
             attest_hash   TEXT NOT NULL,        -- prev∥payload 해시체인(recall hash_step 동형)
             ts            REAL NOT NULL);
-         CREATE INDEX IF NOT EXISTS ix_cl_scope_revn ON change_log(scope, revn);",
+         CREATE INDEX IF NOT EXISTS ix_cl_scope_revn ON change_log(scope, revn);
+         CREATE TABLE IF NOT EXISTS skill_runs(
+            run_id TEXT PRIMARY KEY, name TEXT, label TEXT, started_at REAL,
+            deadline REAL, status TEXT, exit_note TEXT, artifact_dir TEXT, ended_at REAL);
+         CREATE INDEX IF NOT EXISTS ix_skill_runs_started ON skill_runs(started_at);",
     )
     .ok()?;
     Some(conn)
@@ -1766,4 +1770,96 @@ mod tests {
         assert_eq!(replayed, 3, "revn>2 = p2,p3,p4");
         assert_eq!(payloads, vec!["p2".to_string(), "p3".to_string(), "p4".to_string()]);
     }
+}
+
+// Skill run lifecycle used by skillrun RPCs.
+pub fn skill_run_insert(
+    conn: &Connection,
+    run_id: &str,
+    name: &str,
+    label: &str,
+    now: f64,
+    deadline: f64,
+) {
+    let _ = conn.execute(
+        "INSERT OR REPLACE INTO skill_runs(run_id, name, label, started_at, deadline, status)
+         VALUES(?1,?2,?3,?4,?5,'launched')",
+        rusqlite::params![run_id, name, label, now, deadline],
+    );
+}
+
+pub fn skill_run_update(
+    conn: &Connection,
+    run_id: &str,
+    status: &str,
+    exit_note: Option<&str>,
+    artifact_dir: Option<&str>,
+    ended_at: Option<f64>,
+) {
+    let _ = conn.execute(
+        "UPDATE skill_runs SET status=?2,
+            exit_note=COALESCE(?3, exit_note),
+            artifact_dir=COALESCE(?4, artifact_dir),
+            ended_at=COALESCE(?5, ended_at)
+         WHERE run_id=?1",
+        rusqlite::params![run_id, status, exit_note, artifact_dir, ended_at],
+    );
+}
+
+/// 열린 run(launched) — 워처 전이 대상. (run_id, deadline)
+pub fn skill_runs_open(conn: &Connection) -> Vec<(String, f64)> {
+    let mut out = Vec::new();
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT run_id, deadline FROM skill_runs WHERE status='launched'",
+    ) else {
+        return out;
+    };
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+    });
+    if let Ok(rows) = rows {
+        for r in rows.flatten() {
+            out.push(r);
+        }
+    }
+    out
+}
+
+/// 부트 reconcile — 열린 run 일괄 failed(사유 기록). 일회용 pane은 데몬 재시작을 넘어 살지 않는다.
+pub fn skill_runs_fail_open(conn: &Connection, note: &str, now: f64) {
+    let _ = conn.execute(
+        "UPDATE skill_runs SET status='failed', exit_note=?1, ended_at=?2
+         WHERE status='launched'",
+        rusqlite::params![note, now],
+    );
+}
+
+/// 최근 run 목록(UI 카드) — started_at 내림차순.
+pub fn skill_runs_list(conn: &Connection, limit: u64) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT run_id, name, label, started_at, deadline, status, exit_note, artifact_dir, ended_at
+         FROM skill_runs ORDER BY started_at DESC LIMIT ?1",
+    ) else {
+        return out;
+    };
+    let rows = stmt.query_map([limit], |r| {
+        Ok(serde_json::json!({
+            "run_id": r.get::<_, String>(0)?,
+            "name": r.get::<_, String>(1)?,
+            "label": r.get::<_, String>(2)?,
+            "started_at": r.get::<_, f64>(3)?,
+            "deadline": r.get::<_, Option<f64>>(4)?,
+            "status": r.get::<_, String>(5)?,
+            "exit_note": r.get::<_, Option<String>>(6)?,
+            "artifact_dir": r.get::<_, Option<String>>(7)?,
+            "ended_at": r.get::<_, Option<f64>>(8)?,
+        }))
+    });
+    if let Ok(rows) = rows {
+        for r in rows.flatten() {
+            out.push(r);
+        }
+    }
+    out
 }

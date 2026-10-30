@@ -756,6 +756,39 @@ fn learn_state_dir() -> std::path::PathBuf {
     cys::pack::pack_dir().join("round").join("learn")
 }
 
+fn learn_checkpoint_apply(dir: &std::path::Path, params: &Value, round: &str) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let path = dir.join("state.json");
+    let mut state: Value = std::fs::read_to_string(&path).ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .filter(Value::is_object).unwrap_or_else(|| json!({}));
+    let obj = state.as_object_mut().unwrap();
+    let rounds = obj.entry("rounds").or_insert_with(|| json!({}));
+    if !rounds.is_object() { *rounds = json!({}); }
+    let entry = rounds.as_object_mut().unwrap().entry(round).or_insert_with(|| json!({}));
+    if !entry.is_object() { *entry = json!({}); }
+    for key in ["verdict", "stored", "harness", "items", "evaluator_hash", "schema"] {
+        if let Some(value) = params.get(key) { entry[key] = value.clone(); }
+    }
+    if let Some(discovery) = params.get("discovery").and_then(Value::as_object) {
+        let target = obj.entry("discovery").or_insert_with(|| json!({}));
+        if !target.is_object() { *target = json!({}); }
+        for (key, value) in discovery { target[key] = value.clone(); }
+    }
+    let temp = dir.join("state.json.tmp");
+    std::fs::write(&temp, serde_json::to_vec_pretty(&state).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    std::fs::rename(&temp, path).map_err(|e| e.to_string())?;
+    let mut line = params.clone();
+    line["ts"] = json!(crate::state::now_epoch());
+    if let Some(map) = line.as_object_mut() { map.remove("surface_id"); }
+    use std::io::Write;
+    let mut ledger = std::fs::OpenOptions::new().create(true).append(true)
+        .open(dir.join("ledger.jsonl")).map_err(|e| e.to_string())?;
+    writeln!(ledger, "{}", line).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> Reply {
     let id = req.id.clone();
     let params = req.params;
@@ -1016,6 +1049,7 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                         "launch_complete": s.launch_complete.load(Ordering::Relaxed),
                         "model": s.agent_model.lock().unwrap().as_ref().map(|(m, _)| m.clone()),
                         "model_fallback": s.agent_model.lock().unwrap().as_ref().map(|(_, f)| *f),
+                        "directive_verified": *s.directive_verified.lock().unwrap(),
                         "usage": s.observed_usage.lock().unwrap().clone()
                             .and_then(|u| serde_json::to_value(u).ok()),
                     })
@@ -1650,6 +1684,17 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
             // 블록 정상 종료(fall-through)에서만 읽힌다 — 조기 return 경로는 arm 전체를 종료한다.
             let master_before: Option<u64>;
             let master_after: Option<u64>;
+            let takeover_holder = if matches!(role.as_str(), "master" | "cso")
+                && params["takeover_empty_seat"].as_bool() == Some(true) {
+                let holder = {
+                    let surfaces = daemon.surfaces.lock().unwrap();
+                    let roles = daemon.roles.lock().unwrap();
+                    roles.get(&role).and_then(|&holder| surfaces.get(&holder)
+                        .filter(|s| holder != sid && !s.exited.load(Ordering::Relaxed))
+                        .map(|s| (holder, s.clone())))
+                };
+                holder.and_then(|(holder, surface)| crate::governance::seat_claimable_now(&surface).then_some(holder))
+            } else { None };
             {
                 let surfaces = daemon.surfaces.lock().unwrap();
                 let Some(surface) = surfaces.get(&sid) else {
@@ -1673,7 +1718,7 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                                 .get(&holder)
                                 .map(|h| !h.exited.load(Ordering::Relaxed))
                                 .unwrap_or(false);
-                        if holder_live {
+                        if holder_live && takeover_holder != Some(holder) {
                             daemon.bus.publish(
                                 "role.claim_denied",
                                 "system",
@@ -1691,6 +1736,12 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                             );
                             response["error"]["detail"] = caller_resolution;
                             return Reply::Single(response);
+                        }
+                        if holder_live {
+                            if let Some(previous) = surfaces.get(&holder) {
+                                *previous.role.lock().unwrap() = None;
+                                *previous.caps.lock().unwrap() = crate::caps::Caps::for_role(None);
+                            }
                         }
                     }
                 }
@@ -2552,7 +2603,46 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
         }
 
         // ─── T5 사용량 관측: 세션 트랜스크립트 경로 등록 (SessionStart hook의 결정론 매핑) ───
-        "usage.accounts" => Reply::Single(ok_response(&id, crate::usage::account_rows(daemon))),
+        "usage.accounts" => Reply::Single(ok_response(&id, crate::accounts::account_rows(daemon))),
+        "directive.verify" => {
+            let Some(sid) = resolve_surface_id(&params) else {
+                return Reply::Single(err_response(&id, "invalid_params", "missing surface_id"));
+            };
+            let Some(verified) = params.get("verified").and_then(Value::as_bool) else {
+                return Reply::Single(err_response(&id, "invalid_params", "missing verified"));
+            };
+            let Some(surface) = daemon.get_surface(sid) else {
+                return Reply::Single(err_response(&id, "not_found", "surface not found"));
+            };
+            let launch_token_ok = param_str(&params, "launch_token")
+                .is_some_and(|token| surface.launch_token.lock().unwrap().as_deref() == Some(token.as_str()));
+            if !launch_token_ok {
+                return Reply::Single(err_response(&id, "verify_denied", "directive verification requires launch authority"));
+            }
+            *surface.directive_verified.lock().unwrap() = Some(verified);
+            daemon.bus.publish(if verified { "directive.verified" } else { "directive.unverified" },
+                "status", Some(sid), json!({"verified": verified,
+                    "reason": param_str(&params, "reason").unwrap_or_default()}));
+            Reply::Single(ok_response(&id, json!({"surface_id": sid, "verified": verified})))
+        }
+        "learn.checkpoint" => {
+            let Some(round) = param_str(&params, "round").filter(|s| !s.is_empty()) else {
+                return Reply::Single(err_response(&id, "invalid_params", "missing round"));
+            };
+            let _guard = daemon.learn_write.lock().unwrap();
+            match learn_checkpoint_apply(&learn_state_dir(), &params, &round) {
+                Ok(()) => {
+                    daemon.bus.publish("learn.updated", "learn", None, json!({"round": round}));
+                    Reply::Single(ok_response(&id, json!({"round": round})))
+                }
+                Err(e) => Reply::Single(err_response(&id, "io", &e)),
+            }
+        }
+        "skill.run_started" => match crate::skillrun::run_started(daemon, &params) {
+            Ok(value) => Reply::Single(ok_response(&id, value)),
+            Err(e) => Reply::Single(err_response(&id, "invalid_params", &e)),
+        },
+        "skill.runs" => Reply::Single(ok_response(&id, crate::skillrun::runs_list(daemon, &params))),
 
         "usage.register" => {
             let Some(sid) = resolve_surface_id(&params) else {
@@ -2840,6 +2930,7 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                         "agent_alive": agent_alive,
                         "model": s.agent_model.lock().unwrap().as_ref().map(|(m, _)| m.clone()),
                         "model_fallback": s.agent_model.lock().unwrap().as_ref().map(|(_, f)| *f),
+                        "directive_verified": *s.directive_verified.lock().unwrap(),
                         "status": status,
                         "usage": s.observed_usage.lock().unwrap().clone()
                             .and_then(|u| serde_json::to_value(u).ok()),
@@ -3671,6 +3762,20 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn learn_checkpoint_merges_round_and_writes_ledger() {
+        let dir = std::env::temp_dir().join(format!("cys-learn-checkpoint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        learn_checkpoint_apply(&dir, &json!({"verdict": "baseline", "discovery": {"a": 1}}), "r1").unwrap();
+        learn_checkpoint_apply(&dir, &json!({"stored": 2, "discovery": {"b": 3}}), "r1").unwrap();
+        let state: Value = serde_json::from_slice(&std::fs::read(dir.join("state.json")).unwrap()).unwrap();
+        assert_eq!(state["rounds"]["r1"]["verdict"], "baseline");
+        assert_eq!(state["rounds"]["r1"]["stored"], 2);
+        assert_eq!(state["discovery"], json!({"a": 1, "b": 3}));
+        assert_eq!(std::fs::read_to_string(dir.join("ledger.jsonl")).unwrap().lines().count(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn read_text_marks_only_dim_suggestion_cells() {
@@ -4516,6 +4621,25 @@ mod tests {
         let Reply::Single(completed) = dispatch(&daemon, req, None) else { panic!("single reply") };
         assert_eq!(completed["result"]["launch_complete"], json!(true), "{completed}");
         let _ = daemon.get_surface(sid).unwrap().child.lock().unwrap().kill();
+    }
+
+    #[test]
+    fn directive_verify_requires_launch_authority() {
+        let daemon = isolated_daemon();
+        let sid = make_surface(&daemon, None);
+        let surface = daemon.get_surface(sid).unwrap();
+        *surface.launch_token.lock().unwrap() = Some("secret".into());
+        let verify = |token: Option<&str>| {
+            let mut params = json!({"surface_id": sid, "verified": true});
+            if let Some(token) = token { params["launch_token"] = json!(token); }
+            let req = Request { id: json!(1), method: "directive.verify".into(), params };
+            let Reply::Single(resp) = dispatch(&daemon, req, Some(91002)) else { panic!("single reply") };
+            resp
+        };
+        assert_eq!(verify(None)["error"]["code"], "verify_denied");
+        assert_eq!(verify(Some("wrong"))["error"]["code"], "verify_denied");
+        assert_eq!(verify(Some("secret"))["result"]["verified"], true);
+        assert_eq!(*surface.directive_verified.lock().unwrap(), Some(true));
     }
 
     #[test]

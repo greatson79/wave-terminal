@@ -11,6 +11,7 @@
 // 결과가 달라지면 잡힌다(동치 변이 포함). DOM 라이브러리 의존은 0이다.
 
 import { hqPresentation, type HqColorMap } from "./hqbadge";
+import { wcagContrast } from "./contrast";
 
 /** 본부 칩에 실제로 실리는 값 전부. DOM 이 아니라 **값**이라 그대로 단언할 수 있다. */
 export interface HqChip {
@@ -18,6 +19,7 @@ export interface HqChip {
   title: string;
   ariaLabel: string;
   background: string;
+  foreground: string;
 }
 
 /** 탭에 가하는 조작. main.ts 가 DOM 구현을, 테스트가 기록 구현을 넣는다. */
@@ -48,6 +50,7 @@ export function paintHqTab(
     title: `본부: ${hq}`,
     ariaLabel: `본부 ${hq}`,
     background: color,
+    foreground: wcagContrast(color, "#ffffff") >= 4.5 ? "#ffffff" : "#0d1117",
   });
 }
 
@@ -109,6 +112,7 @@ export function createHqTabShell(
       chip.className = "ws-hq-chip";
       chip.textContent = c.text;
       chip.style.background = c.background;
+      chip.style.color = c.foreground;
       chip.title = c.title;
       chip.setAttribute("aria-label", c.ariaLabel);
       titleRow.appendChild(chip);

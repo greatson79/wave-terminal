@@ -18,6 +18,10 @@ import { safeHelpText } from "./help";
 import { bindPaneRename, paneHeading, splitPaneHeading } from "./paneheading";
 import { resetTime, sidebarUsage, type UsageAccount } from "./usagebar";
 import { inputSource } from "./inputsource";
+import { routeOnData } from "./mousefilter";
+import { pauseView, type PauseSocketStatus, type PauseView } from "./pausebadge";
+import { DEFAULT_EXIT_POLICY, decideExitAction, shouldDropEmptyWorkspace, shouldReassignFocus, shouldRemoveAfterGrace, type GraceRecheck } from "./exitpolicy";
+import { classifyDrainVerifyFallback, drainVerifyFallbackToast } from "./drainverify";
 import { sendPreparedHelp } from "./helpflow";
 import { adoptHqOf, autoAssignGroups, configureHierarchyNaming, nextTeamName, paneRehomeTarget, pickAdoptWs, sortHqMembers, sortHqWorkspaces, tabLabel } from "./hierarchy";
 import { sidebarTreeSpec, hqCountLabel } from "./sidebartree";
@@ -26,7 +30,7 @@ import { createHqTabShell, type MiniDoc } from "./wstab";
 import { teamMemberRows } from "./teamtree";
 import { dedupeTree, socketOwnsSid } from "./treededupe";
 import { shouldAdoptSurface } from "./surfaceadopt";
-import { normalizeWorkspaces, shouldKeepEmptyWorkspaceOnRestore } from "./wsrestore";
+import { normalizeWorkspaces, rehomeRestoredSeats, shouldKeepEmptyWorkspaceOnRestore } from "./wsrestore";
 import { nextGhostStrike } from "./ghoststrike";
 import { transferTrees } from "./transfer";
 import { resolveEventSocket } from "./eventsocket";
@@ -1402,6 +1406,8 @@ function applyZoom(delta: number | null) {
 // 터미널 폰트 선택(cys-font-face · 오너 요청 2026-07-12) — 선택 폰트를 기본 스택 앞에 합성
 // (composeFontFamily · CJK 폴백 보존), null=기본. 폰트 메트릭 변화 → 셀 재계산(applyZoom과 동일 패턴).
 let settings = readSettings(localStorage.getItem(SETTINGS_KEY), localStorage.getItem("cys-bg-color"), localStorage.getItem("cys-font-face"));
+const autoRemoveExited = localStorage.getItem("cys-auto-remove-exited") !== "0";
+const preserveEmptyWorkspace = localStorage.getItem("cys-preserve-empty-ws") !== "0";
 function saveSettings() { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); }
 saveSettings(); // first run migrates the two legacy values; the old keys stay available for rollback
 function applyUsageSettings() { renderSidebarUsage(sidebarUsageAccounts); }
@@ -1667,7 +1673,7 @@ async function refreshPaneTitles() {
           displayPaneHeading(rt.titleEl, s.surface_id, state);
         }
         const liveIds = new Set(r.surfaces.filter((s) => !s.exited).map((s) => s.surface_id));
-        for (const ws of workspaces.filter((w) => (w.socket ?? undefined) === (sk ?? undefined))) {
+        for (const ws of autoRemoveExited ? workspaces.filter((w) => (w.socket ?? undefined) === (sk ?? undefined)) : []) {
           for (const sid of collectSids(ws.tree)) {
             const key = paneKey(sid, sk);
             const { strikes, remove } = nextGhostStrike(ghostStrikes.get(key) ?? 0,
@@ -2010,10 +2016,13 @@ async function makePane(sid: number, title: string, socket?: string): Promise<Pa
     invoke("log_ime", { line: `[s${sid}] ${message}` }).catch(() => {});
   });
   term.onData((data) => {
+    const route = routeOnData(data, /Windows/i.test(navigator.userAgent));
+    if (route.action === "scroll") { term.scrollLines(route.lines); return; }
+    if (route.action === "discard") return;
     // 완성 음절은 그대로 PTY로 — 잔여 pending이 있으면 리듀서가 순서 보존 후 함께 전송(안전장치).
     // Windows 등 비-WKWebView에선 input 핸들러·insertLeak 감지 미배선이라 insertLeak이 항상 null →
     // duplicate=false → 순수 send(data)와 동일(회귀 0). WKWebView에서 insertText 자모 유출만 폐기.
-    applyIme({ kind: "onData", data, duplicate: insertLeak !== null && data === insertLeak }, source.takeHuman());
+    applyIme({ kind: "onData", data: route.data, duplicate: insertLeak !== null && route.data === insertLeak }, source.takeHuman());
   });
 
   // ★F: 위 조합 상태 머신은 macOS WKWebView 전용 우회다. Windows WebView2 등 Chromium 계열은
@@ -2592,12 +2601,16 @@ async function actionEqualize() {
 async function refreshSidebarStatus() {
   const sockets = new Set(workspaces.map((w) => w.socket));
   let pend = 0;
+  const pauseStatuses: PauseSocketStatus[] = [];
   for (const sock of sockets) {
     try {
       const r = (await invoke("org_status", { socket: sock })) as {
         surfaces?: any[];
         feed?: { pending?: number };
+        paused?: boolean;
+        pause_info?: { since?: number | null; reason?: string | null } | null;
       };
+      pauseStatuses.push({ socket: sock, paused: r.paused, pause_info: r.pause_info });
       pend += r.feed?.pending ?? 0;
       for (const n of r.surfaces ?? [])
         nodeSig.set(`${sock}#${n.surface_id}`, {
@@ -2613,7 +2626,31 @@ async function refreshSidebarStatus() {
   }
   pendingApprovals = pend;
   updatePendingBadges(pend); // CC 버튼·승인 Feed 탭 배지 동기
+  const labels = new Map<string, string>();
+  if (pauseStatuses.some((s) => s.paused)) {
+    const registry = await invoke("list_depts").catch(() => null) as { depts?: Record<string, { socket?: string; display_name?: string }> } | null;
+    for (const [name, dept] of Object.entries(registry?.depts ?? {}))
+      if (dept.socket) labels.set(dept.socket, dept.display_name || name);
+  }
+  renderPauseBadge(pauseView(pauseStatuses, labels, Date.now() / 1000));
   renderWsTabs(); // 신호 반영 재렌더
+}
+
+function renderPauseBadge(view: PauseView) {
+  const el = document.getElementById("pause-badge")!;
+  const badge = view.badge;
+  el.hidden = !badge;
+  el.textContent = badge?.text ?? "";
+  el.title = view.tooltip;
+  if (!badge) { el.removeAttribute("data-level"); el.onclick = null; return; }
+  el.dataset.level = badge.level;
+  el.onclick = async () => {
+    if (!(await confirmModal("정지 해제", `${badge.label ?? badge.socket ?? "이 데몬"} 의 큐 배달·스케줄 발화를 재개할까요?`, "해제"))) return;
+    try {
+      await invoke("system_resume", { socket: badge.socket });
+      await refreshSidebarStatus();
+    } catch (error) { toast("health", "해제 실패", String(error)); }
+  };
 }
 
 // 승인 대기 건수 배지 — 상단 Control Center 버튼 + 편입된 '승인 Feed' 탭 둘 다 갱신.
@@ -3483,24 +3520,45 @@ async function actionClose() {
   if (focusedSid != null) setFocus(focusedSid);
 }
 
-// 데몬에서 사라진(종료·닫힘·reap) surface의 UI pane을 자동 제거 — 멱등(이미 없으면 무동작).
-// 데몬이 close_surface 하지 않은 자력종료라도 즉시 정리해 죽은 pane이 쌓이지 않게 한다.
+// 데몬에서 사라진 surface의 UI pane을 자동 제거 — 멱등(이미 없으면 무동작).
 // 복구는 보존: 60s grace 내 node-recover로 surface가 되살아나면 refreshPaneTitles 폴링이 재입양한다.
 function removeDeadPane(sid: number, socket?: string) {
   const sameSock = (w: Workspace) => (w.socket ?? undefined) === (socket ?? undefined);
   const inLayout = workspaces.some((w) => sameSock(w) && w.tree != null && collectSids(w.tree).includes(sid));
   if (!panes.has(paneKey(sid, socket)) && !inLayout) return; // 이미 정리됨
+  const reassignFocus = shouldReassignFocus(sid, focusedSid, socket, current()?.socket);
   destroyPaneRuntime(sid, socket);
+  const emptiedIds = new Set<number>();
   for (const ws of workspaces) {
     if (sameSock(ws) && ws.tree != null && collectSids(ws.tree).includes(sid)) {
       ws.tree = replaceNode(ws.tree, sid, () => null);
+      if (shouldDropEmptyWorkspace(preserveEmptyWorkspace, ws.tree === null)) emptiedIds.add(ws.id);
     }
   }
+  if (emptiedIds.size) {
+    const activeId = current()?.id;
+    workspaces = workspaces.filter((w) => !emptiedIds.has(w.id));
+    if (!workspaces.length) workspaces = [{ id: wsCounter++, name: UNTITLED, tree: null }];
+    const index = workspaces.findIndex((w) => w.id === activeId);
+    activeWs = index >= 0 ? index : Math.min(activeWs, workspaces.length - 1);
+  }
   // 포커스 이동은 죽은 pane이 '활성 ws(동일 socket)' 소속일 때만 — 타부서 동일 sid 종료가 현 포커스를 오해제하지 않게.
-  if (focusedSid === sid && (current()?.socket ?? undefined) === (socket ?? undefined))
+  if (reassignFocus)
     focusedSid = collectSids(current()?.tree ?? null)[0] ?? null;
   render();
   if (focusedSid != null) setFocus(focusedSid);
+}
+
+function scheduleExitedRemoval(sid: number, socket?: string) {
+  setTimeout(async () => {
+    let recheck: GraceRecheck;
+    try {
+      const r = await invoke("list_surfaces", { socket }) as { surfaces: { surface_id: number; exited: boolean }[] };
+      const surface = r.surfaces.find((s) => s.surface_id === sid);
+      recheck = surface ? { ok: true, found: true, exited: surface.exited } : { ok: true, found: false };
+    } catch { recheck = { ok: false }; }
+    if (shouldRemoveAfterGrace(recheck)) removeDeadPane(sid, socket);
+  }, DEFAULT_EXIT_POLICY.graceMs);
 }
 
 // ---------- 승인 Feed (Control Center 탭) ----------
@@ -3920,7 +3978,7 @@ async function manualRotateSkewed(appVer: string, heldMain: boolean, heldDepts: 
   }
 }
 
-// ── 상시 "↻ 재시작" 버튼(초보자용) — 수동 "데몬 kill + 앱 재실행" 루틴의 원클릭 대체 ──
+// ── 상시 "↻ 재시작" 버튼(초보자용) — 저장 검증 후 데몬 순차 교대 ──
 // 스큐 여부와 무관하게 메인→살아있는 부서 데몬을 force 순차 교대한다(drain 저장 → 종료 → 새 데몬 기동 →
 // 피닉스·resume 복원). manualRotateSkewed와 동일 백엔드(rotate_daemon/rotate_dept_daemon force=true) 재사용.
 // 앱 재시작 없음 — install_update의 app.restart()는 single-instance 레이스 경고 경로(휴면)라 배제,
@@ -3932,15 +3990,39 @@ async function manualRestartAllDaemons() {
   }
   const ok = await confirmModal(
     "데몬 재시작",
-    "데몬(메인+부서)을 다시 시작합니다. 진행 중인 노드에 저장(drain) 신호를 보낸 뒤 데몬을 새로 켜고, " +
-      "부서·노드는 대화 기억까지 자동 복원됩니다. 마지막 미저장분은 손실될 수 있습니다.\n\n지금 재시작하시겠습니까?",
-    "재시작",
+    "재시작 전에 각 노드의 체크포인트 마커 저장을 검증합니다. 검증 후 데몬(메인+부서)을 다시 켜고 " +
+      "대화 기억을 복원합니다. 체크포인트 내용의 최신성은 보증하지 않습니다.\n\n지금 검증하고 재시작하시겠습니까?",
+    "저장 후 재시작",
   );
   if (!ok) return;
   rotatingDaemon = true;
-  stickyToast("restart-daemon", "feed", "↻ 데몬 재시작", "저장 후 데몬을 다시 시작하는 중… 부서·노드를 자동 복원합니다.");
   try {
-    await invoke("rotate_daemon", { force: true });
+    stickyToast("restart-daemon", "feed", "↻ 저장 검증", "노드 체크포인트 마커를 확인하는 중…");
+    let skipDrain = false;
+    try {
+      const report = await invoke("drain_verify", { timeout: 20 }) as {
+        all_saved?: boolean; total?: number; summary?: { saved?: number };
+        nodes?: { department?: string; role?: string; surface?: string; outcome?: string }[];
+      };
+      if (!Array.isArray(report.nodes) || typeof report.all_saved !== "boolean") throw new Error("verify_failed: 검증 결과 형식 오류");
+      if (!report.all_saved) {
+        dismissToast("restart-daemon");
+        const failures = report.nodes.filter((n) => n.outcome !== "saved")
+          .map((n) => `• ${n.department ? n.department + " / " : ""}${n.role ?? "?"} (${n.surface ?? "?"}): ${n.outcome ?? "미확인"}`);
+        const proceed = await confirmModal("일부 노드 저장 미확인",
+          `${report.total ?? report.nodes.length}개 중 ${report.summary?.saved ?? 0}개 마커 확인.\n\n${failures.join("\n")}\n\n마커 확인은 체크포인트 내용의 최신성을 보증하지 않습니다. 그래도 재시작하시겠습니까?`,
+          "그래도 재시작");
+        if (!proceed) return;
+      }
+      skipDrain = true;
+    } catch (error) {
+      const reason = classifyDrainVerifyFallback(String(error));
+      if (!reason) throw error;
+      const notice = drainVerifyFallbackToast(reason);
+      toast("health", notice.title, notice.body);
+    }
+    stickyToast("restart-daemon", "feed", "↻ 데몬 재시작", "저장 후 데몬을 다시 시작하는 중… 부서·노드를 자동 복원합니다.");
+    await invoke("rotate_daemon", { force: true, skipDrain });
     // 부서 열거=list_depts(레지스트리 SOT) + daemon_status 생존 확인 — detectSkew 동형(죽은 등재 skip).
     const reg = (await invoke("list_depts").catch(() => ({ depts: {} }))) as {
       depts?: Record<string, { socket?: string }>;
@@ -3955,7 +4037,7 @@ async function manualRestartAllDaemons() {
         continue; // 죽은/전이 중 부서 소켓 skip(무해)
       }
       try {
-        const info = (await invoke("rotate_dept_daemon", { name, force: true })) as { restore_ok?: boolean };
+        const info = (await invoke("rotate_dept_daemon", { name, force: true, skipDrain })) as { restore_ok?: boolean };
         if (info?.restore_ok === false) deptRestoreFailed = true;
       } catch {
         failedDepts.push(name);
@@ -4530,11 +4612,12 @@ function onDaemonEvent(event: Record<string, unknown>) {
     refreshFeed();
     refreshSidebarStatus(); // 피드 이벤트 시 집계 배지 갱신(멀티부서 정합)
   } else if (name === "surface.exited" || name === "surface.closed" || name === "surface.reaped") {
-    // 종료 즉시 죽은 pane 자동 제거 (A안) — 데몬 reap을 기다리지 않는다. 멱등.
     // 멀티마스터 F4: 출처 데몬을 socket_slug로 특정해 그 부서 pane만 제거(타 부서 같은 sid 보호).
     const resolved = resolveEventSocket(event.socket_slug != null ? String(event.socket_slug) : undefined, socketForSlug);
     if (!resolved.known) return;
-    removeDeadPane(Number(sid), resolved.socket);
+    const action = decideExitAction(name, autoRemoveExited);
+    if (action === "remove-now") removeDeadPane(Number(sid), resolved.socket);
+    else if (action === "remove-after-grace") scheduleExitedRemoval(Number(sid), resolved.socket);
   }
 }
 
@@ -4922,6 +5005,18 @@ async function start() {
     if (ws.tree || ws.socket == null || liveBySock.get(ws.socket)?.ok !== true) continue;
     const sid = await newSurface(null, ws.socket);
     ws.tree = { type: "pane", sid };
+  }
+  // 첫 화면에서 저장된 13석 격자를 그대로 보여 주지 않도록, 이미 조회한 제목으로 렌더 전에 분리한다.
+  const activeSeat = collectSids(current().tree)[0];
+  const activeSocket = current().socket;
+  if (hierarchyEnabled) {
+    rehomeRestoredSeats(workspaces,
+      [...liveBySock].flatMap(([socket, lb]) => lb.ok ? lb.list.map((s) => ({ ...s, socket })) : []),
+      paneRehomeTarget, (name, socket) => ({ id: wsCounter++, name, tree: null, socket }));
+    if (!current().tree && activeSeat != null) {
+      const destination = workspaces.findIndex((ws) => ws.socket === activeSocket && collectSids(ws.tree).includes(activeSeat));
+      if (destination >= 0) activeWs = destination;
+    }
   }
   if (!current().tree) {
     // 복원 시 current()가 미응답(ok===false) 부서 ws일 수 있다(필터의 ok===false 절로 보존·activeWs가 선택,

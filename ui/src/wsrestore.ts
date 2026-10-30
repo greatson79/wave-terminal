@@ -11,6 +11,7 @@ export function shouldKeepEmptyWorkspaceOnRestore(daemonOk: boolean | undefined)
 }
 
 import { dedupeTree, type LayoutNode } from "./treededupe";
+import { transferTrees, treeSids } from "./transfer";
 
 interface SavedWorkspace {
   id: number;
@@ -38,4 +39,25 @@ export function normalizeWorkspaces<T extends SavedWorkspace>(list: T[]): T[] {
     w.tree = dedupeTree(w.tree, seen);
   }
   return out;
+}
+
+// 저장된 큰 격자는 첫 렌더 전에 살아 있는 제목으로 분리한다. 미응답 소켓의 트리는 그대로 둔다.
+export function rehomeRestoredSeats<T extends SavedWorkspace>(
+  workspaces: T[],
+  live: readonly { socket?: string; surface_id: number; title: string }[],
+  target: (workspaceName: string, title: string) => string | null,
+  makeWorkspace: (name: string, socket?: string) => T,
+): void {
+  for (const seat of live) {
+    const from = workspaces.find((ws) => ws.socket === seat.socket && treeSids(ws.tree).includes(seat.surface_id));
+    if (!from) continue;
+    const name = target(from.name, seat.title);
+    if (!name) continue;
+    let to = workspaces.find((ws) => ws.socket === seat.socket && ws.name === name);
+    const moved = transferTrees(from.tree, to?.tree ?? null, seat.surface_id);
+    if (!moved) continue;
+    if (!to) { to = makeWorkspace(name, seat.socket); workspaces.push(to); }
+    from.tree = moved.src;
+    to.tree = moved.dest;
+  }
 }

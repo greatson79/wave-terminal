@@ -4,10 +4,12 @@
   --border: #30363d;
   --hairline: #1c2128; /* pane 구분선 — 거의 안 보이는 미세 선 */
   --accent: #2f81f7;
+  --on-accent: #0d1117;
   --text: #c9d1d9; /* 크롬(상단바·사이드바·모달 등 var(--bar) 표면) 고정 글자 — 배경색 커스텀과 무관 */
   --canvas-text: #c9d1d9; /* 캔버스(var(--bg) 표면) 글자 — applyBgColor가 배경 휘도 따라 전환 */
   --warn: #d29922;
   --error: #f85149;
+  --on-error: #0d1117;
   --ok: #3fb950;
 }
 * { box-sizing: border-box; }
@@ -36,6 +38,14 @@ html, body {
   background: rgba(210,153,34,.15); border: 1px solid rgba(210,153,34,.4);
   color: var(--warn); font-size: 10px; cursor: pointer;
 }
+.pause-badge { margin-left: 8px; padding: 1px 8px; border-radius: 8px; font-size: 10px;
+  white-space: nowrap; max-width: 46vw; overflow: hidden; text-overflow: ellipsis;
+  background: rgba(210,153,34,.15); border: 1px solid rgba(210,153,34,.4); color: var(--warn); cursor: pointer; }
+.pause-badge[data-level="stale"] { background: rgba(210,153,34,.28); border-color: rgba(210,153,34,.75); }
+.pause-badge[data-level="abandoned"] { background: rgba(248,81,73,.22); border-color: rgba(248,81,73,.75);
+  color: #ff9492; font-weight: 700; animation: pause-badge-pulse 2.4s ease-in-out infinite; }
+@keyframes pause-badge-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
+@media (prefers-reduced-motion: reduce) { .pause-badge[data-level="abandoned"] { animation: none; } }
 .spacer { flex: 1; }
 #topbar button {
   background: #21262d; color: var(--text);
@@ -51,7 +61,7 @@ html, body {
 #topbar button:hover { border-color: var(--accent); }
 .badge {
   display: inline-block; min-width: 16px; padding: 0 4px;
-  border-radius: 8px; background: var(--error); color: #fff;
+  border-radius: 8px; background: var(--error); color: var(--on-error);
   font-size: 10px; text-align: center;
 }
 .badge[hidden] { display: none; }
@@ -134,8 +144,9 @@ body.wsbar-resizing { cursor: col-resize; -webkit-user-select: none; user-select
   font-size: calc(11px * var(--wsbar-font, 1)); color: #8b949e;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.ws-tab.active .ws-name { color: #fff; }
-.ws-tab.active .ws-sub { color: rgba(255, 255, 255, .75); }
+.ws-tab.active .ws-name, .ws-tab.active .ws-sub,
+.ws-tab.active .ws-hq-count, .ws-tab.active .ws-hq-chevron,
+.ws-tab.active .ws-member { color: var(--on-accent); }
 .ws-tab .ws-sub-pending { color: #58a6ff; animation: cc-blink 1.4s infinite; }
 /* 사이드바 노드 신호(B3): 상태 dot + 심각도 색 + 승인대기 배지 (CC_STATE working/idle/error 명명 재사용) */
 .ws-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
@@ -146,11 +157,10 @@ body.wsbar-resizing { cursor: col-resize; -webkit-user-select: none; user-select
 .ws-tab .ws-sub .sev-crit { color: var(--error); }
 .ws-hq-chevron { flex: none; width: 12px; padding: 0; border: 0; background: transparent; font-size: 10px; cursor: pointer; color: #8b949e; }
 .ws-hq-count { flex: none; font-size: 10px; color: #8b949e; font-variant-numeric: tabular-nums; }
-.ws-hq-chip { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; border-radius: 4px; font-size: 9px; font-weight: 700; color: #fff; }
+.ws-hq-chip { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; border-radius: 4px; font-size: 9px; font-weight: 700; }
 .ws-members { display: flex; flex-direction: column; gap: 1px; margin: 4px 0 0 4px; padding-left: 7px; border-left: 1px solid var(--hairline); }
 .ws-member { min-width: 0; padding: 2px 4px; border: 0; background: transparent; text-align: left; border-radius: 4px; font-size: calc(11px * var(--wsbar-font, 1)); color: #adbac7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
 .ws-member:hover, .ws-member.focused { background: rgba(88, 166, 255, .18); }
-.ws-tab.active .ws-member { color: #fff; }
 .ws-approve-badge { margin-left: 6px; color: var(--error); font-weight: 700; font-size: 11px; }
 #btn-ws-dept:disabled { opacity: .5; cursor: default; }
 .ws-tab .ws-close {
@@ -158,9 +168,11 @@ body.wsbar-resizing { cursor: col-resize; -webkit-user-select: none; user-select
 }
 .ws-tab:hover .ws-close { opacity: .55; }
 .ws-tab .ws-close:hover { opacity: 1; color: var(--error); }
-.ws-tab.active .ws-close:hover { color: #fff; }
+.ws-tab.active .ws-close:hover { color: var(--on-accent); }
 /* 2-click 삭제 확인 armed 상태 — 위험색 유지(active 탭 hover의 #fff보다 우선), 2.5초 내 hover 이탈해도 노출 유지 */
 .ws-tab .ws-close.close-armed, .ws-tab.active .ws-close.close-armed:hover { opacity: 1; color: var(--error); }
+.ws-tab.active .ws-close.close-armed { background: var(--on-accent); border-radius: 3px; }
+.ws-tab.active .ws-approve-badge { color: var(--on-accent); }
 /* svg가 클릭 target이 되면 mousedown 가드(e.target 비교)가 깨진다 — 이벤트는 span이 받게 */
 .close-armed svg { width: calc(11px * var(--wsbar-font, 1)); height: calc(11px * var(--wsbar-font, 1)); fill: currentColor; vertical-align: -1.5px; pointer-events: none; }
 #btn-ws-new {
@@ -207,7 +219,7 @@ body.ws-reordering { cursor: grabbing; -webkit-user-select: none; user-select: n
   padding: 5px 10px; border-radius: 4px; color: var(--text); cursor: pointer;
   white-space: nowrap;
 }
-#ctx-menu .ctx-item:hover { background: var(--accent); color: #fff; }
+#ctx-menu .ctx-item:hover { background: var(--accent); color: var(--on-accent); }
 
 /* 상단 설정 메뉴 */
 #settings-pop {
@@ -485,7 +497,7 @@ body.ws-reordering { cursor: grabbing; -webkit-user-select: none; user-select: n
 #drag-ghost {
   position: fixed; z-index: 2000; pointer-events: none;
   padding: 3px 10px; font-size: 11px; border-radius: 6px;
-  background: var(--accent); color: #fff; opacity: .9; white-space: nowrap;
+  background: var(--accent); color: var(--on-accent); white-space: nowrap;
 }
 #drop-hint {
   position: fixed; z-index: 1999; pointer-events: none;
@@ -578,7 +590,7 @@ body.pane-dragging .pane .pane-title { cursor: grabbing; }
   padding: 7px 16px; border-radius: 6px; border: 1px solid var(--border);
   background: var(--bg); color: var(--canvas-text); cursor: pointer; font-size: 13px;
 }
-.modal-btns .modal-yes { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.modal-btns .modal-yes { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
 
 /* 07 Command Palette (⌘K) — modal-overlay + ctx-menu 패턴 합성 */
 .palette-overlay {
@@ -597,8 +609,9 @@ body.pane-dragging .pane .pane-title { cursor: grabbing; }
 }
 .palette-list { overflow-y: auto; padding: 4px; }
 .palette-item { padding: 7px 12px; border-radius: 6px; cursor: pointer; }
-.palette-item.sel, .palette-item:hover { background: var(--accent); }
-.palette-item.sel .pi-title, .palette-item:hover .pi-title { color: #fff; }
+.palette-item.sel, .palette-item:hover { background: var(--accent); color: var(--on-accent); }
+.palette-item.sel .pi-title, .palette-item:hover .pi-title { color: var(--on-accent); }
+.palette-item.sel .pi-sub, .palette-item:hover .pi-sub { color: var(--on-accent); }
 .pi-title { font-size: 13px; color: var(--text); }
 .pi-sub { font-size: 11px; color: var(--muted, #94a3b8); margin-top: 2px; }
 

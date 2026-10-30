@@ -269,6 +269,33 @@ async fn org_status(socket: Option<String>) -> Result<Value, String> {
     rpc_on(&resolve_socket(&socket), "org.status", json!({})).await
 }
 
+#[tauri::command]
+async fn system_resume(socket: Option<String>) -> Result<Value, String> {
+    rpc_on(&resolve_socket(&socket), "system.resume", json!({})).await
+}
+
+fn drain_verify_failure(exit_code: Option<i32>, stderr: &str) -> &'static str {
+    if exit_code == Some(2) || stderr.contains("unexpected argument")
+        || stderr.contains("unrecognized") || (stderr.contains("Usage:") && stderr.contains("--verify")) {
+        "unsupported"
+    } else {
+        "verify_failed"
+    }
+}
+
+#[tauri::command]
+async fn drain_verify(timeout: u64) -> Result<Value, String> {
+    let out = tokio::task::spawn_blocking(move || {
+        let mut cmd = std::process::Command::new(resolve_sidecar(if cfg!(windows) { "cys.exe" } else { "cys" }));
+        cmd.arg("drain").arg("--verify").arg("--timeout").arg(timeout.to_string());
+        no_console(&mut cmd);
+        cmd.output()
+    }).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+    if let Ok(report) = serde_json::from_slice::<Value>(&out.stdout) { return Ok(report); }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    Err(format!("{}: {}", drain_verify_failure(out.status.code(), &stderr), stderr.trim()))
+}
+
 const HELP_URL: &str = "https://waveainetworks.com/api/help";
 const HELP_APP_VERSION: &str = concat!("app-", env!("CARGO_PKG_VERSION"));
 
@@ -2113,7 +2140,7 @@ async fn dept_live_session_count(sock: &std::path::Path) -> Result<u64, String> 
 /// rotate_daemon 동형이되 대상이 부서 소켓이라 세션 카운트를 dept_live_session_count(부서소켓 surface.list)로
 /// 산출한다(live_session_count는 메인 전용이라 재사용 불가). 반환=새 데몬 identify(+rotate_log) — UI 스큐 해소 판정.
 #[tauri::command]
-async fn rotate_dept_daemon(app: AppHandle, name: String, force: bool) -> Result<Value, String> {
+async fn rotate_dept_daemon(app: AppHandle, name: String, force: bool, skip_drain: Option<bool>) -> Result<Value, String> {
     let sock = dept_socket_path(&name);
     // 세션 가드(rotate_daemon 동형). ★F1(리뷰): force=false는 카운트 실패를 0으로 접지 않고
     // Err("live_sessions:unknown")로 보류한다 — 세션 보유 부서를 무확인 교대할 위험 차단(UI가 held 분류·다음
@@ -2127,15 +2154,16 @@ async fn rotate_dept_daemon(app: AppHandle, name: String, force: bool) -> Result
     }
     // drain(best-effort): 교대 전 부서 노드에 저장 신호. 부서 소켓 대상(CYS_SOCKET)으로 cys drain 실행
     // (메인 rotate_daemon의 drain 동형·spawn_blocking 패턴 일치). cys drain 자체 watchdog로 hang 시에도 종료.
-    let dsock = sock.to_string_lossy().into_owned();
-    let _ = tokio::task::spawn_blocking(move || {
-        let mut cmd = std::process::Command::new(resolve_sidecar(if cfg!(windows) { "cys.exe" } else { "cys" }));
-        cmd.env(cys::ENV_SOCKET, &dsock);
-        cmd.arg("drain");
-        no_console(&mut cmd);
-        cmd.status()
-    })
-    .await;
+    if skip_drain != Some(true) {
+        let dsock = sock.to_string_lossy().into_owned();
+        let _ = tokio::task::spawn_blocking(move || {
+            let mut cmd = std::process::Command::new(resolve_sidecar(if cfg!(windows) { "cys.exe" } else { "cys" }));
+            cmd.env(cys::ENV_SOCKET, &dsock);
+            cmd.arg("drain");
+            no_console(&mut cmd);
+            cmd.status()
+        }).await;
+    }
     // cys-dept rotate <name> — 프로세스 정지→새 바이너리 재기동(reg_upsert 메타보존·묘비 불변).
     // launch_dept_daemon의 bash+inject_runtime_path+no_console+spawn_blocking 패턴 동형.
     let tool = dept_tool();
@@ -2390,7 +2418,7 @@ async fn install_update(app: AppHandle, force: bool) -> Result<(), String> {
 /// 만드는데 이 경로엔 재시작이 없어 영구 잔류한다. 진행 표시는 UI(checkVersionSkew/manualRotateSkewed) 토스트 담당.
 /// force=false: 살아있는 세션이 있으면 거부(UI가 확인 후 force=true로 재호출) — install_update 가드 동형.
 #[tauri::command]
-async fn rotate_daemon(app: AppHandle, force: bool) -> Result<(), String> {
+async fn rotate_daemon(app: AppHandle, force: bool, skip_drain: Option<bool>) -> Result<(), String> {
     // ★F1(리뷰): force=false는 UI checkVersionSkew(무손실 자동 교대)만 호출한다 — 세션 카운트 실패를 0으로
     // 접으면 세션 보유 노드를 무확인 교대할 위험 → Err("live_sessions:unknown")로 보류(UI가 "held" 분류·다음
     // tick 재시도). Ok(0)만 진행. force=true(사용자 확인 완료 수동 경로)는 카운트 자체를 건너뛴다(무영향).
@@ -2402,13 +2430,14 @@ async fn rotate_daemon(app: AppHandle, force: bool) -> Result<(), String> {
         }
     }
     // drain(best-effort): 교대 전 살아있는 노드에 저장 신호 + 유예 (install_update 3단계 동형).
-    let _ = tokio::task::spawn_blocking(|| {
-        let mut cmd = std::process::Command::new(resolve_sidecar(if cfg!(windows) { "cys.exe" } else { "cys" }));
-        cmd.arg("drain");
-        no_console(&mut cmd);
-        cmd.status()
-    })
-    .await;
+    if skip_drain != Some(true) {
+        let _ = tokio::task::spawn_blocking(|| {
+            let mut cmd = std::process::Command::new(resolve_sidecar(if cfg!(windows) { "cys.exe" } else { "cys" }));
+            cmd.arg("drain");
+            no_console(&mut cmd);
+            cmd.status()
+        }).await;
+    }
     let _ = std::fs::write(pending_restore_path(), "");
     stop_running_daemon().await;
     ensure_daemon().await?;
@@ -2615,6 +2644,8 @@ fn main() {
             usage_accounts_all,
             naming_config,
             org_status,
+            system_resume,
+            drain_verify,
             help_username,
             prepare_help,
             send_help,
@@ -2761,6 +2792,13 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn drain_verify_distinguishes_unsupported_from_failed() {
+        assert_eq!(super::drain_verify_failure(Some(2), "unknown argument"), "unsupported");
+        assert_eq!(super::drain_verify_failure(None, "Usage: cys drain --verify"), "unsupported");
+        assert_eq!(super::drain_verify_failure(Some(3), ""), "verify_failed");
+    }
+
     #[test]
     fn kickstart_stops_after_three_attempts() {
         assert!(!super::should_kickstart(0));

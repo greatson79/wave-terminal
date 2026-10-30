@@ -1,6 +1,6 @@
 // 본부-팀 계층 자동 그룹 배정 — 단일 메인 소켓에서 계층을 표현하는 명명 규약 파서.
 //
-// 다니엘 레시피 §3은 부서마다 독립 cys-dept 소켓(depts.json parent)을 전제하지만 우리는
+// 원천 설계 §3은 부서마다 독립 cys-dept 소켓(depts.json parent)을 전제하지만 우리는
 // 다중소켓 불사용 확정이므로, 계층은 "소켓"이 아니라 ws.name의 구분자에서 뽑는다:
 // 기존 GroupMeta/groupId(수동 드래그 그룹)를 그대로 재사용한다 — 자동 생성분만 auto:true로 표시해
 // 수동 그룹과 구분하고, 이름이 바뀌면 재배정한다(= ws.name이 계층의 진실원).
@@ -35,7 +35,7 @@ const HQ_TOKEN = /본부(\(.+\))?$/;
 const DEPT_TOKEN = /^.{3,}부(\(.+\))?$/;
 export const isHqToken = (token: string): boolean => HQ_TOKEN.test(token) || DEPT_TOKEN.test(token);
 
-// ★B3-r2(노아 REVISE): 이름에서 **본부 토큰만** 뽑는다 — 표시용(색·배지) 단일 해소기.
+// ★B3-r2(검토 REVISE): 이름에서 **본부 토큰만** 뽑는다 — 표시용(색·배지) 단일 해소기.
 //
 // parseWsName 은 "본부·팀" 형태를 전제해 team 이 비면 hq=null 을 돌려준다. 그런데 실제
 // 즉 진짜 본부 탭일수록 parseWsName 으로는 본부를 못 읽는다(실측 확인). 그 결과 B3 색이
@@ -90,7 +90,7 @@ export function parseWsName(name: string): { hq: string | null; team: string } {
 // CLI 경로 브리지 — `cys new-surface --title "본부·팀"`으로 만든 surface는 ws를 만들지 않고 기존 ws의
 // pane으로 입양되므로 ws.name이 안 바뀌어 계층에 잡히지 않았다(오너 실사용 결함: 본부 패널 미분리).
 // 규약을 만족하는 title만 "그 이름의 ws 1개"로 승격시킨다 — 그룹 판정은 여전히 ws.name만 본다
-// (젠 REVISE 정합: surface title을 그룹 판정에 쓰지 않고, ws 생성 시점의 이름 소스로만 쓴다).
+// surface title은 그룹 판정에 쓰지 않고, ws 생성 시점의 이름 소스로만 쓴다.
 // 규약 미충족 title은 null → 종전대로 기존 ws의 pane으로 입양된다.
 // 이름은 원래 순서대로 두고 구분자 주변 공백만 정규화한다 — 본부를 앞으로 끌어오면 데몬 원장의
 // title과 UI 이름이 어긋나기 때문(그룹 판정은 parseWsName이 위치와 무관하게 하므로 불필요하다).
@@ -328,7 +328,7 @@ export function adoptHqOf(title: string): string | null {
 //
 // 순서의 근거(★R1 수리로 ①②를 뒤집었다): **활성 ws 가 최우선**이다. 초안은 평면 ws 를 먼저
 // 골랐는데("남의 본부 패널을 오염시키지 않는다"), 그러면 흔한 `non title` 평면 탭 하나만 있어도
-// 사용자가 활성 본부에서 소환한 워커가 **엉뚱한 화면**에 붙는다(노아 변이 실증). 사용자가 보고
+// 사용자가 활성 본부에서 소환한 워커가 **엉뚱한 화면**에 붙는다(검토 변이 실증). 사용자가 보고
 // 있는 화면이 곧 소환 문맥이므로 그것이 가장 예측 가능한 기본값이다.
 // ②활성이 후보에 없으면(다른 소켓) 평면 ws — 특정 본부 패널을 무작정 오염시키지 않는다.
 // ③그마저 없으면 첫 ws. 어느 갈래도 **새 ws 를 만들지 않는다**("기본값 = 무패널").

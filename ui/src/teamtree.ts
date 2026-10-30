@@ -10,7 +10,7 @@
 
 // ★R2 [3] 수리: 표시 모델에서 **상태 신호를 전부 걷어냈다**(ctxPct·state·agentAlive·dot·active).
 // dot 을 지운 뒤에도 `active` 가 `.dim`·opacity 로 idle/dead 를 계속 시각화해서, 정본 사양
-// ("탭/사이드바 부가지표 제거")이 형태만 바꾼 채 유지되고 있었다(노아 지적). 표시 모델이 상태를
+// ("탭/사이드바 부가지표 제거")이 형태만 바꾼 채 유지되고 있었다(검토 지적). 표시 모델이 상태를
 // **모르게** 만드는 것이 근본 수리다 — 데이터가 남아 있으면 다음 사람이 다시 그린다.
 export interface TeamMemberInput {
   sid: number;
@@ -32,7 +32,7 @@ import { isAddressToken, isHqBrand, isHqToken } from "./hierarchy";
 // `COO`·`reviewer` 같은 직함(숫자 없음)은 매치되지 않는다 — 레거시 닉 제목의 직함 보존.
 const MODEL_TOKEN = /^[A-Za-z][A-Za-z\-]*\d[\d.]*$/;
 
-// 직무 토큰 자체에 실린 괄호 애칭 — `리뷰어(젠)` → 직무 `리뷰어` · 이름 `젠`.
+// 직무 토큰 자체에 실린 괄호 애칭 — 직무와 표시 이름을 분리한다.
 const DUTY_NICK = /^(.+?)\((.+)\)$/;
 
 // ★확정 SOT(2026-08-24): 제목 = `{본부닉}·{본부}·{이름 직무}·{s번호}`. `[exited]`와 주소는

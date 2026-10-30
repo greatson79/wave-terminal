@@ -1,6 +1,6 @@
 // 사이드바 2단 트리의 **계산**만 담당한다 — DOM 을 만들지 않는다.
 //
-// 왜 분리했나(본부장 지적 2026-08-17 · 노아 B3-r2 major REVISE 와 같은 결함 클래스):
+// 왜 분리했나(본부장 지적 2026-08-17 · 검토 B3-r2 major REVISE 와 같은 결함 클래스):
 // 사양(오너 정본)은 buildTab 안의 조건식 3개에만 살아 있었고, 시험은 그 배선을 통과하지 않았다
 // (`main.ts` 는 xterm·Tauri 를 import 하므로 bun test 로 불러올 수 없다 → 사양이 영원히 미검증).
 // 결과가 'buildTab 소비 배선 미검증 false-green' — 테스트 334건이 초록인데 최우선 사양은 단 한 줄도
@@ -111,7 +111,7 @@ export function sidebarTreeSpec(ws: SidebarWs): SidebarTreeSpec {
 export function hasOrphanTopLevelWorker(ws: SidebarWs): boolean {
   const spec = sidebarTreeSpec(ws);
   // ★R2 [7] 수리: 본부 패널만 보던 게이트를 **모든 ws** 로 넓혔다. 종전에는 평면·레거시 ws 의
-  //   고아 워커가 판정에서 아예 제외돼, 사양 위반이 이 술어로도 드러나지 않았다(노아 지적).
+  //   고아 워커가 판정에서 아예 제외돼, 사양 위반이 이 술어로도 드러나지 않았다(검토 지적).
   if (ws.pending) return false;
   if (ws.sids.length === 0) return false;
   // 접힘은 사용자가 스스로 감춘 상태이므로 고아가 아니다(펼치면 전원 나온다).

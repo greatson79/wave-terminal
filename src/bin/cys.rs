@@ -428,6 +428,9 @@ enum Command {
         /// (healed system 파일 전용) 보존본(.user)을 ~/.cys/local 오버레이로 이동(스킬 shadowing)
         #[arg(long)]
         to_local: bool,
+        /// 내 수정과 vendor 본의 차이를 로컬 patch로 생성(자동 전송 없음)
+        #[arg(long)]
+        propose: bool,
         /// 확인 프롬프트 없이 적용
         #[arg(long)]
         yes: bool,
@@ -498,6 +501,9 @@ enum Command {
         /// 진단 결과를 JSON으로 출력.
         #[arg(long)]
         json: bool,
+        /// 커스터마이즈 실태 리포트를 로컬 파일로 생성(자동 전송 없음)
+        #[arg(long)]
+        custom_report: bool,
     },
     /// Search the persistent transcript memory of ALL agents' terminal activity (FTS)
     Recall {
@@ -2011,8 +2017,8 @@ fn run(command: Command) -> i32 {
             return run_pack_update(from, manifest_url, dry_run);
         }
         Command::PackPlan { force } => return run_pack_plan(force),
-        Command::PackMerge { file, take_new, keep_mine, ai, to_local, yes } => {
-            return run_pack_merge(file, take_new, keep_mine, ai, to_local, yes);
+        Command::PackMerge { file, take_new, keep_mine, ai, to_local, propose, yes } => {
+            return run_pack_merge(file, take_new, keep_mine, ai, to_local, propose, yes);
         }
         Command::PackRollback { file, yes } => return run_pack_rollback(file, yes),
 
@@ -2020,7 +2026,9 @@ fn run(command: Command) -> i32 {
             return run_pack_manifest(key_id, signed_at, expires_at, &min_binary_version, pack_version);
         }
 
-        Command::Doctor { fix, json } => return run_doctor(fix, json),
+        Command::Doctor { fix, json, custom_report } => {
+            return if custom_report { run_doctor_custom_report() } else { run_doctor(fix, json) };
+        }
 
         Command::License { action } => {
             let now = chrono::Utc::now().timestamp();
@@ -3925,6 +3933,85 @@ fn run_doctor(fix: bool, json_out: bool) -> i32 {
     } else {
         0
     }
+}
+
+fn run_doctor_custom_report() -> i32 {
+    let dir = cys::pack::pack_dir();
+    let local = cys::pack::local_dir();
+    let pending = cys::pack::load_merge_pending(&dir);
+    let files = report_files(&dir, true);
+    let mut users: Vec<_> = files.iter().filter(|r| r.ends_with(".user")).collect();
+    let mut news: Vec<_> = files.iter().filter(|r| r.ends_with(".new")).collect();
+    users.sort();
+    news.sort();
+    let embedded: std::collections::HashSet<&str> =
+        cys::pack::PACK_ALL.iter().map(|(r, _)| *r).collect();
+    let mut customs: Vec<_> = files.iter().filter(|r| {
+        !r.starts_with('.') && !r.ends_with(".user") && !r.ends_with(".new")
+            && !r.starts_with("memory/") && !r.starts_with("round/")
+            && !embedded.contains(r.as_str())
+    }).collect();
+    customs.sort();
+
+    let version = std::fs::read_to_string(dir.join(".pack-version"))
+        .unwrap_or_else(|_| "?".into());
+    let mut md = format!(
+        "# cys 커스터마이즈 실태 리포트\n\n- 바이너리: {}\n- 팩: {}\n\n## 병합 대기 원장 ({}건)\n",
+        env!("CARGO_PKG_VERSION"), version.trim(), pending.len()
+    );
+    for (rel, e) in &pending {
+        let kind = e.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
+        let ver = e.get("version").and_then(|v| v.as_str()).unwrap_or("?");
+        md.push_str(&format!("- [{kind}] {rel} (vendor {ver})\n"));
+    }
+    md.push_str(&format!("\n## 보존본 .user ({}건)\n", users.len()));
+    for r in users { md.push_str(&format!("- {r}\n")); }
+    md.push_str(&format!("\n## 병치본 .new ({}건)\n", news.len()));
+    for r in news { md.push_str(&format!("- {r}\n")); }
+    md.push_str("\n## 로컬 오버레이 사용\n");
+    for cat in ["skills", "directives", "hooks", "bin", "notes", "proposals"] {
+        let count = report_files(&local.join(cat), false).len();
+        if count > 0 { md.push_str(&format!("- {cat}: {count}개 파일\n")); }
+    }
+    md.push_str(&format!("\n## 팩 안 비임베드 자작 파일 ({}건)\n", customs.len()));
+    for r in customs.iter().take(100) { md.push_str(&format!("- {r}\n")); }
+    if customs.len() > 100 { md.push_str(&format!("- … 외 {}건\n", customs.len() - 100)); }
+
+    let out_dir = local.join("reports");
+    if let Err(e) = std::fs::create_dir_all(&out_dir) {
+        eprintln!("reports 디렉터리 생성 실패: {e}");
+        return 1;
+    }
+    let out = out_dir.join(format!("custom-report-{}.md", chrono::Local::now().format("%Y%m%dT%H%M%S%.9f")));
+    if let Err(e) = cys::pack::write_atomic(&out, md.as_bytes()) {
+        eprintln!("리포트 쓰기 실패: {e}");
+        return 1;
+    }
+    print!("{md}");
+    println!("\n✅ 저장: {} — 자발 제출용(자동 전송 없음)", out.display());
+    0
+}
+
+fn report_files(root: &std::path::Path, skip_pristine: bool) -> Vec<String> {
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else { continue };
+            if kind.is_symlink() { continue; }
+            let path = entry.path();
+            if kind.is_dir() {
+                if skip_pristine && entry.file_name() == ".pristine" { continue; }
+                stack.push(path);
+            } else if kind.is_file() {
+                if let Ok(rel) = path.strip_prefix(root) {
+                    files.push(rel.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+    }
+    files
 }
 
 /// '~/'-시작 경로를 홈으로 확장 (그 외는 그대로) — boot의 경로형 cmd 설치 판정용.
@@ -7953,6 +8040,7 @@ fn run_pack_merge(
     keep_mine: bool,
     ai: bool,
     to_local: bool,
+    propose: bool,
     yes: bool,
 ) -> i32 {
     let dir = cys::pack::pack_dir();
@@ -7970,10 +8058,10 @@ fn run_pack_merge(
             let ver = e.get("version").and_then(|v| v.as_str()).unwrap_or("?");
             match kind {
                 "new-pending" => println!(
-                    "  ⏸ {rel} — 내 수정본 유지 중, vendor {ver} 신버전이 {side} 에 대기\n     → cys pack-merge --file {rel} [--take-new|--keep-mine|--ai]"
+                    "  ⏸ {rel} — 내 수정본 유지 중, vendor {ver} 신버전이 {side} 에 대기\n     → cys pack-merge --file {rel} [--take-new|--keep-mine|--ai|--propose]"
                 ),
                 "healed" => println!(
-                    "  🛠 {rel} — vendor {ver} 로 치유됨, 내 수정본은 {side} 에 보존\n     → cys pack-merge --file {rel} [--to-local|--keep-mine(보존본 정리)]"
+                    "  🛠 {rel} — vendor {ver} 로 치유됨, 내 수정본은 {side} 에 보존\n     → cys pack-merge --file {rel} [--to-local|--propose|--keep-mine(보존본 정리)]"
                 ),
                 _ => println!("  ? {rel} ({kind})"),
             }
@@ -7991,6 +8079,9 @@ fn run_pack_merge(
         .iter()
         .find(|(r, _)| *r == rel.as_str())
         .map(|(_, c)| *c);
+    if propose {
+        return run_pack_propose(&dir, &rel, kind, embed_now);
+    }
     let confirm = |prompt: &str| -> bool {
         if yes {
             return true;
@@ -8155,6 +8246,96 @@ fn run_pack_merge(
             1
         }
     }
+}
+
+fn run_pack_propose(dir: &std::path::Path, rel: &str, kind: &str, embed_now: Option<&str>) -> i32 {
+    let Some(target) = pack_rollback_path(dir, rel) else {
+        eprintln!("잘못된 제안 대상 경로: {rel}");
+        return 1;
+    };
+    let (mine_path, vendor) = match kind {
+        "healed" => {
+            let Some(vendor) = embed_now else {
+                eprintln!("'{rel}' 은 현 임베드에 없어 제안 대상이 아닙니다");
+                return 1;
+            };
+            let Some(user_path) = pack_rollback_path(dir, &format!("{rel}.user")) else {
+                eprintln!("잘못된 보존본 경로: {rel}.user");
+                return 1;
+            };
+            (user_path, vendor.to_string())
+        }
+        "new-pending" => {
+            let Some(new_path) = pack_rollback_path(dir, &format!("{rel}.new")) else {
+                eprintln!("잘못된 병치본 경로: {rel}.new");
+                return 1;
+            };
+            let vendor = std::fs::read_to_string(&new_path).ok()
+                .or_else(|| embed_now.map(str::to_string));
+            let Some(vendor) = vendor else {
+                eprintln!("{rel}.new 부재 + 현 임베드에도 없음 — 제안 생성 불가");
+                return 1;
+            };
+            (target, vendor)
+        }
+        other => {
+            eprintln!("알 수 없는 원장 kind '{other}' — 제안 생성 불가");
+            return 1;
+        }
+    };
+    let mine = match std::fs::read_to_string(&mine_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{} 읽기 실패: {e}", mine_path.display());
+            return 1;
+        }
+    };
+    let secret_lines: Vec<_> = mine.lines().enumerate().filter_map(|(i, line)| {
+        let lower = line.to_lowercase();
+        ["/users/", "c:\\users\\", "private key", "api_key", "apikey", "password", "secret"]
+            .iter().any(|pattern| lower.contains(pattern)).then_some(i + 1)
+    }).collect();
+    let out_dir = cys::pack::local_dir().join("proposals");
+    if let Err(e) = std::fs::create_dir_all(&out_dir) {
+        eprintln!("proposals 디렉터리 생성 실패: {e}");
+        return 1;
+    }
+    let version = env!("CARGO_PKG_VERSION");
+    let digest = sha256_hex(&format!("{rel}\0{vendor}\0{mine}"));
+    let out = out_dir.join(format!("{}-v{version}-{}.patch", rel.replace(['/', '\\'], "_"), &digest[..12]));
+    let body = unified_diff_via_cmd(&vendor, &mine, rel).unwrap_or_else(|| {
+        format!("# diff 도구 부재 — vendor 전문\n{vendor}\n# 내 수정 전문\n{mine}")
+    });
+    let header = format!("# cys 개선 제안 patch\n# 대상: {rel}\n# 생성 바이너리: {version}\n# 생성: cys pack-merge --file {rel} --propose\n\n");
+    if let Err(e) = cys::pack::write_atomic(&out, format!("{header}{body}").as_bytes()) {
+        eprintln!("patch 쓰기 실패: {e}");
+        return 1;
+    }
+    println!("✅ 제안 patch 생성: {}", out.display());
+    if !secret_lines.is_empty() {
+        println!("⚠ 비밀/개인정보 의심 {}건 (원본 {}행) — 제출 전 검토·마스킹하세요", secret_lines.len(), secret_lines.iter().map(usize::to_string).collect::<Vec<_>>().join(", "));
+    }
+    println!("제출: patch를 지원 채널에 자발 첨부(자동 전송 없음)");
+    0
+}
+
+fn unified_diff_via_cmd(vendor: &str, mine: &str, rel: &str) -> Option<String> {
+    let tmp = std::env::temp_dir().join(format!("cys-propose-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).ok()?;
+    let a = tmp.join("vendor");
+    let b = tmp.join("mine");
+    let result = (|| {
+        std::fs::write(&a, vendor).ok()?;
+        std::fs::write(&b, mine).ok()?;
+        let output = std::process::Command::new("diff")
+            .arg("-u").arg("--label").arg(format!("vendor/{rel}"))
+            .arg("--label").arg(format!("mine/{rel}"))
+            .arg(&a).arg(&b).output().ok()?;
+        matches!(output.status.code(), Some(0) | Some(1))
+            .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+    })();
+    let _ = std::fs::remove_dir_all(tmp);
+    result
 }
 
 /// diff3 -m 3-way 병합(결정론) — base 부재·diff3 부재·충돌이면 None(호출측이 대안 안내).

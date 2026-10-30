@@ -85,6 +85,11 @@ pub fn pack_dir() -> PathBuf {
     pack_dir_with(|k| std::env::var(k).ok(), dirs::home_dir())
 }
 
+/// 직전 pack-update의 파일별 보존본. 전체 런타임 상태는 롤백하지 않는다.
+pub fn pack_prev_dir(dir: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.prev", dir.display()))
+}
+
 /// pack_dir 의 순수 코어 — env 조회·홈을 주입받는다(테스트가 전역 env를 건드리지 않게).
 fn pack_dir_with(var: impl Fn(&str) -> Option<String>, home: Option<PathBuf>) -> PathBuf {
     if let Some(d) = crate::env_compat_with(ENV_PACK_DIR, &var) {
@@ -1210,13 +1215,47 @@ pub fn recover_pack_journal() -> Result<bool, String> {
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
     if !disk_version.is_empty() && disk_version == index.target_version {
-        // 커밋 성공(.pack-version == target) → 저널 정리만(롤백 금지).
-        let _ = std::fs::remove_dir_all(&jdir);
+        // 커밋 성공 → 백업 파일을 1세대 롤백 보존본으로 확정(롤백 금지).
+        preserve_pack_previous()?;
     } else {
         // 미커밋 → 롤백(pre-state 복원 + 저널 삭제).
         rollback_journal()?;
     }
     Ok(true)
+}
+
+fn preserve_pack_previous() -> Result<(), String> {
+    let jdir = pack_journal_dir();
+    let files = jdir.join("files");
+    let prev = pack_prev_dir(&pack_dir());
+    let next = PathBuf::from(format!("{}.new", prev.display()));
+    let old = PathBuf::from(format!("{}.old", prev.display()));
+    if files.exists() {
+        let _ = std::fs::remove_dir_all(&next);
+        std::fs::rename(&files, &next).map_err(|e| format!("팩 보존본 준비 실패: {e}"))?;
+    } else if !next.exists() {
+        if prev.is_dir() {
+            let _ = std::fs::remove_dir_all(&old);
+            let _ = std::fs::remove_dir_all(jdir);
+            return Ok(());
+        }
+        return Err("팩 보존본 생성 실패: 저널 파일 부재".into());
+    }
+    if prev.exists() {
+        let _ = std::fs::remove_dir_all(&old);
+        if let Err(e) = std::fs::rename(&prev, &old) {
+            let _ = std::fs::rename(&next, &files);
+            return Err(format!("기존 팩 보존본 이동 실패: {e}"));
+        }
+    }
+    if let Err(e) = std::fs::rename(&next, &prev) {
+        let _ = std::fs::rename(&old, &prev);
+        let _ = std::fs::rename(&next, &files);
+        return Err(format!("새 팩 보존본 확정 실패: {e}"));
+    }
+    let _ = std::fs::remove_dir_all(old);
+    let _ = std::fs::remove_dir_all(jdir);
+    Ok(())
 }
 
 /// 무중단 pack-update 적용 트랜잭션(§7-⑤ 옵션 b + free/pro v4 §3 상태 계약). 호출 전제:
@@ -1255,6 +1294,7 @@ where
     }
     backup_set.insert(INSTALL_MANIFEST.to_string());
     backup_set.insert(PACK_STATE_FILE.to_string());
+    backup_set.insert(PACK_VERSION_FILE.to_string());
     // ★커스터마이즈 절충 부수효과(.pristine/·.new·.user·병합 원장)도 저널 편입 — rollback이
     // pre-state 를 **글자 단위로** 복원한다는 기존 계약(mid_apply_fault 테스트)을 부수효과까지 확장.
     // 대부분 부재 경로라 저널 증가는 미미하다(write_journal 은 존재/부재를 그대로 스냅샷).
@@ -1303,9 +1343,15 @@ where
             false
         }
     };
-    // ⑥ 커밋 성공 → 저널 삭제.
-    let _ = std::fs::remove_dir_all(pack_journal_dir());
-    Ok((written, kept, post_commit_ok))
+    // ⑥ 커밋 성공 → 백업 파일을 pack.prev로 보존. 실패 시 저널을 남겨 다음 부트에 재시도.
+    let previous_ok = match preserve_pack_previous() {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("[pack-update] ⚠ 직전 팩 보존 실패 — 다음 부트에 재시도: {e}");
+            false
+        }
+    };
+    Ok((written, kept, post_commit_ok && previous_ok))
 }
 
 pub fn role_directive_path(role: &str) -> Option<PathBuf> {
@@ -2250,6 +2296,10 @@ mod tests {
         let newf = std::fs::read_to_string(pd.join("new.txt")).unwrap();
         let stale_exists = pd.join("stale.txt").exists();
         let journal_exists = pack_journal_dir().exists();
+        let prev = pack_prev_dir(&pd);
+        let prev_soul = std::fs::read_to_string(prev.join("README.md")).unwrap();
+        let prev_version = std::fs::read_to_string(prev.join(PACK_VERSION_FILE)).unwrap();
+        let prev_has_new = prev.join("new.txt").exists();
         let _ = std::fs::remove_dir_all(&base);
 
         let (w, _k, post_ok) = res.expect("commit 실패");
@@ -2260,7 +2310,23 @@ mod tests {
         assert_eq!(newf, "NEW", "new.txt 추가 안됨");
         assert!(!stale_exists, "stale.txt prune 안됨");
         assert!(!journal_exists, "commit 성공 후 저널 미삭제");
+        assert_eq!(prev_soul, "OLD-SOUL", "직전 파일 보존 누락");
+        assert_eq!(prev_version, "1.0.0", "직전 버전 보존 누락");
+        assert!(!prev_has_new, "새 파일은 직전 보존본에 없어야 함");
         assert!(w >= 2, "written={w}");
+    }
+
+    #[test]
+    fn pack_previous_keeps_only_latest_committed_generation() {
+        let (base, pd, _dirs) = txn_prestate("prev-rotate", &[("README.md", "OLD")], "1.0.0");
+        apply_pack_transactional(&[("README.md", "MID")], "2.0.0",
+            &test_free_state("2.0.0"), || Ok(())).unwrap();
+        apply_pack_transactional(&[("README.md", "NEW")], "3.0.0",
+            &test_free_state("3.0.0"), || Ok(())).unwrap();
+        assert_eq!(std::fs::read_to_string(pack_prev_dir(&pd).join("README.md")).unwrap(), "MID");
+        assert_eq!(std::fs::read_to_string(pack_prev_dir(&pd).join(PACK_VERSION_FILE)).unwrap(), "2.0.0");
+        assert_eq!(std::fs::read_to_string(pd.join("README.md")).unwrap(), "NEW");
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     /// ★핵심(codex missing): apply 도중 N번째 쓰기에서 실패를 주입(디렉터리 충돌: 파일 'collide'

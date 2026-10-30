@@ -63,6 +63,10 @@ pub fn open(socket_path: &Path) -> Option<Connection> {
             attest_hash   TEXT NOT NULL,        -- prev∥payload 해시체인(recall hash_step 동형)
             ts            REAL NOT NULL);
          CREATE INDEX IF NOT EXISTS ix_cl_scope_revn ON change_log(scope, revn);
+         CREATE TABLE IF NOT EXISTS rate_snapshots(
+            ts REAL, provider TEXT, account TEXT, label TEXT,
+            win TEXT, used_pct REAL, resets_at REAL);
+         CREATE INDEX IF NOT EXISTS ix_rate_snap ON rate_snapshots(provider, account, win, ts);
          CREATE TABLE IF NOT EXISTS skill_runs(
             run_id TEXT PRIMARY KEY, name TEXT, label TEXT, started_at REAL,
             deadline REAL, status TEXT, exit_note TEXT, artifact_dir TEXT, ended_at REAL);
@@ -70,6 +74,47 @@ pub fn open(socket_path: &Path) -> Option<Connection> {
     )
     .ok()?;
     Some(conn)
+}
+
+pub fn record_rate_snapshot(conn: &Connection, ts: f64, provider: &str, account: &str,
+    label: &str, win: &str, used_pct: f64, resets_at: Option<f64>) {
+    let _ = conn.execute(
+        "INSERT INTO rate_snapshots(ts, provider, account, label, win, used_pct, resets_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7)",
+        rusqlite::params![ts, provider, account, label, win, used_pct, resets_at],
+    );
+}
+
+pub fn prune_rate_snapshots(conn: &Connection, before_ts: f64) {
+    let _ = conn.execute("DELETE FROM rate_snapshots WHERE ts < ?1", [before_ts]);
+}
+
+pub fn last_rate_snapshots(conn: &Connection, since: f64)
+    -> Vec<(f64, String, String, String, String, f64, Option<f64>)> {
+    let mut out = Vec::new();
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT ts, provider, account, label, win, used_pct, resets_at FROM rate_snapshots
+         WHERE ts >= ?1 GROUP BY provider, account, win HAVING ts = MAX(ts)",
+    ) else { return out; };
+    if let Ok(rows) = stmt.query_map([since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?,
+        r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))) {
+        out.extend(rows.flatten());
+    }
+    out
+}
+
+pub fn rate_series(conn: &Connection, provider: &str, account: &str, win: &str, since: f64)
+    -> Vec<(f64, f64)> {
+    let mut out = Vec::new();
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT ts, used_pct FROM rate_snapshots
+         WHERE provider=?1 AND account=?2 AND win=?3 AND ts>=?4 ORDER BY ts",
+    ) else { return out; };
+    if let Ok(rows) = stmt.query_map(rusqlite::params![provider, account, win, since],
+        |r| Ok((r.get(0)?, r.get(1)?))) {
+        out.extend(rows.flatten());
+    }
+    out
 }
 
 // ── T2-3 append-only change-log + 단조 revn + 낙관적 동시성(restore-replay READER) ──

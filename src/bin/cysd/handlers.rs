@@ -2603,7 +2603,8 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
         }
 
         // ─── T5 사용량 관측: 세션 트랜스크립트 경로 등록 (SessionStart hook의 결정론 매핑) ───
-        "usage.accounts" => Reply::Single(ok_response(&id, crate::accounts::account_rows(daemon))),
+        "usage.accounts" => Reply::Single(ok_response(&id,
+            json!({"accounts": crate::accounts::local_json(daemon, crate::state::now_epoch())}))),
         "directive.verify" => {
             let Some(sid) = resolve_surface_id(&params) else {
                 return Reply::Single(err_response(&id, "invalid_params", "missing surface_id"));
@@ -2768,6 +2769,11 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                 session_file: param_str(&params, "session_file").unwrap_or_default(),
                 updated_at: crate::state::now_epoch(),
             });
+            if agent == "claude" && !rate.is_empty() {
+                crate::accounts::note_rate(daemon, "claude",
+                    &param_str(&params, "session_file").unwrap_or_default(),
+                    &rate, "statusline", crate::state::now_epoch());
+            }
             let role = surface.role.lock().unwrap().clone();
             daemon.bus.publish(
                 "usage.updated",

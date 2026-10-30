@@ -172,6 +172,8 @@ async fn main() {
     #[cfg(windows)]
     startup_mark(&startup, "pack_install_complete", &socket_path);
     let daemon = Daemon::new(socket_path.clone());
+    accounts::seed_known(&daemon);
+    accounts::spawn_custom_adapters(Arc::clone(&daemon));
     skillrun::reconcile_boot(&daemon);
     #[cfg(windows)]
     startup_mark(&startup, "state_ready", &socket_path);

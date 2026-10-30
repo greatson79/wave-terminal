@@ -860,6 +860,7 @@ pub struct Daemon {
     pub consumption: Mutex<Consumption>,
     /// T7 E1-3 영속 분석 저장소(analytics.db) — open 실패 시 None(graceful degrade).
     pub analytics: Mutex<Option<rusqlite::Connection>>,
+    pub accounts: Mutex<crate::accounts::AccountsState>,
     pub learn_write: Mutex<()>,
     /// C0 채널 계층 저장소(channels.db) — desired-state·inbox·원장. 무결 필수라 open 실패 시
     /// None(채널 모듈 비활성) — 데몬은 계속 동작한다(순수 추가 계층).
@@ -1333,6 +1334,7 @@ impl Daemon {
             started_at: now_epoch(),
             consumption: Mutex::new(Consumption::default()),
             analytics: Mutex::new(analytics_conn),
+            accounts: Mutex::new(crate::accounts::AccountsState::default()),
             learn_write: Mutex::new(()),
             channels: Mutex::new(channels_conn),
             parser_panics_total: AtomicU64::new(0),

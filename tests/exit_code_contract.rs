@@ -11,7 +11,7 @@ macro_rules! contract {
         #[test] fn $name() { assert!(between($source, $start, $end).contains($needle)); }
     };
 }
-contract!(exit_code_contract_drain, CLI, "Command::Drain => {", "Command::GateCheck", "return if failed { 1 } else { 0 }");
+contract!(exit_code_contract_drain, CLI, "Command::Drain { .. } => {", "Command::GateCheck", "return if failed { 1 } else { 0 }");
 contract!(exit_code_contract_restore, CLI, "fn run_restore(", "fn run_reinject(", "if fail > 0 {");
 contract!(exit_code_contract_restore_pending_zero, CLI, "fn run_restore(", "fn run_reinject(", "return 0;");
 contract!(exit_code_contract_boot_list_fail, CLI, "fn run_boot(", "fn run_launch_agent", "surface.list 실패: {e}");

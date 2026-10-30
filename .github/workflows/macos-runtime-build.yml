@@ -49,6 +49,10 @@ jobs:
         run: |
           set -euo pipefail
           export CYS_PACK_DIR="$(mktemp -d)"
+          cargo build --release --target "$CYS_TARGET" --bin cys --bin cysd
+          mkdir -p src-tauri/binaries
+          cp "target/$CYS_TARGET/release/cys" "src-tauri/binaries/cys-$CYS_TARGET"
+          cp "target/$CYS_TARGET/release/cysd" "src-tauri/binaries/cysd-$CYS_TARGET"
           cargo test --workspace -- --test-threads=1 --skip hwmon:: 2>&1 | tee "$RUNNER_TEMP/w3-macos-evidence/cargo-tests.log"
       - name: Measurement and runtime regression tests
         shell: bash

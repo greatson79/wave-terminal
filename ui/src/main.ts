@@ -19,6 +19,17 @@ import { bindPaneRename, paneHeading, splitPaneHeading } from "./paneheading";
 import { resetTime, sidebarUsage, type UsageAccount } from "./usagebar";
 import { inputSource } from "./inputsource";
 import { sendPreparedHelp } from "./helpflow";
+import { adoptHqOf, autoAssignGroups, configureHierarchyNaming, nextTeamName, paneRehomeTarget, pickAdoptWs, sortHqMembers, sortHqWorkspaces, tabLabel } from "./hierarchy";
+import { sidebarTreeSpec, hqCountLabel } from "./sidebartree";
+import { hqColor, parseNamingColors, type HqColorMap } from "./hqbadge";
+import { createHqTabShell, type MiniDoc } from "./wstab";
+import { teamMemberRows } from "./teamtree";
+import { dedupeTree, socketOwnsSid } from "./treededupe";
+import { shouldAdoptSurface } from "./surfaceadopt";
+import { normalizeWorkspaces, shouldKeepEmptyWorkspaceOnRestore } from "./wsrestore";
+import { nextGhostStrike } from "./ghoststrike";
+import { transferTrees } from "./transfer";
+import { resolveEventSocket } from "./eventsocket";
 
 declare global {
   interface Window {
@@ -126,6 +137,7 @@ interface Workspace {
   pending?: boolean;
   // 06: 소속 그룹 id(undefined=ungrouped). 부서 ws도 그룹에 들어가면 set. 진실원=localStorage(cys-layout-v2).
   groupId?: number;
+  collapsed?: boolean;
 }
 
 // 06: 워크스페이스 그룹 메타데이터. 진실원=localStorage(cys-layout-v2). 데몬은 모름(그룹=UI/solution 층).
@@ -137,6 +149,7 @@ interface GroupMeta {
   pinned: boolean;
   color?: string; // hex(미지정 시 id 기반 WS_COLORS 폴백)
   anchorSocket?: string; // 부서 그룹이면 부서 데몬 socket
+  auto?: boolean;
 }
 
 const LAYOUT_KEY = "cys-layout-v2";
@@ -631,6 +644,7 @@ async function refreshTasks() {
   }
   try {
     lastFleet = await invoke("org_fleet");
+    seedEventSocketSlugs(lastFleet);
   } catch {
     /* 데몬 일시 부재 — 직전 스냅샷 유지, 다음 틱 재시도 */
   }
@@ -1449,8 +1463,15 @@ const panes = new Map<string, PaneRuntime>(); // 키 = paneKey(sid, socket)
 applyFontFace(fontFace); // keep the rollback key synchronized with the new settings key
 interface PaneTitleState { reported: string | null; exited: boolean; role?: string | null; label?: string | null; model?: string | null; usage?: ObservedUsage | null; cwd?: string | null }
 const paneTitleState = new Map<string, PaneTitleState>();
+const surfaceTitles = new Map<string, string>();
 // 부서 데몬 socket_slug(F3 백엔드 단일진실) → socket 경로. launch_dept_daemon 반환·daemon-event로 채운다.
-const socketForSlug = new Map<string, string>();
+const socketForSlug = new Map<string, string | undefined>();
+function seedEventSocketSlugs(fleet: { departments?: { name?: string; socket?: string; socket_slug?: string }[] }) {
+  for (const dept of fleet.departments ?? []) {
+    if (dept.socket_slug && (dept.name === "_hq" || dept.socket))
+      socketForSlug.set(dept.socket_slug, dept.name === "_hq" ? undefined : dept.socket);
+  }
+}
 // 사이드바 노드 신호 캐시(B3) — org.status 응답을 워크스페이스 행 집계용으로 보관.
 type NodeSig = { role: string | null; state: string; ctx_pct: number | null; idle_secs: number; agent_alive: boolean | null };
 const nodeSig = new Map<string, NodeSig>(); // 키 = `${socket}#${surface_id}`
@@ -1512,31 +1533,6 @@ void invoke("owner_custom_header").then((enabled) => {
 // 그룹의 anchor(부서) ws — anchorSocket이 일치하는 ws. 부서 그룹만 존재.
 const anchorWsOf = (g: GroupMeta): Workspace | undefined =>
   g.anchorSocket ? workspaces.find((w) => w.socket === g.anchorSocket) : undefined;
-
-// 부서 workspace는 socket 단위로 유일해야 한다(한 부서 데몬 = 한 탭). 저장·복원 양쪽에서 이 게이트를
-// 통과시켜 중복(같은 socket 2탭)·id 중복이 저장→복원→재저장으로 증식하는 것을 차단한다.
-// socket=undefined(기본 데몬) ws는 여러 개가 정상이므로 수렴 대상에서 제외.
-function normalizeWorkspaces(list: Workspace[]): Workspace[] {
-  const seenId = new Set<number>();
-  const seenSock = new Map<string, Workspace>();
-  const out: Workspace[] = [];
-  for (const w of list) {
-    if (w.pending) continue; // 런칭 중 임시 placeholder는 저장·복원에서 배제 (미완료 유령 탭 누수 차단)
-    if (seenId.has(w.id)) continue;
-    if (w.socket) {
-      const prev = seenSock.get(w.socket);
-      if (prev) {
-        // 같은 부서 socket 중복: 비어있지 않은 트리를 우선 보존(사용자 분할 레이아웃 유실 방지)
-        if (collectSids(w.tree).length && !collectSids(prev.tree).length) prev.tree = w.tree;
-        continue;
-      }
-      seenSock.set(w.socket, w);
-    }
-    seenId.add(w.id);
-    out.push(w);
-  }
-  return out;
-}
 
 // 06: 그룹 무결성 게이트 — normalizeWorkspaces와 같은 불변식 철학(save·restore 양쪽 통과로 유령/중복 증식 차단).
 // 죽은 그룹 참조 청소(ws.groupId가 존재하지 않는 그룹을 가리키면 undefined화) + id중복 제거 + 멤버0 그룹 자동 해체(cmux ungroup 의미).
@@ -1634,6 +1630,7 @@ function setRoleDot(el: HTMLElement, role: string | null) {
 //   이게 없으면 노드가 데몬 안에서 헤드리스로만 돌고 화면에 보이지 않는다.
 let refreshing = false;
 let started = false; // start()의 세션 복원이 끝나기 전 인터벌 자동 입양 차단 (이중 생성 방지)
+const ghostStrikes = new Map<string, number>();
 async function refreshPaneTitles() {
   if (!started || refreshing) return; // 겹친 호출의 이중 입양 방지
   refreshing = true;
@@ -1642,45 +1639,83 @@ async function refreshPaneTitles() {
     const sockets = [...new Set(workspaces.map((w) => w.socket))];
     let adopted = false;
     for (const sk of sockets) {
-      const org = (await invoke("org_status", { socket: sk }).catch(() => ({ surfaces: [] }))) as { surfaces?: { surface_id: number; status?: { task?: string | null } }[] };
-      const tasks = new Map((org.surfaces || []).map((s) => [s.surface_id, s.status?.task ?? null]));
-      const r = (await invoke("list_surfaces", { socket: sk })) as {
-        surfaces: {
-          surface_id: number;
-          title: string;
-          role: string | null;
-          label?: string | null;
-          model?: string | null;
-          live_cwd: string | null;
-          exited: boolean;
-          usage?: ObservedUsage | null;
-        }[];
-      };
-      for (const s of r.surfaces) {
-        const rt = panes.get(paneKey(s.surface_id, sk));
-        if (!rt) continue;
-        renderUsage(rt.usageEl, s.exited ? null : s.usage); // 종료 pane은 배지 제거 (혼동 방지)
-        setRoleDot(rt.roleEl, s.exited ? null : s.role); // 역할 점도 동일 주기 갱신
-        const state = { reported: tasks.get(s.surface_id) ?? null, exited: s.exited,
-          role: s.role, label: s.label, model: s.usage?.model ?? s.model, usage: s.usage, cwd: s.live_cwd };
-        paneTitleState.set(paneKey(s.surface_id, sk), state);
-        displayPaneHeading(rt.titleEl, s.surface_id, state);
-      }
-      // 자동 입양: 그 소켓의 role surface 중 UI에 없는 것 → '같은 소켓을 가진 ws'에만 표출.
-      // ★소켓 일치 가드 — 부서A 노드가 부서B 탭에 잘못 입양되는 격리 누수 차단(검증 mustFix).
-      // role 우선순위(master>cso>worker>reviewer) 정렬 — 부서 첫 입양 시 master가 첫 pane(좌측·focus)이 되도록.
-      const rolePri = (role: string | null): number =>
-        role === "master" ? 0 : role === "cso" ? 1 : role?.startsWith("worker") ? 2 : role?.startsWith("reviewer") ? 3 : 4;
-      for (const s of [...r.surfaces].sort((a, b) => rolePri(a.role) - rolePri(b.role))) {
-        if (s.exited || !s.role || panes.has(paneKey(s.surface_id, sk))) continue;
-        // !w.pending — 런칭 중 placeholder(socket 미정)에는 입양 금지(타 데몬 surface 오입양 차단).
-        const ws = workspaces.find((w) => !w.pending && (w.socket ?? undefined) === (sk ?? undefined));
-        if (!ws || collectSids(ws.tree).includes(s.surface_id)) continue;
-        setRoleDot((await makePane(s.surface_id, s.title, sk)).roleEl, s.role); // 입양 즉시 역할 점 채색(다음 틱 대기 없이)
-        ws.tree = ws.tree
-          ? { type: "split", dir: "row", a: ws.tree, b: { type: "pane", sid: s.surface_id } }
-          : { type: "pane", sid: s.surface_id };
-        adopted = true;
+      try {
+        const org = (await invoke("org_status", { socket: sk }).catch(() => ({ surfaces: [] }))) as { surfaces?: { surface_id: number; status?: { task?: string | null } }[] };
+        const tasks = new Map((org.surfaces || []).map((s) => [s.surface_id, s.status?.task ?? null]));
+        const r = (await invoke("list_surfaces", { socket: sk })) as {
+          surfaces: {
+            surface_id: number;
+            title: string;
+            role: string | null;
+            label?: string | null;
+            model?: string | null;
+            live_cwd: string | null;
+            exited: boolean;
+            usage?: ObservedUsage | null;
+          }[];
+        };
+        for (const s of r.surfaces) {
+          surfaceTitles.set(paneKey(s.surface_id, sk), s.title);
+          const rt = panes.get(paneKey(s.surface_id, sk));
+          if (!rt) continue;
+          renderUsage(rt.usageEl, s.exited ? null : s.usage); // 종료 pane은 배지 제거 (혼동 방지)
+          setRoleDot(rt.roleEl, s.exited ? null : s.role); // 역할 점도 동일 주기 갱신
+          const state = { reported: tasks.get(s.surface_id) ?? null, exited: s.exited,
+            role: s.role, label: s.label, model: s.usage?.model ?? s.model, usage: s.usage, cwd: s.live_cwd };
+          paneTitleState.set(paneKey(s.surface_id, sk), state);
+          displayPaneHeading(rt.titleEl, s.surface_id, state);
+        }
+        const liveIds = new Set(r.surfaces.filter((s) => !s.exited).map((s) => s.surface_id));
+        for (const ws of workspaces.filter((w) => (w.socket ?? undefined) === (sk ?? undefined))) {
+          for (const sid of collectSids(ws.tree)) {
+            const key = paneKey(sid, sk);
+            const { strikes, remove } = nextGhostStrike(ghostStrikes.get(key) ?? 0,
+              { listOk: true, listNonEmpty: liveIds.size > 0, presentInList: liveIds.has(sid) });
+            if (strikes) ghostStrikes.set(key, strikes);
+            else ghostStrikes.delete(key);
+            if (remove) { ghostStrikes.delete(key); removeDeadPane(sid, sk); }
+          }
+        }
+        // 자동 입양: 그 소켓의 role surface 중 UI에 없는 것 → '같은 소켓을 가진 ws'에만 표출.
+        // ★소켓 일치 가드 — 부서A 노드가 부서B 탭에 잘못 입양되는 격리 누수 차단(검증 mustFix).
+        // role 우선순위(master>cso>worker>reviewer) 정렬 — 부서 첫 입양 시 master가 첫 pane(좌측·focus)이 되도록.
+        const rolePri = (role: string | null): number =>
+          role === "master" ? 0 : role === "cso" ? 1 : role?.startsWith("worker") ? 2 : role?.startsWith("reviewer") ? 3 : 4;
+        for (const s of [...r.surfaces].sort((a, b) => rolePri(a.role) - rolePri(b.role))) {
+          if (s.exited || !(hierarchyEnabled ? shouldAdoptSurface(s) : s.role) || panes.has(paneKey(s.surface_id, sk))) continue;
+          // !w.pending — 런칭 중 placeholder(socket 미정)에는 입양 금지(타 데몬 surface 오입양 차단).
+          const candidates = workspaces.filter((w) => !w.pending && (w.socket ?? undefined) === (sk ?? undefined));
+          const name = hierarchyEnabled ? adoptHqOf(s.title) : null;
+          let ws = name ? candidates.find((w) => w.name === name) : hierarchyEnabled
+            ? pickAdoptWs(candidates, current()) : candidates[0];
+          if (!ws && name) {
+            ws = { id: wsCounter++, name, tree: null, socket: sk };
+            workspaces.push(ws);
+          }
+          if (!ws || collectSids(ws.tree).includes(s.surface_id)) continue;
+          setRoleDot((await makePane(s.surface_id, s.title, sk)).roleEl, s.role); // 입양 즉시 역할 점 채색(다음 틱 대기 없이)
+          ws.tree = ws.tree
+            ? { type: "split", dir: "row", a: ws.tree, b: { type: "pane", sid: s.surface_id } }
+            : { type: "pane", sid: s.surface_id };
+          adopted = true;
+        }
+        if (hierarchyEnabled) for (const s of r.surfaces) {
+          if (s.exited || !panes.has(paneKey(s.surface_id, sk))) continue;
+          const from = workspaces.find((w) => !w.pending && (w.socket ?? undefined) === (sk ?? undefined)
+            && collectSids(w.tree).includes(s.surface_id));
+          if (!from) continue;
+          const name = paneRehomeTarget(from.name, s.title);
+          if (!name) continue;
+          let to = workspaces.find((w) => !w.pending && (w.socket ?? undefined) === (sk ?? undefined) && w.name === name);
+          if (!to) { to = { id: wsCounter++, name, tree: null, socket: sk }; workspaces.push(to); }
+          from.tree = from.tree ? replaceNode(from.tree, s.surface_id, () => null) : null;
+          if (!collectSids(to.tree).includes(s.surface_id)) to.tree = to.tree
+            ? { type: "split", dir: "row", a: to.tree, b: { type: "pane", sid: s.surface_id } }
+            : { type: "pane", sid: s.surface_id };
+          adopted = true;
+        }
+      } catch {
+        // 한 부서가 응답하지 않아도 다른 소켓의 좌석 입양·재배치는 계속한다.
       }
     }
     renderHeader();
@@ -2054,6 +2089,8 @@ function destroyPaneRuntime(sid: number, socket?: string) {
   rt.el.remove();
   panes.delete(paneKey(sid, socket));
   paneTitleState.delete(paneKey(sid, socket));
+  surfaceTitles.delete(paneKey(sid, socket));
+  ghostStrikes.delete(paneKey(sid, socket));
 }
 
 // ---------- pane drag 이동 (탭을 끌어 자유 배치) ----------
@@ -2066,6 +2103,12 @@ function startPaneDrag(e0: MouseEvent, sid: number) {
   let ghost: HTMLElement | null = null;
   let hint: HTMLElement | null = null;
   let target: { sid: number; side: DropSide } | null = null;
+  let tabTarget: HTMLElement | null = null;
+
+  const clearTabTarget = () => {
+    tabTarget?.classList.remove("transfer-target");
+    tabTarget = null;
+  };
 
   const move = (e: MouseEvent) => {
     if (!dragging) {
@@ -2083,9 +2126,14 @@ function startPaneDrag(e0: MouseEvent, sid: number) {
     }
     ghost!.style.left = `${e.clientX + 10}px`;
     ghost!.style.top = `${e.clientY + 10}px`;
-    const over = (document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null)?.closest(
-      ".pane",
-    ) as HTMLElement | null;
+    const hit = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+    const tab = hit?.closest(".ws-tab") as HTMLElement | null;
+    if (tab !== tabTarget) {
+      clearTabTarget();
+      if (tab?.dataset.wsId) { tabTarget = tab; tab.classList.add("transfer-target"); }
+    }
+    if (tabTarget) { target = null; hint!.hidden = true; return; }
+    const over = hit?.closest(".pane") as HTMLElement | null;
     target = null;
     if (over?.dataset.sid && Number(over.dataset.sid) !== sid) {
       const r = over.getBoundingClientRect();
@@ -2111,10 +2159,36 @@ function startPaneDrag(e0: MouseEvent, sid: number) {
     ghost?.remove();
     hint?.remove();
     document.body.classList.remove("pane-dragging");
-    if (dragging && target) movePane(sid, target.sid, target.side);
+    const destWsId = tabTarget?.dataset.wsId;
+    clearTabTarget();
+    if (dragging && destWsId != null) transferPaneToWs(sid, Number(destWsId));
+    else if (dragging && target) movePane(sid, target.sid, target.side);
   };
   window.addEventListener("mousemove", move, true);
   window.addEventListener("mouseup", up, true);
+}
+
+function transferPaneToWs(sid: number, destWsId: number) {
+  const src = current();
+  const dest = workspaces.find((w) => w.id === destWsId);
+  if (!dest || dest === src || dest.pending) return;
+  if ((dest.socket ?? undefined) !== (src.socket ?? undefined)) {
+    toast("watchdog", "좌석 이동 불가", "서로 다른 데몬의 좌석은 이 화면에서 이동할 수 없습니다.");
+    return;
+  }
+  const home = hierarchyEnabled ? adoptHqOf(surfaceTitles.get(paneKey(sid, src.socket)) ?? "") : null;
+  if (home && dest.name !== home) {
+    toast("watchdog", "좌석 이동 불가", "제목의 본부와 대상 패널이 다릅니다. 제목을 먼저 바꿔 주세요.");
+    return;
+  }
+  if (!panes.has(paneKey(sid, src.socket))) return;
+  const moved = transferTrees(src.tree, dest.tree, sid);
+  if (!moved) return;
+  src.tree = moved.src;
+  dest.tree = moved.dest;
+  if (focusedSid === sid) focusedSid = collectSids(src.tree)[0] ?? null;
+  render();
+  if (focusedSid != null) setFocus(focusedSid);
 }
 
 /// sid pane을 트리에서 떼어 target pane의 side 쪽에 분할 삽입한다.
@@ -2185,9 +2259,15 @@ function render() {
   for (const rt of panes.values()) rt.el.remove();
   root.innerHTML = "";
   const ws = current();
+  if (ws?.tree) ws.tree = dedupeTree(ws.tree) as Node;
   const tree = ws?.tree;
   if (tree) root.appendChild(renderNode(tree));
   else if (ws?.pending) root.appendChild(renderDeptPending()); // WP-10: 부서 준비 중 빈 pane 스피너·안내
+  if (hierarchyEnabled) {
+    const assigned = autoAssignGroups(workspaces, groups, groupCounter);
+    groups = assigned.groups;
+    groupCounter = assigned.groupCounter;
+  }
   renderWsTabs();
   requestAnimationFrame(() => {
     for (const sid of collectSids(current()?.tree ?? null)) {
@@ -2525,6 +2605,8 @@ function updatePendingBadges(n: number) {
 
 // ws별 고유색 (id 기반 — 세션 복원에도 같은 ws는 같은 색)
 const WS_COLORS = ["#2f81f7", "#3fb950", "#d29922", "#f85149", "#a371f7", "#db61a2", "#39c5cf", "#e3b341"];
+let hierarchyEnabled = false;
+let hqColors: HqColorMap = {};
 
 function renderWsTabs() {
   const bar = document.getElementById("ws-tabs")!;
@@ -2536,26 +2618,51 @@ function renderWsTabs() {
   const pinnedG = groups.filter((g) => g.pinned && hasMembers(g));
   const unpinnedG = groups.filter((g) => !g.pinned && hasMembers(g));
   for (const g of [...pinnedG, ...unpinnedG]) bar.appendChild(buildGroupSection(g));
-  for (const ws of workspaces.filter((w) => !w.pending && w.groupId == null)) bar.appendChild(buildTab(ws));
+  for (const ws of (hierarchyEnabled ? sortHqWorkspaces(workspaces.filter((w) => !w.pending && w.groupId == null))
+    : workspaces.filter((w) => !w.pending && w.groupId == null))) bar.appendChild(buildTab(ws));
 }
 
 // 06: ws 1행 탭 DOM 생성(기존 renderWsTabs forEach 본문을 외과적으로 추출 — idx→workspaces.indexOf(ws)만 치환).
 function buildTab(ws: Workspace): HTMLElement {
   const color = WS_COLORS[ws.id % WS_COLORS.length];
-  const tab = document.createElement("div");
+  const sids = collectSids(ws.tree);
+  const spec = hierarchyEnabled ? sidebarTreeSpec({ name: ws.name, sids, collapsed: ws.collapsed, pending: ws.pending }) : null;
+  const shell = spec?.hq ? createHqTabShell(ws.name, hqColors, WS_COLORS, color, document as unknown as MiniDoc) : null;
+  const tab = shell ? shell.tab as unknown as HTMLElement : document.createElement("div");
   tab.className = "ws-tab" + (workspaces.indexOf(ws) === activeWs ? " active" : "");
   tab.dataset.wsId = String(ws.id); // 드래그 히트테스트용(startWsDrag)
-  tab.style.borderLeftColor = color; // ws 고유색은 좌측 바 (사이드바 항목 식별)
-  const titleRow = document.createElement("div");
-  titleRow.className = "ws-title-row";
+  if (!shell) tab.style.borderLeftColor = color;
+  const titleRow = shell ? shell.titleRow as unknown as HTMLElement : document.createElement("div");
+  if (!shell) titleRow.className = "ws-title-row";
   const label = document.createElement("span");
   label.className = "ws-name";
-  label.textContent = deptPlaceholderLabel(ws); // WP-10: pending이면 "부서 제작 중…" (멈춘 줄 오해 방지)
+  label.textContent = ws.pending ? deptPlaceholderLabel(ws) : spec?.headerLabel ?? (spec ? tabLabel(ws, groups) : deptPlaceholderLabel(ws));
   const close = document.createElement("span");
   close.className = "ws-close";
   close.textContent = "×";
   close.title = "완전 삭제 — 클릭하면 확인 창이 열립니다 (부서면 데몬 종료·부활 차단 포함)";
   titleRow.append(label, close);
+  if (spec?.chevron) {
+    const chevron = document.createElement("button");
+    chevron.type = "button";
+    chevron.className = "ws-hq-chevron";
+    chevron.textContent = spec.chevron;
+    chevron.setAttribute("aria-label", ws.collapsed ? "구성원 펼치기" : "구성원 접기");
+    chevron.setAttribute("aria-expanded", String(!ws.collapsed));
+    chevron.addEventListener("mousedown", (event) => event.stopPropagation());
+    chevron.addEventListener("click", (event) => {
+      event.stopPropagation();
+      ws.collapsed = !ws.collapsed;
+      render();
+    });
+    titleRow.prepend(chevron);
+  }
+  if (spec?.count != null) {
+    const count = document.createElement("span");
+    count.className = "ws-hq-count";
+    count.textContent = hqCountLabel(spec.count);
+    titleRow.insertBefore(count, close);
+  }
   // WP-10: 부서 준비 중 탭엔 스피너 글리프를 라벨 앞에 붙이고 aria-busy 로 진행을 알린다(CSS가 회전·정지 담당).
   if (ws.pending) {
     const spin = document.createElement("span");
@@ -2572,7 +2679,6 @@ function buildTab(ws: Workspace): HTMLElement {
     titleRow.append(badge);
   }
   // 서브라인: pane 수 + 대표 pane 제목 (항목 가독성)
-  const sids = collectSids(ws.tree);
   const firstTitle =
     panes.get(paneKey(sids[0] ?? -1, ws.socket))?.titleEl.textContent ?? "";
   const sub = document.createElement("span");
@@ -2603,6 +2709,28 @@ function buildTab(ws: Workspace): HTMLElement {
     sub.appendChild(txt);
   }
   tab.append(titleRow, sub);
+  if (spec?.memberSids.length) {
+    const members = document.createElement("div");
+    members.className = "ws-members";
+    const sorted = sortHqMembers(spec.memberSids.map((sid) => ({ sid,
+      title: surfaceTitles.get(paneKey(sid, ws.socket)) ?? "" })));
+    for (const member of teamMemberRows(sorted.map(({ sid, title }) => ({ sid, title,
+      role: nodeSig.get(`${ws.socket}#${sid}`)?.role ?? null })))) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "ws-member" + (focusedSid === member.sid ? " focused" : "");
+      row.textContent = member.label;
+      row.addEventListener("mousedown", (event) => event.stopPropagation());
+      row.addEventListener("click", (event) => {
+        event.stopPropagation();
+        activeWs = workspaces.indexOf(ws);
+        render();
+        if (panes.has(paneKey(member.sid, ws.socket))) setFocus(member.sid);
+      });
+      members.append(row);
+    }
+    tab.append(members);
+  }
   tab.addEventListener("mousedown", (e) => {
     // 우클릭은 전환하지 않음 — render()가 탭 DOM을 재생성하면 컨텍스트 메뉴가 죽은 엘리먼트를 잡는다
     if (e.button !== 0 || e.target === close) return;
@@ -2618,6 +2746,7 @@ function buildTab(ws: Workspace): HTMLElement {
   });
   const startRename = () => {
     // WKWebView에서 prompt()는 무동작 — 인라인 편집
+    label.textContent = ws.name; // 표시용 본부명·미분류명이 저장 이름을 덮지 않게 한다.
     label.contentEditable = "true";
     label.focus();
     const sel = window.getSelection();
@@ -2651,9 +2780,10 @@ function buildTab(ws: Workspace): HTMLElement {
     // 확인 다이얼로그로 교체(WKWebView confirm() 무동작 → 기존 confirmModal 재사용). 초보자가
     // "무엇이 어떻게 삭제되는지" 읽고 결정한다. pane 개별 ×(저위험)는 종전 2-click 유지.
     const wsName = ws.name || UNTITLED;
+    const lastForSocket = !!ws.socket && !workspaces.some((w) => w !== ws && w.socket === ws.socket);
     const ok = await confirmModal(
-      ws.socket ? `부서 "${wsName}" 완전 삭제` : `워크스페이스 "${wsName}" 완전 삭제`,
-      (ws.socket
+      lastForSocket ? `부서 "${wsName}" 완전 삭제` : `워크스페이스 "${wsName}" 완전 삭제`,
+      (lastForSocket
         ? "이 부서의 pane(에이전트 세션)이 전부 종료되고 부서 데몬도 종료됩니다. 삭제 의도가 기록되어 " +
           "앱을 재시작해도 부활하지 않습니다."
         : "이 워크스페이스의 pane(에이전트 세션)이 전부 종료되고 탭이 제거됩니다.") +
@@ -2663,11 +2793,12 @@ function buildTab(ws: Workspace): HTMLElement {
     if (!ok) return;
     // ★WP-3 의도 선기록(제1행위): teardown 이전에 base 데몬에 dept 묘비 기록 — 이후 체인이
     // 무음 실패해도 재시작 부활을 차단한다. 실패=가시화(같은 탭 재삭제가 재시도 — 무음 삼킴 금지).
-    if (ws.socket) {
+    if (lastForSocket) {
       try {
         await invoke("dept_tombstone_by_socket", { socket: ws.socket });
       } catch (e) {
-        toast("watchdog", "부서 삭제 의도 기록 실패", `${e} — 삭제는 계속 진행되나 재시작 시 부활할 수 있습니다. 같은 탭을 다시 삭제하면 재시도됩니다.`);
+        toast("watchdog", "부서 삭제 의도 기록 실패", `${e} — 탭을 보존했습니다. 다시 삭제하면 재시도합니다.`);
+        return;
       }
     }
     for (const sid of collectSids(ws.tree)) {
@@ -2706,7 +2837,7 @@ function buildGroupSection(g: GroupMeta): HTMLElement {
 
   const head = document.createElement("div");
   head.className = "ws-group-head" + (g.pinned ? " pinned" : "");
-  head.style.borderLeftColor = g.color || WS_COLORS[g.id % WS_COLORS.length];
+  head.style.borderLeftColor = g.auto ? hqColor(g.name, hqColors, WS_COLORS) ?? "" : g.color || WS_COLORS[g.id % WS_COLORS.length];
 
   const chevron = document.createElement("span");
   chevron.className = "ws-group-chevron";
@@ -2733,15 +2864,17 @@ function buildGroupSection(g: GroupMeta): HTMLElement {
 
   const count = document.createElement("span");
   count.className = "ws-group-count";
-  count.textContent = String(workspaces.filter((w) => !w.pending && w.groupId === g.id).length);
+  const memberWs = workspaces.filter((w) => !w.pending && w.groupId === g.id);
+  count.textContent = g.auto ? `${memberWs.length}팀 · ${memberWs.reduce((n, w) => n + collectSids(w.tree).length, 0)}명` : String(memberWs.length);
 
   const add = document.createElement("span"); // hover '+' = 이 그룹에 새 ws
   add.className = "ws-group-add";
   add.textContent = "+";
-  add.title = "그룹에 워크스페이스 추가";
+  add.title = g.auto ? "팀 워크스페이스 추가" : "그룹에 워크스페이스 추가";
   add.addEventListener("click", async (e) => {
     e.stopPropagation();
-    const ws = await addWorkspace();
+    const ws = await addWorkspace(g.auto ? nextTeamName(g.name, workspaces.map((w) => w.name)) : undefined,
+      g.auto ? memberWs[0]?.socket : undefined);
     ws.groupId = g.id;
     render();
   });
@@ -2881,6 +3014,11 @@ async function confirmDeleteGroup(g: GroupMeta) {
   groupDeleteArm = null;
   const members = workspaces.filter((w) => w.groupId === g.id);
   for (const ws of members) {
+    const lastForSocket = !!ws.socket && !workspaces.some((w) => w !== ws && w.socket === ws.socket);
+    if (lastForSocket) {
+      try { await invoke("dept_tombstone_by_socket", { socket: ws.socket }); }
+      catch (e) { toast("watchdog", "부서 삭제 의도 기록 실패", `${e} — 남은 탭을 보존했습니다.`); return; }
+    }
     for (const sid of collectSids(ws.tree)) {
       await invoke("close_surface", { socket: ws.socket, surfaceId: sid }).catch(() => {});
       destroyPaneRuntime(sid, ws.socket);
@@ -2890,7 +3028,8 @@ async function confirmDeleteGroup(g: GroupMeta) {
     workspaces.splice(i, 1);
     // 부서 데몬 teardown은 '그 socket을 쓰는 마지막 탭'일 때만(close 핸들러와 동일 정합).
     const stillUsed = ws.socket && workspaces.some((w) => w.socket === ws.socket);
-    if (ws.socket && !stillUsed) await invoke("stop_dept_daemon_by_socket", { socket: ws.socket }).catch(() => {});
+    if (ws.socket && !stillUsed) await invoke("stop_dept_daemon_by_socket", { socket: ws.socket }).catch((e) =>
+      toast("watchdog", "부서 데몬 종료 실패", `${e} — 삭제 의도는 기록됐습니다.`));
     if (i < activeWs) activeWs -= 1; // 활성보다 앞 탭을 닫으면 인덱스가 한 칸 당겨진다
   }
   if (workspaces.length === 0) {
@@ -3174,9 +3313,9 @@ function openSettingsMenu(anchor: HTMLElement) {
   window.addEventListener("keydown", onKey, true);
 }
 
-async function addWorkspace(): Promise<Workspace> {
-  const sid = await newSurface();
-  const ws: Workspace = { id: wsCounter++, name: UNTITLED, tree: { type: "pane", sid } };
+async function addWorkspace(name = UNTITLED, socket?: string): Promise<Workspace> {
+  const sid = await newSurface(null, socket);
+  const ws: Workspace = { id: wsCounter++, name, tree: { type: "pane", sid }, socket };
   workspaces.push(ws);
   activeWs = workspaces.length - 1;
   render();
@@ -4370,9 +4509,9 @@ function onDaemonEvent(event: Record<string, unknown>) {
   } else if (name === "surface.exited" || name === "surface.closed" || name === "surface.reaped") {
     // 종료 즉시 죽은 pane 자동 제거 (A안) — 데몬 reap을 기다리지 않는다. 멱등.
     // 멀티마스터 F4: 출처 데몬을 socket_slug로 특정해 그 부서 pane만 제거(타 부서 같은 sid 보호).
-    const sock = event.socket_slug ? socketForSlug.get(String(event.socket_slug)) : undefined;
-    if (event.socket_slug && !sock) return; // slug 명시됐는데 미해결 → 기본 데몬 폴백 금지(타부서 동일 sid 오제거 방지)
-    removeDeadPane(Number(sid), sock);
+    const resolved = resolveEventSocket(event.socket_slug != null ? String(event.socket_slug) : undefined, socketForSlug);
+    if (!resolved.known) return;
+    removeDeadPane(Number(sid), resolved.socket);
   }
 }
 
@@ -4440,6 +4579,7 @@ async function start() {
   setInterval(() => void checkVersionSkew(), 5 * 60_000);
 
   await listen("daemon-event", (e) => onDaemonEvent(e.payload as Record<string, unknown>));
+  void invoke("org_fleet").then((fleet) => seedEventSocketSlugs(fleet as Parameters<typeof seedEventSocketSlugs>[0])).catch(() => {});
 
   // ── 파일 드래그&드롭 → 드롭한 pane의 PTY에 셸 인용 경로 타이핑(iTerm2 동작) ──
   // dragDropEnabled 기본 활성이라 Tauri가 OS 드롭을 가로채 tauri://drag-drop로 준다(HTML5 drop 미발화).
@@ -4576,6 +4716,16 @@ async function start() {
     }
   })();
 
+  try {
+    const raw = await invoke("naming_config") as string | null;
+    hierarchyEnabled = configureHierarchyNaming(raw);
+    hqColors = parseNamingColors(raw).colors;
+  } catch (error) {
+    hierarchyEnabled = configureHierarchyNaming(null);
+    hqColors = {};
+    console.warn("[naming] 로컬 설정을 읽지 못해 기본 사이드바로 표시합니다", error);
+  }
+
   // Session restore (멀티마스터 F4): 저장본 먼저 로드(ws.socket 포함) → 부서 데몬 확보를 list 대조보다
   // 선행 → 소켓별 대조. 데몬 일시 미가동 ws는 보존(영구 삭제 방지, 검증 mustFix).
   try {
@@ -4592,7 +4742,7 @@ async function start() {
     groups = []; // 06: 손상 저장본 폴백
   }
   for (const ws of workspaces) ws.socket = ws.socket ?? undefined; // 하위호환 마이그레이션(기본 데몬)
-  // socket 1:1 수렴 + id 중복 제거(중복 탭 증식 차단) — 복원 적재 직후 단일 게이트.
+  // 같은 socket의 여러 패널을 보존하고 id·좌석 중복만 정리한다.
   workspaces = normalizeWorkspaces(workspaces);
   // 카운터 보정: 신규 id/이름이 항상 기존 최댓값 초과하도록(중복·손상 저장본에도 강건)
   wsCounter = Math.max(wsCounter, 0, ...workspaces.map((w) => w.id)) + 1;
@@ -4703,8 +4853,7 @@ async function start() {
   workspaces = workspaces.filter((ws) => {
     if (ws.tree !== null) return true;
     const lb = liveBySock.get(ws.socket);
-    if (lb?.ok === false) return true;
-    return ws.socket != null && lb?.ok === true;
+    return shouldKeepEmptyWorkspaceOnRestore(lb?.ok);
   });
   // 구버전 자동 번호 이름("ws N")은 미정 표시로 이행
   for (const ws of workspaces) {
@@ -4724,14 +4873,20 @@ async function start() {
   const restoredIdx = workspaces.findIndex((ws) => ws.id === activeWsId);
   activeWs = restoredIdx >= 0 ? restoredIdx : Math.min(activeWs, workspaces.length - 1);
 
-  // pane 런타임 생성 + 고아(레이아웃에 없는 살아있는 surface)는 같은 소켓 ws에 병합.
+  // 모든 ws의 소유권을 확인한 뒤에만 고아 surface를 같은 소켓의 대상 패널에 입양한다.
   for (const sk of sockets) {
     const lb = liveBySock.get(sk);
     if (!lb || !lb.ok) continue;
-    const ws = workspaces.find((w) => (w.socket ?? undefined) === (sk ?? undefined));
     for (const s of lb.list) {
+      surfaceTitles.set(paneKey(s.surface_id, sk), s.title);
       await makePane(s.surface_id, s.title, sk);
-      if (ws && !collectSids(ws.tree).includes(s.surface_id)) {
+      if (socketOwnsSid(workspaces, sk, s.surface_id)) continue;
+      const candidates = workspaces.filter((w) => !w.pending && (w.socket ?? undefined) === (sk ?? undefined));
+      const name = hierarchyEnabled ? adoptHqOf(s.title) : null;
+      let ws = name ? candidates.find((w) => w.name === name) : hierarchyEnabled
+        ? pickAdoptWs(candidates, current()) : candidates[0];
+      if (!ws && name) { ws = { id: wsCounter++, name, tree: null, socket: sk }; workspaces.push(ws); }
+      if (ws) {
         ws.tree = ws.tree
           ? { type: "split", dir: "row", a: ws.tree, b: { type: "pane", sid: s.surface_id } }
           : { type: "pane", sid: s.surface_id };

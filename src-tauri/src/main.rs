@@ -251,6 +251,18 @@ async fn usage_accounts_all() -> Result<Value, String> {
     Ok(json!({"accounts": accounts}))
 }
 
+#[tauri::command]
+fn naming_config() -> Result<Option<String>, String> {
+    let path = cys::home_dir().join(".cys/naming.json");
+    let meta = match std::fs::metadata(&path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    if meta.len() > 1_048_576 { return Err("naming.json is too large".into()); }
+    std::fs::read_to_string(path).map(Some).map_err(|error| error.to_string())
+}
+
 /// org.status 브리지 — 사이드바 라이브 신호(B3)·command palette(07) 공유 소스.
 #[tauri::command]
 async fn org_status(socket: Option<String>) -> Result<Value, String> {
@@ -2601,6 +2613,7 @@ fn main() {
             set_account_owner,
             list_surfaces,
             usage_accounts_all,
+            naming_config,
             org_status,
             help_username,
             prepare_help,

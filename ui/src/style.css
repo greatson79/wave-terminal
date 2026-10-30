@@ -119,6 +119,7 @@ body.wsbar-resizing { cursor: col-resize; -webkit-user-select: none; user-select
   border-left: 3px solid transparent; /* ws 고유색 바 (JS가 색 지정) */
 }
 .ws-tab:hover { background: #1c2128; }
+.ws-tab.transfer-target { outline: 2px solid var(--accent); outline-offset: -2px; }
 .ws-tab.active { background: var(--accent); }
 .ws-tab .ws-title-row {
   display: flex; align-items: center; gap: 6px; min-width: 0;
@@ -143,6 +144,13 @@ body.wsbar-resizing { cursor: col-resize; -webkit-user-select: none; user-select
 .ws-dot.error { background: var(--error); }
 .ws-tab .ws-sub .sev-warn { color: var(--warn); }
 .ws-tab .ws-sub .sev-crit { color: var(--error); }
+.ws-hq-chevron { flex: none; width: 12px; padding: 0; border: 0; background: transparent; font-size: 10px; cursor: pointer; color: #8b949e; }
+.ws-hq-count { flex: none; font-size: 10px; color: #8b949e; font-variant-numeric: tabular-nums; }
+.ws-hq-chip { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; border-radius: 4px; font-size: 9px; font-weight: 700; color: #fff; }
+.ws-members { display: flex; flex-direction: column; gap: 1px; margin: 4px 0 0 4px; padding-left: 7px; border-left: 1px solid var(--hairline); }
+.ws-member { min-width: 0; padding: 2px 4px; border: 0; background: transparent; text-align: left; border-radius: 4px; font-size: calc(11px * var(--wsbar-font, 1)); color: #adbac7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+.ws-member:hover, .ws-member.focused { background: rgba(88, 166, 255, .18); }
+.ws-tab.active .ws-member { color: #fff; }
 .ws-approve-badge { margin-left: 6px; color: var(--error); font-weight: 700; font-size: 11px; }
 #btn-ws-dept:disabled { opacity: .5; cursor: default; }
 .ws-tab .ws-close {

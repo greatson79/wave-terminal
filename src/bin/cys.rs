@@ -67,6 +67,15 @@ enum Command {
         #[arg(value_name = "이름")]
         name: Option<String>,
     },
+    /// Set the surface title used by the sidebar and role tools.
+    RenameSurface {
+        #[arg(long)]
+        surface: Option<String>,
+        #[arg(long)]
+        role: Option<String>,
+        #[arg(long)]
+        title: String,
+    },
     /// Inject text into a surface's stdin (no trailing newline; follow with send-key Return)
     Send {
         #[arg(long)]
@@ -132,6 +141,12 @@ enum Command {
         #[arg(long)]
         surface: Option<String>,
     },
+    /// Show account usage observed by this daemon.
+    UsageAccounts {
+        #[arg(long)]
+        json: bool,
+    },
+    LearnCheckpoint,
     /// T1-2 통합 관제 보드: 전 노드 상태를 1콜로 (read-screen 폴링 대체)
     Status {
         #[arg(long)]
@@ -149,8 +164,15 @@ enum Command {
     },
     /// kill-switch 해제 — 동결된 큐·스케줄 재개
     Resume,
-    /// 업데이트 재시작 전 살아있는 노드에 저장 신호 + 유예 (best-effort drain)
-    Drain,
+    /// 업데이트 재시작 전 살아있는 노드에 저장 신호 + 유예
+    Drain {
+        /// SESSION_STATE.md 체크포인트 마커를 검증한다
+        #[arg(long)]
+        verify: bool,
+        /// 검증 대기 시간(초)
+        #[arg(long, default_value_t = 20)]
+        timeout: u64,
+    },
     /// preflight 게이트: exit 0 = running, 4 = paused (자율주행 매 action 전 확인용)
     GateCheck,
     /// 미배달 큐 검사·철회 (kill-switch의 짝)
@@ -188,6 +210,8 @@ enum Command {
         surface: Option<String>,
         #[arg(long)]
         role: Option<String>,
+        #[arg(long)]
+        resume: bool,
     },
     /// T2-6 조직 복원: 토폴로지 스냅샷의 죽은 역할들을 일괄 재기동·재주입 (작업 재개는 master 판단)
     Restore {
@@ -196,6 +220,8 @@ enum Command {
         /// master 역할도 재기동 대상에 포함 (기본 제외 — restore 실행자가 보통 master)
         #[arg(long)]
         include_master: bool,
+        #[arg(long)]
+        resume: bool,
         /// 에이전트 resume 플래그(agents.json resume_arg) 미사용
         #[arg(long)]
         no_resume: bool,
@@ -406,6 +432,14 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// 직전 팩 버전에서 파일 단위 복원. --file 생략 시 후보 목록 표시
+    #[command(name = "pack-rollback")]
+    PackRollback {
+        #[arg(long)]
+        file: Option<String>,
+        #[arg(long)]
+        yes: bool,
+    },
     /// pro 라이선스("열쇠") 관리 — 검증·설치·typed 진단 (DESIGN-pro-license.md §7)
     License {
         #[command(subcommand)]
@@ -506,6 +540,8 @@ enum Command {
         role: String,
         #[arg(long)]
         surface: Option<String>,
+        #[arg(long)]
+        takeover_empty_seat: bool,
     },
     /// Mark a surface quiescing(=채널 inbox 주입 보류) or release it (§2.2 S5) — cycle-agent가 clear 전후 호출
     Quiesce {
@@ -526,15 +562,35 @@ enum Command {
         agent: String,
         #[arg(long)]
         cwd: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
     },
     /// Boot the standard node set — master에 CSO·worker를 추가. 리뷰어는 필요 시 명시 기동
     Boot {
         /// Working directory for launched nodes
         #[arg(long)]
         cwd: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    AgentDetect {
+        #[arg(long)]
+        json: bool,
     },
     /// Print (creating if absent) this surface's role-specific TODO file path — 복수 워커가 같은 파일을 공유하지 않도록 역할별 고유 경로를 결정론적으로 산출
-    TodoPath,
+    TodoPath {
+        #[arg(long)]
+        role: Option<String>,
+        #[arg(long)]
+        emit_decl: bool,
+    },
+    PackOwnership {
+        rel: String,
+        #[arg(long)]
+        quiet: bool,
+    },
     /// Print this surface's cysd-authoritative role (one word) — PreToolUse capability-gate hook용.
     /// CYS_SURFACE_ID로 자기 surface를 찾아 데몬 roles 맵의 role을 출력(미등록 시 빈 줄·exit 0).
     SurfaceRole,
@@ -1511,14 +1567,14 @@ fn run(command: Command) -> i32 {
         Command::List => request("surface.list", json!({})).map(|r| {
             for s in r["surfaces"].as_array().cloned().unwrap_or_default() {
                 println!(
-                    "{}\trole={}\tpid={}\texited={}\tlabel={}\t{}\t{}",
+                    "{}\trole={}\tpid={}\texited={}\t{}\t{}\tlabel={}",
                     s["surface_ref"].as_str().unwrap_or("?"),
                     s["role"].as_str().unwrap_or("-"),
                     s["pid"],
                     s["exited"],
-                    s["label"].as_str().unwrap_or(""),
                     s["title"].as_str().unwrap_or(""),
                     s["cwd"].as_str().unwrap_or(""),
+                    s["label"].as_str().unwrap_or(""),
                 );
             }
         }),
@@ -1542,6 +1598,12 @@ fn run(command: Command) -> i32 {
                 Ok(()) => 0,
                 Err(e) => { eprintln!("{e}"); 1 }
             };
+        }
+
+        Command::RenameSurface { surface, role, title } => {
+            resolve_role_or_surface(&role, &surface)
+                .and_then(|sid| request("surface.rename", json!({"surface_id": sid, "title": title})))
+                .map(|r| println!("renamed surface:{} → \"{}\"", r["surface_id"], r["title"].as_str().unwrap_or(&title)))
         }
 
         Command::Send { surface, to, queued, clear_first, text } => {
@@ -1633,6 +1695,30 @@ fn run(command: Command) -> i32 {
 
         Command::UsageEventStdin { surface } => return run_usage_event_stdin(&surface),
 
+        Command::UsageAccounts { json: as_json } => request("usage.accounts", json!({}))
+            .map(|r| {
+                if as_json {
+                    println!("{}", serde_json::to_string_pretty(&r).unwrap_or_default());
+                } else {
+                    for a in r["accounts"].as_array().into_iter().flatten() {
+                        println!("{}\t{}\t{}", a["provider"].as_str().unwrap_or("?"),
+                            a["label"].as_str().unwrap_or("?"), a["rate"]);
+                    }
+                }
+            }),
+
+        Command::LearnCheckpoint => {
+            let mut input = String::new();
+            if std::io::stdin().read_to_string(&mut input).is_err() || input.trim().is_empty() {
+                return 1;
+            }
+            match serde_json::from_str::<Value>(&input) {
+                Ok(value) => request("learn.checkpoint", value)
+                    .map(|r| println!("OK round={}", r["round"].as_str().unwrap_or("?"))),
+                Err(e) => Err(format!("invalid checkpoint JSON: {e}")),
+            }
+        }
+
         Command::Status { json: as_json } => return run_status(as_json),
         Command::Fleet { json: as_json } => return run_fleet(as_json),
 
@@ -1642,7 +1728,8 @@ fn run(command: Command) -> i32 {
         Command::Resume => request("system.resume", json!({}))
             .map(|_| println!("RESUMED — 동결된 큐·스케줄 재개")),
 
-        Command::Drain => {
+        Command::Drain { verify: true, timeout } => return run_drain_verify(timeout),
+        Command::Drain { .. } => {
             // 업데이트 재시작 전 살아있는 역할 노드에 저장 신호를 보내고 짧게 유예한다(best-effort).
             // 노드(LLM) 협조 의존이라 무손실 보장은 아니며, 주 복원 경로는 재시작 후 resume이다.
             // ★hard watchdog: 데몬 무응답으로 RPC(read_line)가 hang해도 12s 내 무조건 종료해,
@@ -1744,10 +1831,10 @@ fn run(command: Command) -> i32 {
             )
         }
 
-        Command::NodeRecover { surface, role } => return run_node_recover(surface, role),
+        Command::NodeRecover { surface, role, resume } => return run_node_recover(surface, role, resume),
 
-        Command::Restore { cwd, include_master, no_resume } => {
-            return run_restore(cwd, include_master, no_resume)
+        Command::Restore { cwd, include_master, resume, no_resume } => {
+            return run_restore(cwd, include_master, resume && !no_resume)
         }
 
         Command::Reinject { role, surface, check, timeout } => {
@@ -1927,6 +2014,7 @@ fn run(command: Command) -> i32 {
         Command::PackMerge { file, take_new, keep_mine, ai, to_local, yes } => {
             return run_pack_merge(file, take_new, keep_mine, ai, to_local, yes);
         }
+        Command::PackRollback { file, yes } => return run_pack_rollback(file, yes),
 
         Command::PackManifest { key_id, signed_at, expires_at, min_binary_version, pack_version } => {
             return run_pack_manifest(key_id, signed_at, expires_at, &min_binary_version, pack_version);
@@ -1973,14 +2061,24 @@ fn run(command: Command) -> i32 {
             })
         }),
 
-        Command::ClaimRole { role, surface } => target_surface(&surface, &None).and_then(|sid| {
-            request("system.claim_role", json!({"role": role, "surface_id": sid}))
+        Command::ClaimRole { role, surface, takeover_empty_seat } => target_surface(&surface, &None).and_then(|sid| {
+            request("system.claim_role", json!({"role": role, "surface_id": sid,
+                "takeover_empty_seat": takeover_empty_seat}))
                 .map(|r| println!("registered: {} → surface:{}", r["role"].as_str().unwrap_or("?"), sid))
         }),
 
-        Command::LaunchAgent { role, agent, cwd } => return run_launch_agent(&role, &agent, cwd),
-        Command::Boot { cwd } => return run_boot(cwd),
-        Command::TodoPath => return run_todo_path(),
+        Command::LaunchAgent { role, agent, cwd, title, model } => {
+            return run_launch_agent(&role, &agent, cwd, title, model)
+        }
+        Command::Boot { cwd, json } => return run_boot(cwd, json),
+        Command::AgentDetect { json } => return run_agent_detect(json),
+        Command::TodoPath { role, emit_decl } => return run_todo_path(role, emit_decl),
+        Command::PackOwnership { rel, quiet } => {
+            let embedded = cys::pack::PACK.iter().any(|(path, _)| *path == rel);
+            let name = if embedded { cys::pack::ownership_name(&rel) } else { "custom" };
+            if quiet { println!("{name}"); } else { println!("{rel}: {name}"); }
+            return 0;
+        }
 
         Command::SurfaceRole => return run_surface_role(),
 
@@ -3844,8 +3942,62 @@ fn expand_tilde(p: &str) -> std::path::PathBuf {
 // bin/javis_orchestra.py:153-160 (MIT, 루트 LICENSE 유지). CSO 먼저.
 const BOOT_PLAN: &[(&str, &str)] = &[("cso", "claude"), ("worker", "claude")];
 
+fn run_agent_detect(as_json: bool) -> i32 {
+    let path = cys::pack::pack_dir().join("agents.json");
+    let agents: Value = match std::fs::read_to_string(&path)
+        .map_err(|e| e.to_string())
+        .and_then(|raw| serde_json::from_str(&raw).map_err(|e| e.to_string())) {
+        Ok(value) => value,
+        Err(e) => { eprintln!("agents.json: {e}"); return 3; }
+    };
+    let mut found = serde_json::Map::new();
+    for (name, spec) in agents.as_object().into_iter().flatten() {
+        if name.starts_with('_') { continue; }
+        let bin = spec["cmd"].as_str().map(|cmd| extract_bin(cmd, name)).unwrap_or(name);
+        let resolved = if bin.contains('/') || bin.contains('\\') || bin.starts_with('~') {
+            Some(expand_tilde(bin))
+        } else {
+            std::process::Command::new(if cfg!(windows) { "where" } else { "which" })
+                .arg(bin).output().ok().filter(|out| out.status.success())
+                .and_then(|out| String::from_utf8(out.stdout).ok())
+                .and_then(|out| out.lines().next().map(std::path::PathBuf::from))
+        };
+        #[cfg(windows)]
+        let resolved = resolved.filter(|path| agent_binary_executable(path))
+            .or_else(|| ["APPDATA", "LOCALAPPDATA"].into_iter()
+                .filter_map(std::env::var_os)
+                .find_map(|root| windows_npm_agent(&std::path::PathBuf::from(root), bin)));
+        let installed = resolved.as_ref().is_some_and(|path| agent_binary_executable(path));
+        found.insert(name.clone(), json!({"installed": installed, "bin": bin,
+            "resolved": resolved.filter(|_| installed),
+            "reason": if installed { "found" } else { "binary not found" }}));
+    }
+    if as_json {
+        println!("{}", json!({"agents": found}));
+    } else {
+        for (name, entry) in found { println!("{name}\t{}", if entry["installed"] == true { "installed" } else { "missing" }); }
+    }
+    0
+}
+
+fn agent_binary_executable(path: &std::path::Path) -> bool {
+    if !path.is_file() { return false; }
+    #[cfg(unix)]
+    { use std::os::unix::fs::PermissionsExt; path.metadata().is_ok_and(|m| m.permissions().mode() & 0o111 != 0) }
+    #[cfg(not(unix))]
+    { true }
+}
+
+#[cfg(windows)]
+fn windows_npm_agent(root: &std::path::Path, bin: &str) -> Option<std::path::PathBuf> {
+    let stem = std::path::Path::new(bin).file_stem()?.to_str()?;
+    ["cmd", "exe", "bat", "ps1"].into_iter()
+        .map(|ext| root.join("npm").join(format!("{stem}.{ext}")))
+        .find(|path| agent_binary_executable(path))
+}
+
 /// master의 기본 편성에 CSO·worker를 추가하고 지침을 주입한다.
-fn run_boot(cwd: Option<String>) -> i32 {
+fn run_boot(cwd: Option<String>, as_json: bool) -> i32 {
     let agents: Value = std::fs::read_to_string(cys::pack::pack_dir().join("agents.json"))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -3863,6 +4015,7 @@ fn run_boot(cwd: Option<String>) -> i32 {
         .collect();
     let mut launched = 0;
     let mut failed = 0;
+    let mut outcomes = Vec::new();
     println!("cys boot — 기본 편성 점검 (master + CSO·worker, 리뷰어는 필요 시 명시 기동)");
     for (role, agent) in BOOT_PLAN {
         let bin = agents
@@ -3908,26 +4061,36 @@ fn run_boot(cwd: Option<String>) -> i32 {
                 _ => " (선택 노드 — 미설치면 건너뜀이 정상)",
             };
             println!("· {agent}: CLI '{bin}' 미설치 — 건너뜀{hint}");
+            outcomes.push(json!({"role": role, "agent": agent, "outcome": "missing", "mandatory": true,
+                "install_hint": hint.trim()}));
             continue;
         }
         if live_roles.contains(*role) {
             println!("· {agent}: 역할 '{role}' 이미 가동 중 — 건너뜀");
+            outcomes.push(json!({"role": role, "agent": agent, "outcome": "already_alive", "mandatory": true}));
             continue;
         }
         println!("· {agent}: 기동 시작 (role={role})…");
-        let rc = run_launch_agent(role, agent, cwd.clone());
+        let rc = run_launch_agent(role, agent, cwd.clone(), None, None);
         if rc == 0 {
             launched += 1;
+            outcomes.push(json!({"role": role, "agent": agent, "outcome": "launched", "mandatory": true}));
         } else if rc == LAUNCH_PENDING_RC {
             println!("· {agent}: 다른 호출이 기동 중인 좌석을 재사용 — 완료를 기다리지 못함(실패로 세지 않음)");
+            outcomes.push(json!({"role": role, "agent": agent, "outcome": "busy", "mandatory": true}));
         } else {
             failed += 1;
             println!("· {agent}: 기동 실패 — 나머지 노드는 계속 진행");
+            outcomes.push(json!({"role": role, "agent": agent, "outcome": "failed", "mandatory": true}));
         }
     }
     println!(
         "boot 완료: 신규 기동 {launched} · 실패 {failed} · 현황은 `cys list`로 확인 (role 열)"
     );
+    if as_json {
+        println!("{}", json!({"roles": outcomes,
+            "summary": {"launched": launched, "failed": failed}}));
+    }
     if failed > 0 {
         1
     } else {
@@ -4283,7 +4446,9 @@ fn model_for_role(spec: &Value, role: &str) -> Result<Option<String>, String> {
 fn cmd_with_model(spec: &Value, model: Option<&str>) -> Result<String, String> {
     let mut cmd = spec["cmd"].as_str().ok_or("agent cmd missing")?.to_string();
     if let Some(m) = model {
-        cmd.push_str(" --model ");
+        cmd.push(' ');
+        cmd.push_str(spec["model_arg"].as_str().unwrap_or("--model"));
+        cmd.push(' ');
         cmd.push_str(m);
     }
     Ok(cmd)
@@ -4427,8 +4592,13 @@ fn boot_agent_on_surface(
     cwd: Option<&str>,
     config_dir: Option<&str>,
     fresh: bool,
+    model_override: Option<&str>,
 ) -> Result<(), LaunchError> {
-    let (first, fallback) = model_plan(spec, role)?;
+    let (first, fallback) = if let Some(model) = model_override {
+        (Some(model.to_string()), None)
+    } else {
+        model_plan(spec, role)?
+    };
     let mut model = first;
     let mut fell_back = false;
     loop {
@@ -4749,43 +4919,42 @@ fn run_surface_role() -> i32 {
     0
 }
 
-fn run_todo_path() -> i32 {
-    let Some(sref) = cys::env_compat(ENV_SURFACE_ID) else {
-        eprintln!("CYS_SURFACE_ID 없음 — 데몬이 띄운 pane 안에서만 동작한다");
-        return 1;
-    };
-    let Some(my_sid) = parse_surface_ref(&sref) else {
-        eprintln!("CYS_SURFACE_ID 파싱 실패: {sref}");
-        return 1;
-    };
-    let role = match request("surface.list", json!({})) {
-        Ok(r) => r["surfaces"].as_array().and_then(|arr| {
-            arr.iter()
-                .find(|s| s["surface_id"].as_u64() == Some(my_sid))
-                .and_then(|s| s["role"].as_str().map(|x| x.to_string()))
-        }),
-        Err(e) => {
-            eprintln!("surface.list 실패: {e}");
+fn run_todo_path(role_opt: Option<String>, emit_decl: bool) -> i32 {
+    let foreign = role_opt.is_some();
+    let role = if let Some(role) = role_opt { role } else {
+        let Some(sref) = cys::env_compat(ENV_SURFACE_ID) else {
+            eprintln!("CYS_SURFACE_ID 없음 — 데몬 pane 안에서만 동작한다(다른 역할은 --role)");
             return 1;
+        };
+        let Some(my_sid) = parse_surface_ref(&sref) else { eprintln!("CYS_SURFACE_ID 파싱 실패"); return 1; };
+        match request("surface.list", json!({})).ok().and_then(|r| r["surfaces"].as_array()
+            .and_then(|arr| arr.iter().find(|s| s["surface_id"].as_u64() == Some(my_sid))
+                .and_then(|s| s["role"].as_str().map(str::to_string)))) {
+            Some(role) => role,
+            None => { eprintln!("이 surface에 역할 미등록"); return 1; }
         }
     };
-    let Some(role) = role else {
-        eprintln!("이 surface에 역할 미등록 — todo-path는 역할 노드(claim-role/launch-agent) 전용");
-        return 1;
-    };
-    let pack = cys::env_compat("CYS_PACK_DIR")
-        .map(std::path::PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".cys/pack")))
-        .unwrap_or_else(|| std::path::PathBuf::from(".cys/pack"));
-    let round = pack.join("round");
-    if let Err(e) = std::fs::create_dir_all(&round) {
-        eprintln!("round 디렉터리 생성 실패: {e}");
+    let pack = cys::pack::pack_dir();
+    let scope = pack.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    let valid = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'));
+    if !valid(&role) || !valid(scope) {
+        eprintln!("invalid TODO owner or scope");
         return 1;
     }
+    let declaration = format!("<!-- javis:todo v1 owner={role} scope={scope} status=active -->");
+    if emit_decl { println!("{declaration}"); return 0; }
+    let round = pack.join("round");
     let fname = format!("{}_TODO.md", role.to_uppercase().replace('-', "_"));
     let path = round.join(&fname);
-    if !path.exists() {
-        let _ = std::fs::write(&path, format!("# {role} TODO — 영속 todo (절대지침 7)\n\n"));
+    if !foreign {
+        if let Err(e) = std::fs::create_dir_all(&round) { eprintln!("round 디렉터리 생성 실패: {e}"); return 1; }
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => if let Err(e) = write!(file, "{declaration}\n\n# {role} TODO — 영속 todo\n\n") {
+                eprintln!("TODO 파일 작성 실패: {e}"); return 1;
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {},
+            Err(e) => { eprintln!("TODO 파일 생성 실패: {e}"); return 1; }
+        }
     }
     println!("{}", path.display());
     0
@@ -4806,8 +4975,8 @@ const REUSED_LAUNCH_WAIT_SECS: u64 = 120;
 /// boot/restore 는 이 값을 실패로 세지 않는다(2 = 주입 미완료와 구분).
 const LAUNCH_PENDING_RC: i32 = 3;
 
-fn run_launch_agent(role: &str, agent: &str, cwd: Option<String>) -> i32 {
-    run_launch_agent_opts(role, agent, cwd, false, None, false, None)
+fn run_launch_agent(role: &str, agent: &str, cwd: Option<String>, title: Option<String>, model: Option<String>) -> i32 {
+    run_launch_agent_opts(role, agent, cwd, false, None, false, None, title, model)
 }
 
 /// 멱등 create가 돌려준 좌석은 이 호출이 소유하지 않는다. 이전 launch-agent의 완료
@@ -4867,7 +5036,16 @@ fn run_launch_agent_opts(
     restore: bool,
     // (W1) restore가 topology에 기록된 원 계정 config_dir을 넘긴다(재해소 금지). 신규 기동은 None.
     config_dir_override: Option<String>,
+    title_override: Option<String>,
+    model_override: Option<String>,
 ) -> i32 {
+    if model_override.as_deref().is_some_and(|m| {
+        m.is_empty() || m.len() > 64 || !m.as_bytes()[0].is_ascii_alphanumeric()
+            || !m.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
+    }) {
+        eprintln!("error: invalid model slug");
+        return 2;
+    }
     // 절대지침(앵커1-b): 워커는 워크플로우 폴더에서 산다 — cwd 미지정이면 호출 폴더가
     // 워크플로우 폴더다 (데몬 기본값 home에 맡기지 않는다. 명시 --cwd는 그대로 우선).
     // 빈 문자열은 None으로 정규화 — 구버전 topology의 "cwd": "" 가 PTY 생성을 깨거나
@@ -4895,8 +5073,8 @@ fn run_launch_agent_opts(
             "la-{}-{}-{}",
             role,
             agent,
-            cwd.as_deref()
-                .unwrap_or("")
+            format!("{}|{}|{}", cwd.as_deref().unwrap_or(""),
+                title_override.as_deref().unwrap_or(""), model_override.as_deref().unwrap_or(""))
                 .chars()
                 .map(|c| c as u32)
                 .fold(0u64, |a, c| a.wrapping_mul(31).wrapping_add(c as u64))
@@ -4911,7 +5089,7 @@ fn run_launch_agent_opts(
             .collect();
         let r = request(
             "surface.create",
-            json!({"cwd": cwd, "title": workflow_title(role, agent, &cwd), "role": role,
+            json!({"cwd": cwd, "title": title_override.as_deref().unwrap_or(&workflow_title(role, agent, &cwd)), "role": role,
                    "rows": 40, "cols": 140, "idempotency_key": idem, "env": env_obj,
                    "launch_agent": true,
                    // (W1) restore 원값 전달(부재=신규는 데몬이 자기 env로 결정론 해소·기록).
@@ -4941,7 +5119,14 @@ fn run_launch_agent_opts(
             cwd.as_deref(),
             recorded_cfg.as_deref(),
             true,
+            model_override.as_deref(),
         )?;
+        if let Some(token) = launch_token {
+            if let Err(e) = request("directive.verify", json!({"surface_id": sid,
+                "verified": true, "reason": "directive injected and visible", "launch_token": token})) {
+                eprintln!("[launch-agent] directive.verify failed: {e}");
+            }
+        }
         match launch_token {
             Some(token) => {
                 request("surface.launch_complete", json!({"surface_id": sid, "launch_token": token}))?;
@@ -5268,6 +5453,9 @@ fn statusline_to_report_params(v: &Value) -> Value {
     if let Some(w) = ctx_window {
         params["ctx_window"] = json!(w);
     }
+    if let Some(path) = v.get("transcript_path").and_then(Value::as_str) {
+        params["session_file"] = json!(path);
+    }
     params
 }
 
@@ -5421,6 +5609,603 @@ fn request_on(socket: &std::path::Path, method: &str, params: Value) -> Result<V
     let stream = open_pipe_busy_retry(socket)
         .map_err(|e| format!("open {}: {e}", socket.display()))?;
     rpc_over(stream, method, params)
+}
+
+/// request_on의 타임아웃판 — connect 후 read/write 타임아웃을 강제한다. drain --verify fan-out은
+/// hung 소켓(데몬이 accept 후 무응답)에서 request_on의 무타임아웃 read가 영구 정지[A1-F2]하므로 필수.
+#[cfg(unix)]
+fn request_on_timeout(
+    socket: &std::path::Path,
+    method: &str,
+    params: Value,
+    timeout: std::time::Duration,
+) -> Result<Value, String> {
+    let stream = std::os::unix::net::UnixStream::connect(socket)
+        .map_err(|e| format!("connect {}: {e}", socket.display()))?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|e| e.to_string())?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|e| e.to_string())?;
+    rpc_over(stream, method, params)
+}
+#[cfg(windows)]
+fn request_on_timeout(
+    socket: &std::path::Path,
+    method: &str,
+    params: Value,
+    _timeout: std::time::Duration,
+) -> Result<Value, String> {
+    // Windows named pipe read 타임아웃은 별도 API(SetCommTimeouts/OVERLAPPED)라 현 1차 플랫폼(darwin/unix)
+    // 밖. busy-retry 경로(request_on)로 위임한다 — hung 방어는 unix에서 완전(범위 한정).
+    request_on(socket, method, params)
+}
+
+// ============================ drain --verify (기능 1) ============================
+// 재시작 전 전 노드의 증류 체크포인트(SESSION_STATE)를 nonce 마커로 결정론 확인한다. 무인자 plain drain은
+// best-effort 저장 신호(거동 불변)이고, --verify만 이 경로로 분기해 노드별 결과 JSON+exit code를 낸다.
+// ★설계 v3: 소켓별 병렬 fan-out + connect/read 타임아웃 + 전역 하드캡(=timeout+마진), nonce 마커
+// (HTML 주석형 — 체크박스/denylist 토큰 회피), 복원 중 가드, live_cwd canonical 경로(무음 폴백 금지).
+
+/// 체크포인트 nonce 마커 한 줄 — HTML 주석형 전용. 체크박스 문법(`- [ ]`) 금지(javis_report.py 진행% 오염),
+/// session-start.sh denylist 토큰 회피. 신선도 판정은 mtime이 아니라 이 nonce 존재/일치로 한다[A1-F5]
+/// (마커 쓰기가 mtime 소비자에게 '실작업'으로 오인되는 드리프트 회피).
+fn checkpoint_marker(nonce: &str, ts: u64) -> String {
+    format!("<!-- cys-checkpoint: {nonce} {ts} -->")
+}
+
+/// 파일에 지정 nonce의 체크포인트 마커가 존재하는가(존재/일치 — mtime 아님).
+/// ★[F2] 이 검증은 '마커 기입'만 확인한다 — 노드가 마커 앞에서 SESSION_STATE 내용을 실제로 최신화했는지는
+/// 보증하지 못한다(형식적 순응 한계). Saved 결과·UI 라벨은 그래서 "저장 확인"이 아니라 "마커 확인"으로
+/// 표기한다. 내용 최신성은 노드(LLM) 협조 책임이며, 이 도구가 낼 수 있는 결정론 신호는 마커 존재까지다.
+fn file_has_checkpoint_nonce(path: &std::path::Path, nonce: &str) -> bool {
+    let needle = format!("cys-checkpoint: {nonce}");
+    std::fs::read_to_string(path)
+        .map(|s| s.contains(&needle))
+        .unwrap_or(false)
+}
+
+/// 노드 canonical 체크포인트 파일 = <live_cwd>/_round/SESSION_STATE.md (단일 복원 진실).
+fn canonical_checkpoint_file(live_cwd: &str) -> std::path::PathBuf {
+    std::path::Path::new(live_cwd)
+        .join("_round")
+        .join("SESSION_STATE.md")
+}
+
+/// [F1] 소켓 경로별 안정 구별자(FNV-1a) — nonce에 섞어 크로스소켓(같은 sid) 충돌을 막는다. 결정론(런타임
+/// 무관)이라 같은 소켓은 항상 같은 값·다른 소켓은 사실상 다른 값(충돌 확률 무시 가능). 단일 run 내
+/// 유일성만 필요하므로 짧은 64bit로 충분.
+fn socket_discriminator(socket: &std::path::Path) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in socket.to_string_lossy().bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// 화면에서 '현재 입력창 영역'만 잘라낸다 — 마지막 입력 앵커(입력 박스 상단 '╭' 또는 줄 시작 '> ' 프롬프트)
+/// 이후 끝까지. 제출된 텍스트는 이 영역 **위**(스크롤백)에 렌더되고, 미제출 입력은 이 영역 **안**에 잔류한다.
+/// 앵커가 없으면(구/미지 TUI) 전체 화면을 반환한다(보수적 — 놓친 wedge=저장 유실이 과검출보다 위험).
+fn input_region(screen: &str) -> &str {
+    let box_top = screen.rfind('╭');
+    let prompt = if screen.starts_with("> ") {
+        Some(0)
+    } else {
+        screen.rfind("\n> ").map(|i| i + 1)
+    };
+    match box_top.into_iter().chain(prompt).max() {
+        Some(i) => &screen[i..],
+        None => screen,
+    }
+}
+
+/// 전달확정 게이트 판정 — 제출되면 주입 텍스트가 위로 스크롤되고 하단 입력창엔 스피너/빈 프롬프트만 남는다.
+/// Return 미발화(known bug)면 주입 텍스트가 입력창에 잔류하므로 sentinel이 입력창에 남는다.
+/// ★[F1] 실터미널은 긴 지시문을 물리적으로 줄바꿈(래핑)하고 입력창 하단에 테두리·단축키·토큰카운터 UI가
+///   따라붙어 sentinel이 최하단에서 밀리거나 물리 행 경계에서 쪼개진다 — 그래도 검출하려 공백·개행을
+///   제거하고 매치한다(구 tail-4행 스캔은 놓쳐 Return 재전송 미발화·저장 유실).
+/// ★[R2·R3 수리] 단 '화면 어디든'이 아니라 **입력창 영역(input_region)** 안에서만 매치한다 — 제출된
+///   스크롤백 에코(nonce 포함)를 wedge로 오검출하면 ①승인 프롬프트 대기 노드에 잉여 Return을 쏘아 의도외
+///   확정 위험(R2), ②delivery_failed↔timeout 라벨 변별 소실(R3). 미제출 입력은 입력창 영역에·제출 에코는
+///   그 위(스크롤백)에 있으므로 영역 한정 매치가 둘을 가른다. 앵커 부재 TUI는 전체 매치로 폴백(F1 보존).
+fn delivery_wedged(screen: &str, sentinel: &str) -> bool {
+    let region = input_region(screen);
+    let flat: String = region.chars().filter(|c| !c.is_whitespace()).collect();
+    let needle: String = sentinel.chars().filter(|c| !c.is_whitespace()).collect();
+    !needle.is_empty() && flat.contains(&needle)
+}
+
+/// 저장 지시문 생성 — ★[R1] 마커 기입을 '정지' 지시보다 **앞**(단계 ①)에 둔다. 지시문을 순서대로
+/// 리터럴 실행하는 노드가 '정지'를 먼저 만나면 이후 마커 기입을 건너뛰어 '저장했으나 timeout' 오판정이
+/// 났다(직전 F1 수리가 마커를 끝으로 옮기며 역전됨). F1의 wedge 검출은 위치 무관 전체 매치라 마커가
+/// 지시문 끝일 필요가 없으므로, 마커를 ①로 되돌려도 F1은 유지된다.
+/// ★[F4 위생] 기존 `<!-- cys-checkpoint:` 마커 라인은 지우고 새 1줄만 남기게 지시한다 — append-only면
+/// 재시작마다 죽은 마커가 무한 증식한다. 검증 로직은 무변경(새 nonce 존재 확인이라 옛 마커 잔존과 무관).
+fn drain_verify_instruction(marker: &str) -> String {
+    format!(
+        "[DRAIN-VERIFY] 재시작 전 체크포인트 검증. 지금 즉시 순서대로: ① _round/SESSION_STATE.md에 현재 작업 상태·미해결 게이트·다음 액션을 최신화해 저장하고, 그 파일에 이미 있는 `<!-- cys-checkpoint:` 로 시작하는 옛 마커 라인은 모두 삭제한 뒤, 맨 끝에 정확히 이 한 줄만 추가하라(문자 그대로·수정 금지): {marker} ② ①의 저장·기입을 모두 마친 뒤에 작업을 멈추고 재시작·복원을 기다려라(승인 프롬프트 대기 중이면 이 메시지는 무시하라)."
+    )
+}
+
+/// phoenix 복원이 이 소켓의 이 역할에 대해 진행 중인가 — 진행 중이면 Some(사유), 아니면 None.
+/// 저널 = <소켓 부모 디렉토리(realpath)>/phoenix/journal-*.json
+/// (phoenix.py state_dir_for=realpath(dirname(socket))[:389] 정합 — ★[F4] canonicalize 적용, 실패 시 원경로).
+/// 판정: 신선한(mtime 최근) 저널에서 대상 역할 stage가 기록됐고 g2_ack 미완료 → 복원 중(해당 role skip).
+/// ★[F2 수리] fail-CLOSED: 신선한 저널이 존재하는데 판독/파싱 실패, 또는 기대 스키마(roles 객체·해당
+///   role의 stages 객체) 부재면 '복원 중'으로 취급한다 — pack과 바이너리 릴리스 라인이 달라 저널 스키마
+///   스큐가 실재 위험이고, 각성 파손(디렉티브 재주입 × "작업 중단" 주입 교차)은 비가역이라 안전 방향=주입
+///   보류. 단 저널이 대상 role을 언급하지 않으면 이 role의 복원이 아니므로 다른 저널을 계속 본다(무관
+///   role over-skip 금지). 저널 파일 자체가 없으면(디렉토리 부재·비-저널) None(복원 아님 — 무해).
+/// ★[F3] EPOCH_GATE divergence: phoenix stage_done(javis_phoenix.py:1283-1296)은 완료 마킹의 epoch가
+///   현재 세대와 일치할 때만 done으로 인정한다(재부팅 넘긴 stale done 무효화). 이 가드는 phoenix 런타임
+///   epoch(_ACTIVE_EPOCH)를 알 수 없어 epoch 대조 없이 done 표기만 본다. 방향 차이: ①started&&!g2_ack
+///   분기는 over-skip(안전) ②g2_ack done 분기의 stale-epoch under-skip 위험은 mtime 신선도 창(≤RECENCY)이
+///   흡수한다 — stale-epoch done은 이전 세대(재부팅 전) 저널이라 대개 창 밖(무시)이므로 실질 발산 없음.
+fn restore_guard_reason(socket: &std::path::Path, role: &str) -> Option<String> {
+    const RESTORE_RECENCY_SECS: u64 = 300;
+    let dir = socket.parent()?;
+    // [F4] phoenix state_dir_for와 정렬 — 심링크 소켓 디렉토리 대응(실패 시 원경로 폴백).
+    let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let phoenix = dir.join("phoenix");
+    let entries = std::fs::read_dir(&phoenix).ok()?; // 디렉토리 부재 = 저널 없음 = 복원 아님(None)
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !(name.starts_with("journal-") && name.ends_with(".json")) {
+            continue;
+        }
+        let fresh = e
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.elapsed().ok())
+            .map(|d| d.as_secs() <= RESTORE_RECENCY_SECS)
+            .unwrap_or(false);
+        if !fresh {
+            continue; // stale 저널(오래된 실패 복원)은 영구 차단 방지 위해 무시
+        }
+        // [F2] 신선한 저널 — 여기서부터 판독/파싱/스키마 실패는 fail-CLOSED(복원 중 취급).
+        // ★[R4 INFO] 판독·파싱 불능인 신선 저널은 그것이 '이 role'의 복원인지조차 알 수 없다 — 그래도
+        //   보수적으로 skip한다(무관 role까지 over-skip 가능). 근거: over-skip의 대가는 verify 1회 보류(그
+        //   노드는 이번 재시작 창에서 저장 미검증으로 표기)뿐이나, under-skip은 복원 중 노드에 "작업 중단"을
+        //   주입해 각성을 비가역 파손시킨다 — 비대칭 위험이라 안전 방향(skip)을 택한다. 코드 변경 불요.
+        let Ok(txt) = std::fs::read_to_string(e.path()) else {
+            return Some(format!("신선한 저널 판독 실패({name}) — fail-closed(복원 중 취급)"));
+        };
+        let Ok(j) = serde_json::from_str::<Value>(&txt) else {
+            return Some(format!(
+                "신선한 저널 파손(JSON 파싱 실패, {name}) — fail-closed(복원 중 취급)"
+            ));
+        };
+        if !j["roles"].is_object() {
+            return Some(format!(
+                "신선한 저널 스키마 이상(roles 비객체, {name}) — fail-closed(복원 중 취급)"
+            ));
+        }
+        let role_entry = &j["roles"][role];
+        if role_entry.is_null() {
+            continue; // 이 저널은 대상 role 무관 — over-skip 금지, 다음 저널 확인
+        }
+        let stages = &role_entry["stages"];
+        if !stages.is_object() {
+            return Some(format!(
+                "신선한 저널 role '{role}' stages 스키마 이상({name}) — fail-closed(복원 중 취급)"
+            ));
+        }
+        let done = |s: &str| stages[s]["done"].as_bool() == Some(true);
+        let started = ["spawn", "ready", "resume", "reinject"]
+            .iter()
+            .any(|s| done(s));
+        if started && !done("g2_ack") {
+            return Some(format!("phoenix 복원 진행 중(stage<g2_ack, {name})"));
+        }
+    }
+    None
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum VerifyOutcome {
+    Saved,
+    Timeout,
+    DeliveryFailed,
+    Unverifiable,
+    SkippedRestoring,
+}
+impl VerifyOutcome {
+    fn as_str(&self) -> &'static str {
+        match self {
+            VerifyOutcome::Saved => "saved",
+            VerifyOutcome::Timeout => "timeout",
+            VerifyOutcome::DeliveryFailed => "delivery_failed",
+            VerifyOutcome::Unverifiable => "unverifiable",
+            VerifyOutcome::SkippedRestoring => "skipped_restoring",
+        }
+    }
+}
+
+/// verify 대상 1노드 — 소켓별 org.status에서 추출(surface_id는 데몬별 네임스페이스라 socket과 쌍으로 보유).
+#[derive(Clone)]
+struct VerifyTarget {
+    socket: std::path::PathBuf,
+    dept: String,
+    display: String,
+    surface_id: u64,
+    surface_ref: String,
+    role: String,
+    live_cwd: Option<String>,
+    pending_undelivered: u64,
+}
+
+/// drain --verify 소켓 I/O 추상화 — 프로덕션은 request_on_timeout, 테스트는 노드 상태(saved/no-save/
+/// wedge/hung)를 모사하는 fake로 주입한다(producer≠evaluator 검증 용이).
+trait VerifyIo {
+    fn inject(
+        &self,
+        socket: &std::path::Path,
+        sid: u64,
+        text: &str,
+        timeout: std::time::Duration,
+    ) -> Result<(), String>;
+    fn read_screen(
+        &self,
+        socket: &std::path::Path,
+        sid: u64,
+        lines: u64,
+        timeout: std::time::Duration,
+    ) -> Result<String, String>;
+    fn send_return(
+        &self,
+        socket: &std::path::Path,
+        sid: u64,
+        timeout: std::time::Duration,
+    ) -> Result<(), String>;
+}
+
+/// 소켓 지정 주입(inject_text의 socket+timeout판): bracketed paste → 0.8s → Return. 기본 소켓 하드바인딩인
+/// inject_text와 달리 부서 소켓 대상[A1-F1] · request_on_timeout으로 hung 방어.
+fn inject_text_on(
+    socket: &std::path::Path,
+    sid: u64,
+    text: &str,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    let wrapped = format!("\x1b[200~{text}\x1b[201~");
+    request_on_timeout(
+        socket,
+        "surface.send_text",
+        json!({"surface_id": sid, "text": wrapped, "quiet": true, "authoritative": true}),
+        timeout,
+    )?;
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    request_on_timeout(
+        socket,
+        "surface.send_key",
+        json!({"surface_id": sid, "key": "Return", "authoritative": true}),
+        timeout,
+    )?;
+    Ok(())
+}
+
+struct RealVerifyIo;
+impl VerifyIo for RealVerifyIo {
+    fn inject(
+        &self,
+        socket: &std::path::Path,
+        sid: u64,
+        text: &str,
+        timeout: std::time::Duration,
+    ) -> Result<(), String> {
+        inject_text_on(socket, sid, text, timeout)
+    }
+    fn read_screen(
+        &self,
+        socket: &std::path::Path,
+        sid: u64,
+        lines: u64,
+        timeout: std::time::Duration,
+    ) -> Result<String, String> {
+        request_on_timeout(
+            socket,
+            "surface.read_text",
+            json!({"surface_id": sid, "lines": lines}),
+            timeout,
+        )
+        .map(|r| r["text"].as_str().unwrap_or("").to_string())
+    }
+    fn send_return(
+        &self,
+        socket: &std::path::Path,
+        sid: u64,
+        timeout: std::time::Duration,
+    ) -> Result<(), String> {
+        request_on_timeout(
+            socket,
+            "surface.send_key",
+            json!({"surface_id": sid, "key": "Return", "authoritative": true}),
+            timeout,
+        )
+        .map(|_| ())
+    }
+}
+
+/// 1노드 검증: 복원 가드 → canonical 경로 → 저장 지시 주입 → 전달확정 게이트 → nonce 파일 폴링.
+/// 반환=(결과, 상세). 소켓 hung은 timeout(파일 폴링은 로컬 FS라 소켓 무관)·미제출 wedge는 delivery_failed로 구분.
+fn verify_one_node(
+    io: &dyn VerifyIo,
+    t: &VerifyTarget,
+    nonce_prefix: &str,
+    timeout: std::time::Duration,
+    now: u64,
+) -> (VerifyOutcome, String) {
+    use std::time::{Duration, Instant};
+    // 1) 복원 중 가드 — 각성 파손 방지(디렉티브 재주입과 "작업 중단"의 교차 차단). 사유를 JSON에 전달.
+    if let Some(reason) = restore_guard_reason(&t.socket, &t.role) {
+        return (VerifyOutcome::SkippedRestoring, reason);
+    }
+    // 2) canonical 경로 — live_cwd 미제공(구버전 부서 데몬)이면 검증불가(무음 cwd 폴백 금지)[A1-F6]
+    let Some(cwd) = t.live_cwd.as_deref() else {
+        return (
+            VerifyOutcome::Unverifiable,
+            "live_cwd 미제공(구버전 데몬) — 검증불가(무음 폴백 금지)".into(),
+        );
+    };
+    let file = canonical_checkpoint_file(cwd);
+    // ★[F1 수리] 크로스소켓 nonce 충돌 방지: surface_id는 데몬별 네임스페이스라 서로 다른 소켓의 두 노드가
+    // 같은 sid + 같은 live_cwd(전 부서 cwd 수렴 실측 있음)면 nonce·파일이 동일해져, 주입 안 한 노드가 타
+    // 노드 마커를 자기 것으로 오인해 Saved 위양성(→재시작 체크포인트 유실)이 났다. results가 idx 키잉으로
+    // sid 충돌을 이미 회피했는데 nonce만 sid에 남아 불일치였다. 소켓 안정 구별자를 nonce에 추가해 정합화.
+    let nonce = format!(
+        "{nonce_prefix}-{:x}-{}",
+        socket_discriminator(&t.socket),
+        t.surface_id
+    );
+    let marker = checkpoint_marker(&nonce, now);
+    // 이미 이 nonce가 있으면 즉시 통과(프로세스 내 재호출 idempotent)
+    if file_has_checkpoint_nonce(&file, &nonce) {
+        return (
+            VerifyOutcome::Saved,
+            format!("nonce 마커 확인: {}", file.display()),
+        );
+    }
+    // 3) 저장 지시 주입 — nonce 마커 기입 + 작업 중단.
+    let instr = drain_verify_instruction(&marker);
+    let io_to = std::cmp::min(timeout, Duration::from_secs(8));
+    if io.inject(&t.socket, t.surface_id, &instr, io_to).is_err() {
+        // 소켓 hung(RPC 타임아웃) — delivery_failed(노드 wedge)와 구분해 timeout으로 분류
+        return (
+            VerifyOutcome::Timeout,
+            "소켓 hung — 저장 지시 RPC 타임아웃(전역 캡 내)".into(),
+        );
+    }
+    // 4) 전달확정 게이트 — 빈 프롬프트+스피너 확인, wedge(하단 입력창 잔류)면 Return 재전송
+    std::thread::sleep(Duration::from_millis(600));
+    // ★[F1] 24행 읽기 — 래핑된 지시문 전체 + 하단 입력창 UI 행을 포괄(구 6행은 래핑 시 sentinel 유실).
+    let mut wedged = io
+        .read_screen(&t.socket, t.surface_id, 24, io_to)
+        .map(|s| delivery_wedged(&s, &nonce))
+        .unwrap_or(false);
+    if wedged {
+        let _ = io.send_return(&t.socket, t.surface_id, io_to);
+        std::thread::sleep(Duration::from_millis(800));
+        wedged = io
+            .read_screen(&t.socket, t.surface_id, 24, io_to)
+            .map(|s| delivery_wedged(&s, &nonce))
+            .unwrap_or(wedged);
+    }
+    // 5) nonce 파일 폴링(로컬 FS — 소켓 hung과 무관하게 저장 검출)
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if file_has_checkpoint_nonce(&file, &nonce) {
+            return (
+                VerifyOutcome::Saved,
+                format!("nonce 마커 확인: {}", file.display()),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(400));
+    }
+    if wedged {
+        (
+            VerifyOutcome::DeliveryFailed,
+            "입력 미제출(wedge) — Return 재전송에도 저장 미검출".into(),
+        )
+    } else {
+        (
+            VerifyOutcome::Timeout,
+            format!(
+                "{}s 내 nonce 마커 미검출: {}",
+                timeout.as_secs(),
+                file.display()
+            ),
+        )
+    }
+}
+
+/// 소켓별 병렬 fan-out — 총 소요 ≈ 1×timeout(직렬 누적 아님). 노드별 detached 스레드로 verify를 스폰하고
+/// 전역 하드캡(=timeout+마진) 내 결과를 수집한다. 미도착 노드는 timeout으로 분류(캡 초과=hung 방어).
+fn drain_verify_fanout(
+    io: std::sync::Arc<dyn VerifyIo + Send + Sync>,
+    targets: Vec<VerifyTarget>,
+    timeout: std::time::Duration,
+    now: u64,
+) -> Value {
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+    let global_cap = timeout + Duration::from_secs(5);
+    let nonce_prefix = format!("{now}-{}", std::process::id());
+    let (tx, rx) = std::sync::mpsc::channel::<(usize, VerifyOutcome, String)>();
+    let total = targets.len();
+    // surface_id는 데몬별 네임스페이스라 소켓 간 충돌 가능 → 인덱스로 키잉(nonce도 [F1] 소켓 구별자로 정합).
+    let mut meta: HashMap<usize, VerifyTarget> = HashMap::new();
+    for (idx, t) in targets.iter().enumerate() {
+        meta.insert(idx, t.clone());
+    }
+    for (idx, t) in targets.into_iter().enumerate() {
+        let tx = tx.clone();
+        let io = io.clone();
+        let np = nonce_prefix.clone();
+        std::thread::spawn(move || {
+            let (o, d) = verify_one_node(io.as_ref(), &t, &np, timeout, now);
+            let _ = tx.send((idx, o, d));
+        });
+    }
+    drop(tx);
+    let deadline = Instant::now() + global_cap;
+    let mut results: HashMap<usize, (VerifyOutcome, String)> = HashMap::new();
+    while results.len() < total {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match rx.recv_timeout(remaining) {
+            Ok((idx, o, d)) => {
+                results.insert(idx, (o, d));
+            }
+            Err(_) => break,
+        }
+    }
+    // 결과 JSON(원래 순서 안정) — 미도착 노드는 전역 캡 초과 timeout.
+    let mut nodes: Vec<Value> = Vec::new();
+    let mut pending_loss: Vec<Value> = Vec::new();
+    let (mut c_saved, mut c_timeout, mut c_deliv, mut c_unver, mut c_skip) = (0, 0, 0, 0, 0);
+    let mut all_saved = true;
+    for idx in 0..total {
+        let t = &meta[&idx];
+        let (outcome, detail) = results.get(&idx).cloned().unwrap_or((
+            VerifyOutcome::Timeout,
+            "전역 하드캡 초과 — 결과 미도착(timeout)".into(),
+        ));
+        match outcome {
+            VerifyOutcome::Saved => c_saved += 1,
+            VerifyOutcome::Timeout => c_timeout += 1,
+            VerifyOutcome::DeliveryFailed => c_deliv += 1,
+            VerifyOutcome::Unverifiable => c_unver += 1,
+            VerifyOutcome::SkippedRestoring => c_skip += 1,
+        }
+        if outcome != VerifyOutcome::Saved {
+            all_saved = false;
+        }
+        if t.pending_undelivered > 0 {
+            pending_loss.push(json!({
+                "role": t.role, "surface": t.surface_ref, "dept": t.dept,
+                "pending_undelivered": t.pending_undelivered,
+            }));
+        }
+        nodes.push(json!({
+            "dept": t.dept,
+            "department": t.display,
+            "role": t.role,
+            "surface": t.surface_ref,
+            "socket": t.socket.to_string_lossy(),
+            "live_cwd": t.live_cwd,
+            "checkpoint_file": t.live_cwd.as_deref().map(|c| canonical_checkpoint_file(c).to_string_lossy().into_owned()),
+            "outcome": outcome.as_str(),
+            "detail": detail,
+            "pending_undelivered": t.pending_undelivered,
+        }));
+    }
+    json!({
+        "mode": "drain-verify",
+        "timeout_secs": timeout.as_secs(),
+        "total": total,
+        "nodes": nodes,
+        "summary": {
+            "saved": c_saved, "timeout": c_timeout, "delivery_failed": c_deliv,
+            "unverifiable": c_unver, "skipped_restoring": c_skip,
+        },
+        // ★재시작 창 큐 보존[A3-F3]: 인메모리 pending_queue는 데몬 재시작에 소실된다(handlers.rs). 디스크
+        // flush는 데몬 RPC가 필요해(handlers 무접촉 목표) 대신 유실 예정분을 정직하게 가시화한다(무음 유실 금지).
+        "pending_loss_warning": pending_loss,
+        "all_saved": all_saved,
+    })
+}
+
+/// depts.json + 본부 소켓을 순회해 verify 대상(살아있는 AI 역할 노드)을 수집한다(run_fleet 소스 동형).
+/// 도달불가(다운) 부서·본부는 스킵(정상 정보). live_cwd는 org.status의 노드별 cd 추적값을 그대로 쓴다.
+fn drain_verify_targets() -> Vec<VerifyTarget> {
+    let home = cys::home_dir().to_string_lossy().into_owned();
+    let mut sockets: Vec<(std::path::PathBuf, String, String)> =
+        vec![(socket_path(), "main".to_string(), "본부 · CEO".to_string())];
+    let reg = std::env::var("CYS_DEPTS_JSON")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&home).join(".cys/depts.json"));
+    if let Ok(s) = std::fs::read_to_string(&reg) {
+        if let Ok(v) = serde_json::from_str::<Value>(&s) {
+            if let Some(depts) = v["depts"].as_object() {
+                for (name, meta) in depts {
+                    let sock = meta["socket"]
+                        .as_str()
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|| cys::dept_socket_path(name));
+                    let disp = meta["display_name"].as_str().unwrap_or(name).to_string();
+                    sockets.push((sock, name.clone(), disp));
+                }
+            }
+        }
+    }
+    let mut targets = Vec::new();
+    for (sock, dept, disp) in sockets {
+        let r = match request_on_timeout(
+            &sock,
+            "org.status",
+            json!({}),
+            std::time::Duration::from_secs(4),
+        ) {
+            Ok(r) => r,
+            Err(_) => continue, // 다운·전이 중 소켓 스킵(무해)
+        };
+        for s in r["surfaces"].as_array().cloned().unwrap_or_default() {
+            if s["exited"].as_bool() == Some(true) {
+                continue;
+            }
+            let Some(role) = s["role"].as_str() else {
+                continue;
+            };
+            if s["agent"].is_null() {
+                continue; // AI 노드만(agent 메타 존재)
+            }
+            let Some(sid) = s["surface_id"].as_u64() else {
+                continue;
+            };
+            targets.push(VerifyTarget {
+                socket: sock.clone(),
+                dept: dept.clone(),
+                display: disp.clone(),
+                surface_id: sid,
+                surface_ref: s["surface_ref"].as_str().unwrap_or("").to_string(),
+                role: role.to_string(),
+                live_cwd: s["live_cwd"].as_str().map(String::from),
+                pending_undelivered: s["queue_depth"].as_u64().unwrap_or(0),
+            });
+        }
+    }
+    targets
+}
+
+/// `cys drain --verify` 진입점 — 결정론 JSON을 stdout에, exit code로 전원 저장 여부를 반환한다
+/// (전원 saved=0, 아니면 1). 0-노드는 우아한 no-op(exit 0)[A3-F5].
+fn run_drain_verify(timeout: u64) -> i32 {
+    // 백스톱 하드 워치독 — 메인 로직이 어떤 이유로든 멈춰도 프로세스가 영구 정지하지 않게(plain drain 12s 패턴).
+    // fan-out은 timeout+5s 안에 반환하므로 정상 경로에선 절대 발화하지 않는다.
+    let cap = timeout + 10;
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(cap));
+        std::process::exit(3);
+    });
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let targets = drain_verify_targets();
+    let io: std::sync::Arc<dyn VerifyIo + Send + Sync> = std::sync::Arc::new(RealVerifyIo);
+    let report = drain_verify_fanout(io, targets, std::time::Duration::from_secs(timeout), now);
+    let all_saved = report["all_saved"].as_bool() == Some(true);
+    println!("{}", serde_json::to_string_pretty(&report).unwrap());
+    if all_saved {
+        0
+    } else {
+        1
+    }
 }
 
 /// Tasks Control Center(CLI) — depts.json을 읽어 본부+각 부서 소켓에 org.status를 순회 집계한다.
@@ -5855,7 +6640,7 @@ fn run_cycle_agent(
 }
 
 /// T2-5 노드 복구: 죽은 에이전트를 같은 surface에서 재기동 + 지침 재주입 + 복원 포인터
-fn run_node_recover(surface: Option<String>, role: Option<String>) -> i32 {
+fn run_node_recover(surface: Option<String>, role: Option<String>, resume: bool) -> i32 {
     let result = (|| -> Result<(), String> {
         let sid = resolve_role_or_surface(&role, &surface)?;
         let entry = surface_entry(sid)?;
@@ -5899,12 +6684,13 @@ fn run_node_recover(surface: Option<String>, role: Option<String>) -> i32 {
             &role_name,
             &agent,
             &spec,
-            true,
+            resume,
             sess.as_deref(),
             false,
             rec_cwd.as_deref(),
             rec_cfg.as_deref(),
             false,
+            None,
         )
         .map_err(|e| e.to_string())?;
         inject_text(sid, "[RECOVER] 너는 방금 재기동되었다. _round/SESSION_STATE.md와 자기 TODO 파일을 읽어 작업 기억을 복원한 뒤 master에게 복귀를 1줄 push로 보고하라. 작업 재개는 master 지시를 따른다.")?;
@@ -5926,7 +6712,7 @@ fn restore_surface_label(sid: u64, entry: &Value) -> Result<(), String> {
     request("surface.set_label", json!({"surface_id": sid, "label": label})).map(|_| ())
 }
 
-fn run_restore(cwd: Option<String>, include_master: bool, no_resume: bool) -> i32 {
+fn run_restore(cwd: Option<String>, include_master: bool, resume: bool) -> i32 {
     let result = (|| -> Result<(usize, usize), String> {
         let topo = request("system.topology", json!({}))?;
         let live: std::collections::HashSet<String> = topo["live"]
@@ -5981,7 +6767,7 @@ fn run_restore(cwd: Option<String>, include_master: bool, no_resume: bool) -> i3
             let sess = entry["session_id"].as_str().map(String::from);
             // (W1) topology에 기록된 원 계정 config_dir을 넘긴다(구 topology=None → 기존 템플릿 동작).
             let cfg = entry["claude_config_dir"].as_str().map(String::from);
-            let rc = run_launch_agent_opts(role, agent, target_cwd, !no_resume, sess, true, cfg);
+            let rc = run_launch_agent_opts(role, agent, target_cwd, resume, sess, true, cfg, None, None);
             if rc == LAUNCH_PENDING_RC {
                 println!("· {role}: 다른 호출이 기동 중인 좌석을 재사용 — 완료를 기다리지 못함(실패로 세지 않음)");
             } else if rc == 0 {
@@ -7529,6 +8315,141 @@ fn skillscan_warn(skill_dir: &std::path::Path) {
     }
 }
 
+fn pack_rollback_path(root: &std::path::Path, rel: &str) -> Option<std::path::PathBuf> {
+    use std::path::Component;
+    let relative = std::path::Path::new(rel);
+    if rel.is_empty() || !relative.components().all(|c| matches!(c, Component::Normal(_))) {
+        return None;
+    }
+    let mut path = root.to_path_buf();
+    for component in relative.components() {
+        path.push(component);
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => return None,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+            Err(_) => return None,
+            _ => {},
+        }
+    }
+    Some(path)
+}
+
+fn run_pack_rollback(file: Option<String>, yes: bool) -> i32 {
+    let dir = cys::pack::pack_dir();
+    let prev = cys::pack::pack_prev_dir(&dir);
+    if !prev.is_dir() {
+        eprintln!("보존본 없음({}) — .prev 는 설치·업데이트가 1회 이상 실행된 뒤 생깁니다.", prev.display());
+        return 1;
+    }
+    let prev_ver = std::fs::read_to_string(prev.join(".pack-version")).unwrap_or_else(|_| "?".into());
+    let cur_ver = std::fs::read_to_string(dir.join(".pack-version")).unwrap_or_else(|_| "?".into());
+    let Some(rel) = file else {
+        // 목록 모드: .prev 와 현재 팩에서 내용이 다른 파일(복원 후보)을 표시. 읽기 전용.
+        println!(
+            "보존본: {} (팩 {} → 현재 {})\n차이 파일(복원 후보):",
+            prev.display(), prev_ver.trim(), cur_ver.trim()
+        );
+        let mut count = 0usize;
+        let mut stack = vec![prev.clone()];
+        while let Some(d) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&d) else { continue };
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if entry.file_type().map(|t| t.is_symlink()).unwrap_or(true) {
+                    continue;
+                }
+                if p.is_dir() {
+                    // 내부 관리 디렉터리(.pristine)는 복원 대상 아님.
+                    if p.file_name().and_then(|n| n.to_str()) == Some(".pristine") {
+                        continue;
+                    }
+                    stack.push(p);
+                    continue;
+                }
+                let Ok(rel_path) = p.strip_prefix(&prev) else { continue };
+                let rel_s = rel_path.to_string_lossy().replace('\\', "/");
+                // 관리 파일·병치 파일은 후보에서 제외(사용자 멘탈모델 = 팩 본 파일).
+                if rel_s.starts_with('.') || rel_s.ends_with(".user") || rel_s.ends_with(".new") {
+                    continue;
+                }
+                let prev_bytes = std::fs::read(&p).unwrap_or_default();
+                let cur_bytes = std::fs::read(dir.join(rel_path)).unwrap_or_default();
+                if prev_bytes != cur_bytes {
+                    let own = cys::pack::ownership_name(&rel_s);
+                    println!("  [{own}] {rel_s}");
+                    count += 1;
+                    if count >= 200 {
+                        println!("  … (200건 초과 — 생략)");
+                        return 0;
+                    }
+                }
+            }
+        }
+        if count == 0 {
+            println!("  (없음 — 보존본과 현재 팩이 동일)");
+        } else {
+            println!("복원: cys pack-rollback --file <경로>");
+        }
+        return 0;
+    };
+    let Some(src) = pack_rollback_path(&prev, &rel) else {
+        eprintln!("잘못된 경로: {rel}");
+        return 1;
+    };
+    let Some(dest) = pack_rollback_path(&dir, &rel) else {
+        eprintln!("잘못된 대상 경로: {rel}");
+        return 1;
+    };
+    let own = cys::pack::ownership_name(&rel);
+    if own == "seed-once" {
+        eprintln!(
+            "⛔ '{rel}' 은 런타임 상태(seed-once) — 롤백이 업데이트 후 쌓인 기억·상태를 지우는 \
+             역방향 소실을 만들므로 파일 단위 복원 대상에서 제외합니다."
+        );
+        return 1;
+    }
+    let content = match std::fs::read(&src) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("보존본에 '{rel}' 없음({e}) — cys pack-rollback 으로 후보 목록 확인");
+            return 1;
+        }
+    };
+    let confirm = |prompt: &str| -> bool {
+        if yes {
+            return true;
+        }
+        print!("{prompt} [y/N] ");
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        let _ = std::io::stdin().read_line(&mut line);
+        matches!(line.trim(), "y" | "Y" | "yes")
+    };
+    if !confirm(&format!("'{rel}' 을 보존본(팩 {})으로 복원?", prev_ver.trim())) {
+        println!("취소됨");
+        return 0;
+    }
+    if let Some(parent) = dest.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("복원 대상 디렉터리 생성 실패: {e}");
+            return 1;
+        }
+    }
+    if let Err(e) = cys::pack::write_atomic(&dest, &content) {
+        eprintln!("복원 쓰기 실패: {e}");
+        return 1;
+    }
+    match own {
+        "user" => println!("✅ {rel} 복원(user 소유 — 업데이트가 덮지 않으므로 이대로 유지됩니다)"),
+        _ => println!(
+            "✅ {rel} 복원(system 소유 — 다음 설치 스윕에서 vendor 본으로 재치유될 수 있습니다. \
+             수정본이 {rel}.user 로 보존되면 cys pack-merge로 검토하세요)"
+        ),
+    }
+    0
+}
+
 fn run_pack_update(from: Option<String>, manifest_url: Option<String>, dry_run: bool) -> i32 {
     // 성공 경로는 종료코드(i32)를 싣는다: 0=완전 성공, EXIT_REINJECT_DEGRADED=디스크는 반영됐으나
     // 라이브 노드 reinject 실패(성공 침묵 포장 금지). 에러 경로(Err)는 외부에서 1로 매핑.
@@ -7825,6 +8746,88 @@ extern "C" fn scoped_cleanup_handler(sig: libc::c_int) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn drain_and_rollback_cli_contract() {
+        use super::*;
+        assert!(matches!(Cli::try_parse_from(["cys", "drain"]).unwrap().command,
+            Command::Drain { verify: false, timeout: 20 }));
+        assert!(matches!(Cli::try_parse_from(["cys", "drain", "--verify", "--timeout", "7"]).unwrap().command,
+            Command::Drain { verify: true, timeout: 7 }));
+        assert!(matches!(Cli::try_parse_from(["cys", "pack-rollback", "--file", "README.md", "--yes"]).unwrap().command,
+            Command::PackRollback { file: Some(ref file), yes: true } if file == "README.md"));
+    }
+
+    #[test]
+    fn pack_rollback_restores_only_requested_file() {
+        use super::*;
+        let base = std::env::temp_dir().join(format!("cys-rollback-{}", std::process::id()));
+        let pack = base.join("pack");
+        let prev = cys::pack::pack_prev_dir(&pack);
+        std::fs::create_dir_all(&pack).unwrap();
+        std::fs::create_dir_all(&prev).unwrap();
+        let _dirs = cys::pack::override_dirs_for_thread(&pack, base.join("config"));
+        std::fs::write(pack.join("README.md"), "NEW").unwrap();
+        std::fs::write(pack.join("untouched.txt"), "KEEP").unwrap();
+        std::fs::write(prev.join("README.md"), "OLD").unwrap();
+        assert_eq!(run_pack_rollback(Some("README.md".into()), true), 0);
+        assert_eq!(std::fs::read_to_string(pack.join("README.md")).unwrap(), "OLD");
+        assert_eq!(std::fs::read_to_string(pack.join("untouched.txt")).unwrap(), "KEEP");
+        assert_eq!(run_pack_rollback(Some("../escape".into()), true), 1);
+        assert!(pack_rollback_path(&pack, "../escape").is_none());
+        assert!(pack_rollback_path(&pack, "/tmp/escape").is_none());
+        #[cfg(unix)] {
+            std::os::unix::fs::symlink(&base, pack.join("outside")).unwrap();
+            assert!(pack_rollback_path(&pack, "outside/file.txt").is_none());
+        }
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn drain_verify_zero_targets_is_success() {
+        use super::*;
+        let report = drain_verify_fanout(std::sync::Arc::new(RealVerifyIo), vec![],
+            std::time::Duration::from_secs(1), 100);
+        assert_eq!(report["all_saved"], true);
+        assert_eq!(report["total"], 0);
+    }
+
+    #[test]
+    fn drain_verify_requires_fresh_checkpoint_marker() {
+        use super::*;
+        struct CheckpointIo(std::path::PathBuf, bool);
+        impl VerifyIo for CheckpointIo {
+            fn inject(&self, _socket: &std::path::Path, _sid: u64, text: &str,
+                _timeout: std::time::Duration) -> Result<(), String> {
+                if self.1 {
+                    let start = text.find("<!-- cys-checkpoint:").unwrap();
+                    let end = text[start..].find("-->").unwrap() + start + 3;
+                    std::fs::write(&self.0, &text[start..end]).unwrap();
+                }
+                Ok(())
+            }
+            fn read_screen(&self, _socket: &std::path::Path, _sid: u64, _lines: u64,
+                _timeout: std::time::Duration) -> Result<String, String> { Ok("> ".into()) }
+            fn send_return(&self, _socket: &std::path::Path, _sid: u64,
+                _timeout: std::time::Duration) -> Result<(), String> { Ok(()) }
+        }
+        let base = std::env::temp_dir().join(format!("cys-drain-verify-{}", std::process::id()));
+        let round = base.join("_round");
+        std::fs::create_dir_all(&round).unwrap();
+        let file = round.join("SESSION_STATE.md");
+        let target = VerifyTarget { socket: base.join("cys.sock"), dept: "main".into(),
+            display: "main".into(), surface_id: 7, surface_ref: "surface:7".into(),
+            role: "worker".into(), live_cwd: Some(base.to_string_lossy().into_owned()),
+            pending_undelivered: 0 };
+        let saved = verify_one_node(&CheckpointIo(file.clone(), true), &target, "run1",
+            std::time::Duration::from_secs(1), 100);
+        assert_eq!(saved.0, VerifyOutcome::Saved);
+        std::fs::remove_file(&file).unwrap();
+        let missing = verify_one_node(&CheckpointIo(file, false), &target, "run2",
+            std::time::Duration::from_secs(1), 100);
+        assert_eq!(missing.0, VerifyOutcome::Timeout);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
     #[test]
     fn run_scoped_flag_accepts_the_existing_scoped_path() {
         use super::*;
@@ -9143,6 +10146,49 @@ mod tests {
         assert_eq!(p["ctx_window"].as_u64(), Some(1000000));
         assert_eq!(p["rate"].as_array().unwrap().len(), 0);
         assert!(p.get("ctx_tokens").is_none(), "current_usage·total 없으면 ctx_tokens 생략");
+        assert!(p.get("session_file").is_none());
+    }
+
+    #[test]
+    fn statusline_transcript_path_reaches_usage_report() {
+        let p = statusline_to_report_params(&json!({
+            "transcript_path": "/tmp/profile/projects/demo/session.jsonl",
+            "rate_limits": {"five_hour": {"used_percentage": 35.0}}
+        }));
+        assert_eq!(p["session_file"], "/tmp/profile/projects/demo/session.jsonl");
+    }
+
+    #[test]
+    fn launch_and_rename_compatibility_options_parse() {
+        let cli = Cli::try_parse_from(["cys", "launch-agent", "--role", "worker", "--agent", "claude",
+            "--model", "claude-sonnet-5", "--title", "Team·Worker"]).unwrap();
+        assert!(matches!(cli.command, Command::LaunchAgent { title: Some(_), model: Some(_), .. }));
+        let cli = Cli::try_parse_from(["cys", "rename-surface", "--surface", "surface:2", "--title", "Team·Worker·s2"]).unwrap();
+        assert!(matches!(cli.command, Command::RenameSurface { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_detect_rejects_non_executable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("cys-agent-detect-{}", std::process::id()));
+        std::fs::write(&path, "exit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(!super::agent_binary_executable(&path));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(super::agent_binary_executable(&path));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn agent_detect_finds_npm_shim_before_path_refresh() {
+        let root = std::env::temp_dir().join(format!("cys-agent-npm-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("npm")).unwrap();
+        let shim = root.join("npm/codex.cmd");
+        std::fs::write(&shim, "@echo off\r\n").unwrap();
+        assert_eq!(super::windows_npm_agent(&root, "codex"), Some(shim));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// 사람용 statusline 한 줄 포맷 — rate는 있을 때만, 모델명 부재 시 "claude" 폴백.

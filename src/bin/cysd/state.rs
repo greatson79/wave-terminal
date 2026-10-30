@@ -156,6 +156,7 @@ pub struct Surface {
     pub observed_usage: Mutex<Option<crate::usage::ObservedUsage>>,
     /// launch-agent가 실제로 붙인 `--model` 슬러그와 폴백 여부(set_meta 기록 — list·status 노출용).
     pub agent_model: Mutex<Option<(String, bool)>>,
+    pub directive_verified: Mutex<Option<bool>>,
     /// T5 세션 트랜스크립트 등록 (`usage.register` — SessionStart hook의 결정론 매핑)
     pub registered_transcript: Mutex<Option<String>>,
     /// (4) resume 핀용 agent transcript session_id — analytics.rs의 회계 session_id와 무관(별개 개념).
@@ -859,6 +860,8 @@ pub struct Daemon {
     pub consumption: Mutex<Consumption>,
     /// T7 E1-3 영속 분석 저장소(analytics.db) — open 실패 시 None(graceful degrade).
     pub analytics: Mutex<Option<rusqlite::Connection>>,
+    pub accounts: Mutex<crate::accounts::AccountsState>,
+    pub learn_write: Mutex<()>,
     /// C0 채널 계층 저장소(channels.db) — desired-state·inbox·원장. 무결 필수라 open 실패 시
     /// None(채널 모듈 비활성) — 데몬은 계속 동작한다(순수 추가 계층).
     pub channels: Mutex<Option<rusqlite::Connection>>,
@@ -1208,6 +1211,12 @@ fn load_queue_state(dir: &std::path::Path) -> Vec<serde_json::Value> {
     by_mid.into_values().collect()
 }
 
+fn queue_entry_fresh(entry: &serde_json::Value, now: f64) -> bool {
+    const MAX_AGE_SECS: f64 = 600.0;
+    entry.get("created_at").and_then(|v| v.as_f64())
+        .is_some_and(|created| created.is_finite() && (0.0..=MAX_AGE_SECS).contains(&(now - created)))
+}
+
 impl Daemon {
     pub fn new(socket_path: PathBuf) -> Arc<Self> {
         let dir = state_dir(&socket_path);
@@ -1325,6 +1334,8 @@ impl Daemon {
             started_at: now_epoch(),
             consumption: Mutex::new(Consumption::default()),
             analytics: Mutex::new(analytics_conn),
+            accounts: Mutex::new(crate::accounts::AccountsState::default()),
+            learn_write: Mutex::new(()),
             channels: Mutex::new(channels_conn),
             parser_panics_total: AtomicU64::new(0),
             restore_roots: Mutex::new(Vec::new()),
@@ -1476,6 +1487,9 @@ impl Daemon {
     /// ★락 순서 주의: 호출자는 어떤 pending_queue 락도 쥐지 않은 상태여야 한다(재진입 데드락 방지).
     pub fn persist_queue_state(&self) {
         let dir = state_dir(&self.socket_path);
+        let previous: HashMap<String, f64> = load_queue_state(&dir).into_iter()
+            .filter_map(|entry| Some((entry.get("mid")?.as_str()?.to_string(),
+                entry.get("created_at")?.as_f64()?))).collect();
         let mut entries: Vec<serde_json::Value> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         {
@@ -1489,7 +1503,9 @@ impl Daemon {
                 for text in q.iter() {
                     let mid = queue_mid(s.id, text);
                     if seen.insert(mid.clone()) {
-                        entries.push(json!({"mid": mid, "surface_id": s.id, "text": text, "role": role}));
+                        let created_at = previous.get(&mid).copied().unwrap_or_else(now_epoch);
+                        entries.push(json!({"mid": mid, "surface_id": s.id, "text": text,
+                            "role": role, "created_at": created_at}));
                     }
                 }
             }
@@ -1526,20 +1542,26 @@ impl Daemon {
                 role_surface.entry(role).or_insert_with(|| s.clone());
             }
         }
-        let mut rehomed = 0usize;
+        let mut removed = 0usize;
+        let now = now_epoch();
         restored.retain(|it| {
+            // Old WAL entries have no age proof, so never inject them into a replacement seat.
+            if !queue_entry_fresh(it, now) {
+                removed += 1;
+                return false;
+            }
             let role = it.get("role").and_then(|v| v.as_str());
             let text = it.get("text").and_then(|v| v.as_str()).unwrap_or("");
             if let Some(r) = role {
                 if let Some(surf) = role_surface.get(r) {
                     surf.pending_queue.lock().unwrap().push_back(text.to_string());
-                    rehomed += 1;
+                    removed += 1;
                     return false; // restored_queue에서 제거(pending_queue로 이관)
                 }
             }
             true // role 무매칭/미기록 — 보존(재기동 더 기다림·정직)
         });
-        rehomed
+        removed
     }
 
     /// Spawn a new PTY surface running the user's shell (or an explicit command).
@@ -1640,7 +1662,7 @@ impl Daemon {
         // RC-5: GUI 직스폰과 공유하는 공용 fn(cys::runtime_prefixed_path) 사용 — 중복 구현 금지.
         if let Some(bin_dir) = cys::current_exe_dir() {
             let cur = std::env::var("PATH").unwrap_or_default();
-            if let Some(newp) = cys::runtime_prefixed_path(&bin_dir, &cur) {
+            if let Some(newp) = cys::runtime_seat_path(&bin_dir, &cur) {
                 builder.env("PATH", newp);
             }
         }
@@ -1751,6 +1773,7 @@ impl Daemon {
             last_injected: Mutex::new(None),
             observed_usage: Mutex::new(None),
             agent_model: Mutex::new(None),
+            directive_verified: Mutex::new(None),
             registered_transcript: Mutex::new(None),
             agent_session_id: Mutex::new(None),
             // (W1) restore가 넘긴 원값이 있으면 그대로 고정(재해소 금지 — 데몬 env 변동 시 오염 방지),
@@ -2395,7 +2418,7 @@ fn sh_squote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// D8(RC-19·mac): runtime bin dirs → `-lc` 명령 앞에 붙일 `export PATH='<dir>':…:"$PATH"; ` 프리픽스.
+/// D8(RC-19·mac): 로그인 프로파일 실행 뒤 사용자 PATH 다음에 번들 도구를 둔다.
 /// dir는 POSIX single-quote(확장 취약 제거)·`$PATH`만 큰따옴표로 확장. dirs 비면 None. 순수 fn(테스트용).
 #[cfg(target_os = "macos")]
 fn mac_lc_path_prefix(dirs: &[std::path::PathBuf]) -> Option<String> {
@@ -2407,7 +2430,7 @@ fn mac_lc_path_prefix(dirs: &[std::path::PathBuf]) -> Option<String> {
         .map(|d| sh_squote(&d.to_string_lossy()))
         .collect::<Vec<_>>()
         .join(":");
-    Some(format!("export PATH={joined}:\"$PATH\"; "))
+    Some(format!("export PATH=\"$PATH\":{joined}; "))
 }
 
 /// 로그인 프로파일(path_helper)이 동봉 runtime을 PATH 뒤로 강등한 뒤 실행되는 -c 명령에서 재선두주입해
@@ -2419,8 +2442,8 @@ fn mac_lc_path_prefix(dirs: &[std::path::PathBuf]) -> Option<String> {
 #[cfg(target_os = "macos")]
 fn mac_runtime_lc_prefix() -> Option<String> {
     let exe_dir = cys::current_exe_dir()?;
-    let mut dirs = cys::runtime_bin_dirs(&exe_dir);
-    dirs.push(cys::home_dir().join(".local").join("bin"));
+    let mut dirs = vec![cys::home_dir().join(".local").join("bin")];
+    dirs.extend(cys::runtime_bin_dirs(&exe_dir));
     mac_lc_path_prefix(&dirs)
 }
 
@@ -2462,6 +2485,15 @@ fn default_health_rules() -> Vec<HealthRule> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restored_queue_requires_recent_age_proof() {
+        let now = 1_000.0;
+        assert!(queue_entry_fresh(&json!({"created_at": 500.0}), now));
+        assert!(!queue_entry_fresh(&json!({"created_at": 399.0}), now));
+        assert!(!queue_entry_fresh(&json!({"created_at": 1001.0}), now));
+        assert!(!queue_entry_fresh(&json!({"text": "old WAL"}), now));
+    }
 
     // ── M4: 자기승인 pgid 격상 순수 판정 — 같은 pgid(별개 CLI 프로세스)면 차단, 다른 pgid는 허용 ──
     #[test]
@@ -2521,8 +2553,8 @@ mod tests {
             PathBuf::from("/quote'd/uv"),                         // 내부 작은따옴표
         ];
         let p = mac_lc_path_prefix(&dirs).expect("dirs 비지 않음");
-        assert!(p.starts_with("export PATH="), "형식: {p}");
-        assert!(p.ends_with(":\"$PATH\"; "), "말미 $PATH 확장 보존: {p}");
+        assert!(p.starts_with("export PATH=\"$PATH\":"), "사용자 PATH 선행: {p}");
+        assert!(p.ends_with("; "), "형식: {p}");
         // 특수문자 경로 전체가 single-quote 리터럴 — 확장 토큰이 따옴표 밖에 노출되지 않는다.
         assert!(p.contains("'/weird/$HOME `whoami` $(id)/git/bin'"), "특수문자 단일따옴표 리터럴: {p}");
         // 내부 작은따옴표는 '\'' 로 닫고-이스케이프-열기.
@@ -2538,7 +2570,7 @@ mod tests {
     fn mac_runtime_lc_prefix_includes_user_local_bin() {
         let p = mac_runtime_lc_prefix().expect("~/.local/bin 추가로 dirs가 비지 않음");
         assert!(p.contains("/.local/bin"), "~/.local/bin 재선두주입: {p}");
-        assert!(p.ends_with(":\"$PATH\"; "), "말미 $PATH 확장 보존: {p}");
+        assert!(p.starts_with("export PATH=\"$PATH\":"), "사용자 PATH 선행: {p}");
     }
 
     // ── RC-13 회귀 핀(agy 요구): Windows 부서 상태 격리 슬러그 ──

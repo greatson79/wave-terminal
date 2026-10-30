@@ -1736,6 +1736,19 @@ fn queue_human_quiet_secs() -> u64 {
         .unwrap_or(30)
 }
 
+pub fn seat_claimable_now(surface: &crate::state::Surface) -> bool {
+    if surface.exited.load(Ordering::Relaxed) || surface.agent_meta.lock().unwrap().is_some() {
+        return false;
+    }
+    if surface.last_human_input.lock().unwrap().is_some_and(|at| at.elapsed().as_secs() < queue_human_quiet_secs()) {
+        return false;
+    }
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    sys.process(sysinfo::Pid::from_u32(surface.pid)).is_some()
+        && collect_descendants(&sys, surface.pid).is_empty()
+}
+
 /// 배달이 막힌 surface의 적체 경보(쿨다운 5분) — quiet 미충족·human 흔적·pause 등
 /// 모든 '막힘' 분기에서 공통 호출한다(한 분기라도 빠지면 그 사유의 적체가 침묵한다).
 fn alert_queue_depth_if_high(
@@ -2681,7 +2694,7 @@ mod tests {
         let dir = crate::state::state_dir(&daemon.socket_path);
         std::fs::write(dir.join("topology.json"), "{ corrupt ]]] not json").unwrap();
         let tombs = load_tombstones_from_disk(&daemon.socket_path);
-        assert!(tombs.is_empty(), "격리 dir 스냅샷 없음 → 빈 폴백");
+        assert_eq!(tombs, super::tombstones_from_latest_generation(), "손상 시 세대 스냅샷 폴백");
         let corrupt_isolated = std::fs::read_dir(&dir)
             .unwrap()
             .flatten()

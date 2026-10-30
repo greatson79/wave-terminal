@@ -7,6 +7,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod alerts;
+mod accounts;
 mod analytics;
 mod approval;
 mod caps;
@@ -20,6 +21,7 @@ mod handlers;
 mod hwmon;
 mod recall;
 mod schedule;
+mod skillrun;
 mod severity;
 mod state;
 mod undo;
@@ -170,6 +172,9 @@ async fn main() {
     #[cfg(windows)]
     startup_mark(&startup, "pack_install_complete", &socket_path);
     let daemon = Daemon::new(socket_path.clone());
+    accounts::seed_known(&daemon);
+    accounts::spawn_custom_adapters(Arc::clone(&daemon));
+    skillrun::reconcile_boot(&daemon);
     #[cfg(windows)]
     startup_mark(&startup, "state_ready", &socket_path);
 
@@ -179,6 +184,7 @@ async fn main() {
     schedule::ensure_builtin_jobs();
     schedule::spawn_scheduler(Arc::clone(&daemon));
     usage::spawn_usage_collector(Arc::clone(&daemon));
+    skillrun::spawn_watcher(Arc::clone(&daemon));
     usage::spawn_agy_collector(Arc::clone(&daemon));
     // CC "🏢 오피스" 탭의 상시 가용성 — 메타버스 오피스 브리지(127.0.0.1:8642) 자동기동.
     spawn_office_bridge(crate::state::state_dir(&socket_path));
@@ -615,6 +621,10 @@ fn post_listen_boot(socket_path: &std::path::Path, daemon: &Arc<Daemon>) {
     spawn_auto_restore(&state_dir, socket_path, daemon);
 }
 
+fn autorestore_opted_out(kill_switch: Option<&str>, opt_in: Option<&str>) -> bool {
+    kill_switch == Some("1") || opt_in != Some("1")
+}
+
 /// 콜드부트 auto-restore를 detached 스폰한다(env에 CYS_NO_AUTOSTART=1 — 자식 CLI가 라이벌
 /// 데몬을 autostart하는 재귀를 차단). 대기 스레드가 자식을 reap해 좀비 잔존을 막는다.
 /// ★W1: PHOENIX_CYS·PATH 주입(§5-1 침묵사 근원 수리) · stdout/stderr 를 null 대신 phoenix-restore.log 로
@@ -624,9 +634,9 @@ fn spawn_auto_restore(
     socket_path: &std::path::Path,
     daemon: &std::sync::Arc<Daemon>,
 ) {
-    let opted_out = cys::env_compat("CYS_NO_AUTORESTORE")
-        .map(|v| v == "1")
-        .unwrap_or(false);
+    let kill_switch = cys::env_compat("CYS_NO_AUTORESTORE");
+    let opt_in = cys::env_compat("CYS_AUTORESTORE");
+    let opted_out = autorestore_opted_out(kill_switch.as_deref(), opt_in.as_deref());
     // exe_dir(데몬 바이너리 디렉터리) — PHOENIX_CYS·PATH 계산 기준.
     let exe_dir = cys::current_exe_dir();
     let current_path = std::env::var("PATH").unwrap_or_default();
@@ -634,7 +644,7 @@ fn spawn_auto_restore(
     let socket = socket_path.to_string_lossy();
     match decide_auto_restore(&cys::pack::pack_dir(), opted_out, exe_dir_ref, &current_path, &socket) {
         AutoRestore::OptedOut => {
-            eprintln!("[cysd] auto-restore skipped (CYS_NO_AUTORESTORE=1)");
+            eprintln!("[cysd] auto-restore skipped (CYS_AUTORESTORE=1 required; CYS_NO_AUTORESTORE=1 overrides)");
         }
         AutoRestore::Ready { program, mut args, env } => {
             // args = [disk_phoenix, "restore", "--auto"]. disk_phoenix 는 B1 폴백 후보.
@@ -724,7 +734,7 @@ fn extract_phoenix_embed(
             std::fs::write(&path, content)?;
             written += 1;
             // 테스트 seam: root+일부 파일 생성 후 강제 실패 주입(중간 실패 정리 결정론 검증).
-            if written == 1 && std::env::var("CYS_PHOENIX_EXTRACT_FAIL").is_ok() {
+            if written == 1 && phoenix_extract_should_fail() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::Other,
                     "injected mid-extraction failure",
@@ -744,6 +754,17 @@ fn extract_phoenix_embed(
             Err(e)
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_PHOENIX_EXTRACT_FAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn phoenix_extract_should_fail() -> bool {
+    #[cfg(test)]
+    if TEST_PHOENIX_EXTRACT_FAIL.with(|flag| flag.get()) { return true; }
+    std::env::var("CYS_PHOENIX_EXTRACT_FAIL").is_ok()
 }
 
 /// ★B1③: 추출된 phoenix self-test — `<python> <script> --selftest` 가 exit 0 + "selftest ok" 응답이면 통과.
@@ -2151,9 +2172,17 @@ mod pipe_security_tests {
 #[cfg(test)]
 mod auto_restore_tests {
     use super::{
-        autorestore_retry_delay, decide_auto_restore, guard_restore_panic, loop_auto_restore_with,
+        autorestore_opted_out, autorestore_retry_delay, decide_auto_restore, guard_restore_panic, loop_auto_restore_with,
         run_auto_restore_once, AutoRestore,
     };
+
+    #[test]
+    fn autorestore_requires_explicit_opt_in() {
+        assert!(autorestore_opted_out(None, None));
+        assert!(autorestore_opted_out(None, Some("0")));
+        assert!(!autorestore_opted_out(None, Some("1")));
+        assert!(autorestore_opted_out(Some("1"), Some("1")));
+    }
 
     /// ★P0-7 회귀 잠금(D1/W5·CI 실경로 ⑧): 양 플랫폼 accept_loop 가 콜드부트 부트 공통 함수를 호출하는지 소스
     /// 수준으로 잠근다 — Windows accept_loop 에 배선이 빠져 auto-restore 가 발동조차 안 하던 P0-7 최종 결함 재발
@@ -2355,9 +2384,9 @@ mod auto_restore_tests {
     fn b1_extract_mid_failure_leaves_no_partial_root() {
         let sd = std::env::temp_dir().join(format!("cys-b1mf-{}", std::process::id()));
         std::fs::create_dir_all(&sd).unwrap();
-        std::env::set_var("CYS_PHOENIX_EXTRACT_FAIL", "1");
+        super::TEST_PHOENIX_EXTRACT_FAIL.with(|flag| flag.set(true));
         let res = extract_phoenix_embed(&sd);
-        std::env::remove_var("CYS_PHOENIX_EXTRACT_FAIL");
+        super::TEST_PHOENIX_EXTRACT_FAIL.with(|flag| flag.set(false));
         assert!(res.is_err(), "주입된 중간 실패가 Err 여야 한다");
         // phoenix-embed 하위 child dir 0(즉시 정리 — 다음 부팅 prune 의존 금지).
         let root = sd.join("phoenix-embed");

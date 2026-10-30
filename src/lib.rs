@@ -203,6 +203,22 @@ pub fn runtime_prefixed_path(exe_dir: &Path, current_path: &str) -> Option<Strin
     }
 }
 
+/// Keep the bundled CLI visible while letting a seat's own tools win over bundled runtimes.
+pub fn runtime_seat_path(exe_dir: &Path, current_path: &str) -> Option<String> {
+    let path = runtime_prefixed_path(exe_dir, current_path).unwrap_or_else(|| current_path.to_string());
+    let sep = if cfg!(windows) { ';' } else { ':' };
+    let runtimes: Vec<String> = runtime_bin_dirs(exe_dir)
+        .into_iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    let mut entries: Vec<String> = path.split(sep)
+        .filter(|entry| !runtimes.iter().any(|runtime| {
+            if cfg!(windows) { entry.eq_ignore_ascii_case(runtime) } else { entry == runtime }
+        }))
+        .map(str::to_string).collect();
+    entries.extend(runtimes);
+    let result = entries.join(&sep.to_string());
+    (result != current_path).then_some(result)
+}
+
 /// unix pane PATH 합성(순수·테스트 가능 · **unix 전용 의미론** · OS 무관 컴파일). 순서:
 /// `[prefixes: exe_dir + 번들 runtime bins] 중 신규분 선두` ; `current_path 전체(순서 그대로 보존)` ;
 /// `~/.local/bin(claude native 설치 위치) 신규분 말미 append`. claude 설치기가 ~/.zshrc 를 수정하지
@@ -638,6 +654,21 @@ mod tests {
             let already = format!("/opt/cysapp/bin{sep}/usr/bin{sep}{local}");
             assert_eq!(runtime_prefixed_path(exe, &already), None, "중복이면 무변경");
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seat_path_puts_bundled_tools_after_user_tools() {
+        let base = std::env::temp_dir().join(format!("cys-seat-path-{}", std::process::id()));
+        let exe = base.join("Contents/MacOS");
+        std::fs::create_dir_all(&exe).unwrap();
+        std::fs::create_dir_all(base.join("Contents/Resources/runtime/git/bin")).unwrap();
+        let path = runtime_seat_path(&exe, "/opt/homebrew/bin:/usr/bin").unwrap();
+        let cli = path.find(&exe.to_string_lossy().to_string()).unwrap();
+        let user = path.find("/opt/homebrew/bin").unwrap();
+        let runtime = path.find("Resources/runtime/git/bin").unwrap();
+        assert!(cli < user && user < runtime, "{path}");
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

@@ -94,14 +94,16 @@ body.wsbar-resizing { cursor: col-resize; -webkit-user-select: none; user-select
   flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 2px;
   overflow-y: auto; padding: 2px 8px 10px;
 }
-#sidebar-usage { flex: none; padding: 9px; border-top: 1px solid var(--hairline); font-size: 12px; font-variant-numeric: tabular-nums; }
-#sidebar-usage strong { display: block; margin: 3px 0 6px; }
-#sidebar-usage .usage-row { margin: 3px 0; color: #3fb950; }
+#sidebar-usage { flex: none; max-height: 40vh; padding: 6px; border-top: 1px solid var(--hairline); font-size: 10px; font-variant-numeric: tabular-nums; overflow: auto; }
+#sidebar-usage strong { display: block; margin: 5px 0 2px; font-size: 11px; white-space: nowrap; }
+#sidebar-usage .usage-group { color: #8b949e; margin: 3px 0 1px; white-space: nowrap; }
+#sidebar-usage .usage-row { display: flex; align-items: center; gap: 3px; margin: 1px 0; color: var(--ok); white-space: nowrap; }
+#sidebar-usage .usage-bar { display: inline-block; flex: 1 0 18px; height: 5px; min-width: 18px; border-radius: 3px; background: var(--border); overflow: hidden; }
+#sidebar-usage .usage-bar > span { display: block; height: 100%; background: currentColor; }
 #sidebar-usage .usage-row.warn { color: #d29922; }
 #sidebar-usage .usage-row.crit { color: #f85149; }
 #sidebar-usage .usage-row.none { color: var(--text); }
-#sidebar-usage .usage-row.stale { opacity: .45; }
-#sidebar-usage small { display: block; margin-bottom: 8px; opacity: .7; }
+#sidebar-usage .usage-row.stale { color: #8b949e; opacity: .65; }
 #sidebar-help { flex: none; font-size: 12px; }
 #help-panel-details { border-top: 1px solid var(--hairline); padding: 9px; }
 #help-panel-details > summary { cursor: pointer; font-weight: 600; }

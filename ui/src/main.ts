@@ -16,7 +16,7 @@ import { composeFontFamily, FONT_CHOICES, ROLE_COLOR, roleDotColor } from "./app
 import { BAR_IDS, DEFAULT_SETTINGS, readSettings, SETTINGS_KEY } from "./settings";
 import { safeHelpText } from "./help";
 import { bindPaneRename, paneHeading, splitPaneHeading } from "./paneheading";
-import { sidebarUsage, type UsageAccount } from "./usagebar";
+import { resetTime, sidebarUsage, type UsageAccount } from "./usagebar";
 import { inputSource } from "./inputsource";
 import { sendPreparedHelp } from "./helpflow";
 
@@ -227,18 +227,45 @@ function renderSidebarUsage(accounts: UsageAccount[]) {
     box.textContent = "측정 불가";
     return;
   }
+  let lastAccount = "";
+  let lastGroup: string | null = null;
   for (const row of rows) {
-    const line = document.createElement("div");
-    line.className = `usage-row ${row.severity}${row.age != null && row.age >= 10 ? " stale" : ""}`;
-    const bars = row.remaining == null ? "" : `${"▓".repeat(Math.round(row.remaining / 12.5))}${"░".repeat(8 - Math.round(row.remaining / 12.5))}  `;
-    const value = row.reset ? "리셋됨 — 새 측정 대기" : row.remaining == null ? "측정 불가" : `남음 ${row.remaining}%`;
-    line.textContent = `${row.label} · ${row.window}  ${bars}${value}`;
-    box.append(line);
-    if (row.age != null) {
-      const stamp = document.createElement("small");
-      stamp.textContent = `측정 ${row.age === 0 ? "방금" : `${row.age}분 전`}`;
-      box.append(stamp);
+    if (row.accountKey !== lastAccount) {
+      const head = document.createElement("strong");
+      const engine = ({ claude: "Claude", codex: "Codex", antigravity: "Antigravity" } as Record<string, string>)[row.provider] ?? row.provider;
+      head.textContent = `${row.label} · ${engine}`;
+      box.append(head);
+      lastAccount = row.accountKey;
+      lastGroup = null;
     }
+    if (row.group && row.group !== lastGroup) {
+      const group = document.createElement("div");
+      group.className = "usage-group";
+      group.textContent = row.group;
+      box.append(group);
+      lastGroup = row.group;
+    }
+    const line = document.createElement("div");
+    line.className = `usage-row ${row.severity}${row.age == null || row.age >= 10 ? " stale" : ""}`;
+    const window = document.createElement("span");
+    window.textContent = row.window;
+    const bar = document.createElement("span");
+    bar.className = "usage-bar";
+    const fill = document.createElement("span");
+    fill.style.width = `${row.remaining ?? 0}%`;
+    bar.append(fill);
+    const value = document.createElement("span");
+    value.textContent = row.reset ? "갱신 대기" : row.remaining == null ? "측정 불가" : `남음 ${row.remaining}%`;
+    line.append(window, bar, value);
+    if (row.age == null || row.age >= 10) {
+      const age = document.createElement("span");
+      age.textContent = row.age == null ? "시각 미상" : `${row.age}분 전`;
+      line.append(age);
+    }
+    const reset = document.createElement("span");
+    reset.textContent = resetTime(row.resetsAt);
+    line.append(reset);
+    box.append(line);
   }
 }
 
@@ -4069,7 +4096,7 @@ async function buildPaletteItems(): Promise<PaletteItem[]> {
     { id: "act:equalize", title: "패널 균등화", keywords: "equalize 균등", action: () => actionEqualize() },
     { id: "act:cc", title: "Control Center 토글", keywords: "control center dashboard 대시보드", action: () => setCcOpen(!ccOpen) },
     { id: "act:feed-panel", title: "승인 Feed 탭 열기", keywords: "feed panel 피드 패널 승인 control center", action: () => openFeed() },
-    { id: "act:dept", title: "부서 워크스페이스 추가", keywords: "dept workspace 부서", action: () => addDeptWorkspace() },
+    { id: "act:dept", title: "부서 워크스페이스 추가", keywords: "dept workspace 부서", action: async () => { await addDeptWorkspace(); } },
   );
   return items;
 }
@@ -4370,7 +4397,7 @@ async function start() {
   await listen("update-preserved", (e) => {
     if (typeof e.payload === "string") showPreserved(e.payload);
   });
-  for (const message of await invoke<string[]>("take_update_preserved_notices")) showPreserved(message);
+  for (const message of await invoke("take_update_preserved_notices") as string[]) showPreserved(message);
   const info = document.getElementById("daemon-info")!;
   await new Promise<void>((resolve) => {
     listen("daemon-ready", () => resolve());

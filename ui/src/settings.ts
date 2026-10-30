@@ -43,9 +43,9 @@ export function readSettings(raw: string | null, legacyBg: string | null, legacy
   const usage = parsed?.ver === 1 ? parsed.usage : null;
   const bg = validColor(legacyBg) ? legacyBg : legacyBg === null ? null : validColor(look?.bg) ? look.bg : null;
   const font = validFont(legacyFont) ? legacyFont : legacyFont === null ? null : validFont(look?.font) ? look.font : null;
-  const savedOrder = Array.isArray(bar?.order) ? bar.order : [];
-  const savedHidden = Array.isArray(bar?.hidden) ? bar.hidden : [];
-  const order = [...new Set([...savedOrder.filter((id: unknown) => ids.includes(id as string)), ...ids])];
+  const savedOrder: unknown[] = Array.isArray(bar?.order) ? bar.order : [];
+  const savedHidden: unknown[] = Array.isArray(bar?.hidden) ? bar.hidden : [];
+  const order = [...new Set([...savedOrder.filter((id: unknown): id is string => typeof id === "string" && ids.includes(id)), ...ids])];
   return {
     ver: 1,
     look: {
@@ -57,14 +57,14 @@ export function readSettings(raw: string | null, legacyBg: string | null, legacy
       menuWeight: [400, 500, 600, 700].includes(look?.menuWeight) ? look.menuWeight : DEFAULT_SETTINGS.look.menuWeight,
       menuScale: numberIn(look?.menuScale, 70, 150) ? look.menuScale : DEFAULT_SETTINGS.look.menuScale,
     },
-    bar: { order, hidden: [...new Set(savedHidden.filter((id: unknown) => ids.includes(id as string))) ] },
+    bar: { order, hidden: [...new Set(savedHidden.filter((id: unknown): id is string => typeof id === "string" && ids.includes(id))) ] },
     layout: { sidebarSide: layout?.sidebarSide === "right" ? "right" : "left" },
     panels: { helpCollapsed: typeof panels?.helpCollapsed === "boolean" ? panels.helpCollapsed : false },
     header: { daemonCollapsed: typeof header?.daemonCollapsed === "boolean" ? header.daemonCollapsed : true },
     usage: {
       enabled: typeof usage?.enabled === "boolean" ? usage.enabled : true,
       hiddenAccounts: Array.isArray(usage?.hiddenAccounts)
-        ? [...new Set(usage.hiddenAccounts.filter((v: unknown) => typeof v === "string" && v.length <= 256))]
+        ? [...new Set((usage.hiddenAccounts as unknown[]).filter((v): v is string => typeof v === "string" && v.length <= 256))]
         : [],
     },
   };

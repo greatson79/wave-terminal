@@ -122,6 +122,87 @@ fn param_dim(params: &Value, key: &str, fallback: u16, max: u64) -> Result<u16, 
     }
 }
 
+fn update_composer_pending_text(surface: &crate::state::Surface, text: &str, clear_first: bool) {
+    let mut draft = surface.composer_pending_text.lock().unwrap();
+    if clear_first {
+        *draft = Some(String::new());
+        surface.composer_pending_bytes.store(0, Ordering::Relaxed);
+    } else if let Some(draft) = draft.as_mut().filter(|_| !text.chars().any(char::is_control)) {
+        draft.push_str(text);
+        surface.composer_pending_bytes.store(draft.len() as u64, Ordering::Relaxed);
+    } else {
+        *draft = None;
+        surface.composer_pending_bytes.fetch_add(text.len() as u64, Ordering::Relaxed);
+    }
+}
+
+fn update_composer_pending_key(surface: &crate::state::Surface, key: &str) {
+    let mut draft = surface.composer_pending_text.lock().unwrap();
+    match key {
+        "Return" | "Enter" => {
+            *draft = Some(String::new());
+            surface.composer_pending_bytes.store(0, Ordering::Relaxed);
+        }
+        "C-u" | "C-U" if draft.is_some() => {
+            *draft = Some(String::new());
+            surface.composer_pending_bytes.store(0, Ordering::Relaxed);
+        }
+        "C-u" | "C-U" | "Delete" | "DC" => {}
+        "Backspace" | "C-h" => {
+            if let Some(text) = draft.as_mut() {
+                text.pop();
+                surface.composer_pending_bytes.store(text.len() as u64, Ordering::Relaxed);
+            }
+        }
+        _ => *draft = None,
+    }
+}
+
+fn screen_contents_with_suggestion_markers(screen: &vt100::Screen) -> String {
+    let (rows, cols) = screen.size();
+    let mut contents = String::new();
+    let mut suggestion_open = false;
+    for row in 0..rows {
+        let mut prev_col = 0;
+        let mut prev_was_wide = false;
+        for col in 0..cols {
+            let Some(cell) = screen.cell(row, col) else { continue };
+            if prev_was_wide {
+                prev_was_wide = false;
+                continue;
+            }
+            prev_was_wide = cell.is_wide();
+            if !cell.has_contents() {
+                continue;
+            }
+            contents.extend(std::iter::repeat_n(' ', usize::from(col - prev_col)));
+            if cell.dim() && !suggestion_open {
+                contents.push_str("「제안 글」");
+                suggestion_open = true;
+            } else if !cell.dim() && suggestion_open {
+                contents.push_str("「/제안 글」");
+                suggestion_open = false;
+            }
+            contents.push_str(cell.contents());
+            prev_col = col + if cell.is_wide() { 2 } else { 1 };
+        }
+        if !screen.row_wrapped(row) {
+            if suggestion_open {
+                contents.push_str("「/제안 글」");
+                suggestion_open = false;
+            }
+            contents.push('\n');
+        }
+    }
+    if suggestion_open {
+        contents.push_str("「/제안 글」");
+    }
+    while contents.ends_with('\n') {
+        contents.pop();
+    }
+    contents
+}
+
 /// feed.push 자동 request_id의 프로세스 내 유일성 보장 카운터
 static FEED_REQ_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -1124,6 +1205,7 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
             if let Some(err) = try_write(&surface, write_req, &id) {
                 return Reply::Single(err);
             }
+            update_composer_pending_text(&surface, &text, clear_first);
             if !human {
                 // T4-17 에코 제외 창 갱신 — 주입 직후 에코 라인이 헬스룰을 오발시키지 않게
                 *surface.last_injected.lock().unwrap() = Some(std::time::Instant::now());
@@ -1258,6 +1340,7 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
             if let Some(err) = try_write(&surface, crate::state::WriteReq::Data(bytes), &id) {
                 return Reply::Single(err);
             }
+            update_composer_pending_key(&surface, &key);
             Reply::Single(ok_response(
                 &id,
                 json!({"surface_id": sid, "key": key, "sent": true}),
@@ -1294,7 +1377,8 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                     json!({"surface_id": sid, "surface_ref": surface_ref(sid),
                            "text": lines.join("\n"), "line_count": lines.len(),
                            "since": start, "next_cursor": next_cursor,
-                           "latest_cursor": total, "truncated": truncated}),
+                           "latest_cursor": total, "truncated": truncated,
+                           "composer_pending_bytes": surface.composer_pending_bytes.load(Ordering::Relaxed)}),
                 ));
             }
             let text = if let Some(lines) = param_u64(&params, "lines") {
@@ -1309,17 +1393,14 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                     .join("\n")
             } else {
                 // Accurate visible screen, reconstructed by the vt100 grid.
-                surface
-                    .parser
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .screen()
-                    .contents()
+                let parser = surface.parser.lock().unwrap_or_else(|e| e.into_inner());
+                screen_contents_with_suggestion_markers(parser.screen())
             };
             Reply::Single(ok_response(
                 &id,
                 json!({"surface_id": sid, "surface_ref": surface_ref(sid), "text": text,
-                       "latest_cursor": surface.line_count.load(Ordering::Relaxed)}),
+                       "latest_cursor": surface.line_count.load(Ordering::Relaxed),
+                       "composer_pending_bytes": surface.composer_pending_bytes.load(Ordering::Relaxed)}),
             ))
         }
 
@@ -1363,6 +1444,7 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                         .parser
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
+                        .screen_mut()
                         .set_size(rows, cols);
                     Reply::Single(ok_response(
                         &id,
@@ -3589,6 +3671,70 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_text_marks_only_dim_suggestion_cells() {
+        let mut parser = vt100::Parser::new(2, 40, 0);
+        parser.process("프롬프트 ".as_bytes());
+        parser.process("\x1b[2m자동 제안\x1b[22m 일반 입력".as_bytes());
+        assert_eq!(
+            screen_contents_with_suggestion_markers(parser.screen()),
+            "프롬프트 「제안 글」자동 제안「/제안 글」 일반 입력"
+        );
+    }
+
+    #[test]
+    fn composer_pending_bytes_tracks_deletes_and_loses_exactness_safely() {
+        let _g = ACL_ENV_LOCK.lock().unwrap();
+        let (daemon, dir, _pack_guard) =
+            daemon_with_acl("pending-bytes", r#"{"default":"allow","rules":[]}"#);
+        let surface = daemon
+            .create_surface(None, Some("sleep 30".into()), None, Some("master".into()), 24, 80)
+            .expect("create test surface");
+        daemon.surfaces.lock().unwrap().insert(surface.id, surface.clone());
+        let call = |id, method: &str, params| {
+            let Reply::Single(response) = dispatch(
+                &daemon,
+                Request { id: json!(id), method: method.into(), params },
+                None,
+            ) else {
+                panic!("expected single reply")
+            };
+            assert_eq!(response["ok"], json!(true), "request failed: {response}");
+        };
+        call(1, "surface.send_text", json!({"surface_id":surface.id,"text":"abc"}));
+        call(2, "surface.send_key", json!({"surface_id":surface.id,"key":"C-u"}));
+        assert_eq!(surface.composer_pending_bytes.load(Ordering::Relaxed), 0);
+        call(3, "surface.send_text", json!({"surface_id":surface.id,"text":"abc"}));
+        call(4, "surface.send_key", json!({"surface_id":surface.id,"key":"Delete"}));
+        assert_eq!(surface.composer_pending_bytes.load(Ordering::Relaxed), 3);
+        call(5, "surface.send_key", json!({"surface_id":surface.id,"key":"C-u"}));
+        call(6, "surface.send_text", json!({"surface_id":surface.id,"text":"한"}));
+        call(7, "surface.send_key", json!({"surface_id":surface.id,"key":"Backspace"}));
+        assert_eq!(surface.composer_pending_bytes.load(Ordering::Relaxed), 0);
+        call(8, "surface.send_text", json!({"surface_id":surface.id,"text":"abc"}));
+        call(9, "surface.send_key", json!({"surface_id":surface.id,"key":"Left"}));
+        call(10, "surface.send_key", json!({"surface_id":surface.id,"key":"Backspace"}));
+        assert_eq!(surface.composer_pending_bytes.load(Ordering::Relaxed), 3);
+        call(11, "surface.send_key", json!({"surface_id":surface.id,"key":"C-u"}));
+        assert_eq!(surface.composer_pending_bytes.load(Ordering::Relaxed), 3);
+        call(12, "surface.send_key", json!({"surface_id":surface.id,"key":"Return"}));
+        assert_eq!(surface.composer_pending_bytes.load(Ordering::Relaxed), 0);
+        let Reply::Single(screen) = dispatch(
+            &daemon,
+            Request {
+                id: json!(13),
+                method: "surface.read_text".into(),
+                params: json!({"surface_id":surface.id}),
+            },
+            None,
+        ) else {
+            panic!("expected single reply")
+        };
+        assert_eq!(screen["result"]["composer_pending_bytes"], json!(0));
+        drop(_pack_guard);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     /// ★W2/P0-6: cause 파싱 — "reap"=Reap, 그 외/부재/미지 값=안전측 OwnerClose(묘비).
     #[test]

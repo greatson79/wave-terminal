@@ -144,6 +144,10 @@ pub struct Surface {
     pub human_burst: Mutex<Option<(Instant, Instant, u32, bool)>>,
     /// T3-14 단조 라인 커서: scrollback FIFO와 무관하게 증가하는 누적 완성 라인 수
     pub line_count: AtomicU64,
+    /// cys가 알고 있는 마지막 제출 이후의 미제출 입력 바이트 수.
+    pub composer_pending_bytes: AtomicU64,
+    /// 입력이 끝에만 추가되는 동안에만 유지하는 드래프트. None이면 카운트는 보수적 하한이다.
+    pub composer_pending_text: Mutex<Option<String>>,
     /// T4-17 헬스 조치: 이 시각까지 queued 배달 일시정지 (직접 send는 통과)
     pub queue_paused_until: Mutex<Option<Instant>>,
     /// T4-17 에코 제외: 마지막 원격 주입 시각 (주입 직후 에코 라인은 룰 매칭 제외)
@@ -544,8 +548,8 @@ pub fn live_worker_count(roles: &HashMap<String, u64>, is_alive: impl Fn(u64) ->
 
 /// (W4) PTY 청크를 vt100 파서에 반영하되, 파서 내부 인덱스 패닉을 격리한다.
 ///
-/// vt100 0.15.2는 와이드(CJK·이모지) 문자의 선두 셀이 마지막 열에 놓인 상태에서 그 셀을
-/// 지우거나 덮어쓰면 `row.rs:89 clear_wide`가 `cells[col+1]`을 경계 밖 인덱싱해 패닉한다
+/// vt100 0.16.2는 와이드(CJK·이모지) 문자의 선두 셀이 마지막 열에 놓인 상태에서 그 셀을
+/// 지우거나 덮어쓰면 `screen.rs:870`이 다음 셀을 경계 밖으로 조회해 패닉한다
 /// (좁은 pane으로의 resize가 선두 와이드 셀을 마지막 열로 밀어내는 경로 — 한국어 CLI 출력에서
 /// 실재, cysd.log 누적 29회). 이 패닉이 reader 스레드를 죽이면 해당 pane의 PTY 배수가 정지해
 /// pane 속 CLI가 write 블록으로 동결된다("절대 불사"의 죽음의 경로).
@@ -716,14 +720,14 @@ mod dedup_tests {
 mod panic_isolation_tests {
     use super::{process_chunk_isolated, SCROLLBACK_LINES};
 
-    /// row.rs:89 clear_wide OOB 재현 시퀀스: 와이드(CJK) 문자의 선두 셀을 26열 그리드 끝에 놓고
+    /// clear_wide OOB 재현 시퀀스: 와이드(CJK) 문자의 선두 셀을 26열 그리드 끝에 놓고
     /// 25열로 축소하면 선두 와이드 셀이 마지막 열(index 24, len 25)로 밀린다. 그 셀을 덮어쓰면
-    /// vt100 0.15.2가 `cells[col+1]`=cells[25]를 경계 밖 인덱싱해 패닉한다(프로덕션 "len 25 index 25").
+    /// vt100 0.16.2가 다음 셀을 경계 밖 조회해 패닉한다(프로덕션 "len 25 index 25").
     /// 좁은 pane으로의 resize + 한국어 CLI 출력이라는 실제 경로를 그대로 박제한다.
     fn drive_row89_panic(parser: &mut vt100::Parser) -> bool {
         process_chunk_isolated(parser, b"\x1b[1;25H", false);
         process_chunk_isolated(parser, "\u{ac00}".as_bytes(), false); // '가'(wide)
-        parser.set_size(10, 25); // 축소 → 선두 와이드 셀이 마지막 열로
+        parser.screen_mut().set_size(10, 25); // 축소 → 선두 와이드 셀이 마지막 열로
         let (_, panicked) = process_chunk_isolated(parser, b"\x1b[1;25Ha", false);
         panicked
     }
@@ -763,6 +767,16 @@ mod panic_isolation_tests {
             p.screen().contents().contains("alive"),
             "재초기화 후 새 출력이 화면에 반영돼야 한다"
         );
+    }
+
+    #[test]
+    fn row89_panic_is_absorbed_and_reinitialized() {
+        let mut parser = vt100::Parser::new(10, 26, SCROLLBACK_LINES);
+        assert!(drive_row89_panic(&mut parser));
+        assert_eq!(parser.screen().size(), (10, 25));
+        let (_, panicked) = process_chunk_isolated(&mut parser, b"\x1b[2J\x1b[1;1Halive", false);
+        assert!(!panicked);
+        assert!(parser.screen().contents().contains("alive"));
     }
 
     #[test]
@@ -1731,6 +1745,8 @@ impl Daemon {
             last_human_input: Mutex::new(None),
             human_burst: Mutex::new(None),
             line_count: AtomicU64::new(0),
+            composer_pending_bytes: AtomicU64::new(0),
+            composer_pending_text: Mutex::new(Some(String::new())),
             queue_paused_until: Mutex::new(None),
             last_injected: Mutex::new(None),
             observed_usage: Mutex::new(None),
@@ -1863,7 +1879,7 @@ impl Daemon {
                         let dsr_resp = {
                             // poison된 락도 복구 — 단일 패닉이 데몬 전체를 마비시키지 않게 한다.
                             let mut parser = surf.parser.lock().unwrap_or_else(|e| e.into_inner());
-                            // (W4) vt100 0.15.2(row.rs:89 clear_wide 등) 내부 인덱스 패닉을 격리한다:
+                            // (W4) vt100 내부 인덱스 패닉을 격리한다:
                             // 패닉 시 그 청크 파싱만 포기하고 파서를 fresh로 재초기화(rows/cols 보존)한다.
                             // reader 스레드는 죽지 않고, 아래 out_tx.send(원시 바이트 broadcast)와
                             // 후속 ingest 경로는 계속 태워 PTY 배수를 절대 멈추지 않는다.

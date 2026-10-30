@@ -250,6 +250,8 @@ enum Command {
         since: Option<u64>,
         #[arg(long, default_value_t = 2000)]
         max_lines: u64,
+        #[arg(long)]
+        json: bool,
     },
     /// Resize a surface
     Resize {
@@ -1882,7 +1884,7 @@ fn run(command: Command) -> i32 {
             };
         }
 
-        Command::ReadScreen { surface, to, lines, since, max_lines } => {
+        Command::ReadScreen { surface, to, lines, since, max_lines, json: as_json } => {
             target_surface(&surface, &to).and_then(|sid| {
                 if let Some(s) = since {
                     return request(
@@ -1890,6 +1892,10 @@ fn run(command: Command) -> i32 {
                         json!({"surface_id": sid, "since_line": s, "max_lines": max_lines}),
                     )
                     .map(|r| {
+                        if as_json {
+                            println!("{r}");
+                            return;
+                        }
                         let text = r["text"].as_str().unwrap_or("");
                         if !text.is_empty() {
                             println!("{text}");
@@ -1900,8 +1906,13 @@ fn run(command: Command) -> i32 {
                         );
                     });
                 }
-                request("surface.read_text", json!({"surface_id": sid, "lines": lines}))
-                    .map(|r| println!("{}", r["text"].as_str().unwrap_or("")))
+                request("surface.read_text", json!({"surface_id": sid, "lines": lines})).map(|r| {
+                    if as_json {
+                        println!("{r}");
+                    } else {
+                        println!("{}", r["text"].as_str().unwrap_or(""));
+                    }
+                })
             })
         }
 

@@ -155,6 +155,8 @@ body.wsbar-resizing { cursor: col-resize; -webkit-user-select: none; user-select
 .ws-dot.error { background: var(--error); }
 .ws-tab .ws-sub .sev-warn { color: var(--warn); }
 .ws-tab .ws-sub .sev-crit { color: var(--error); }
+.ws-tab.active .ws-sub .sev-warn, .ws-tab.active .ws-sub .sev-crit,
+.ws-tab.active .ws-sub-pending { color: var(--on-accent); }
 .ws-hq-chevron { flex: none; width: 12px; padding: 0; border: 0; background: transparent; font-size: 10px; cursor: pointer; color: #8b949e; }
 .ws-hq-count { flex: none; font-size: 10px; color: #8b949e; font-variant-numeric: tabular-nums; }
 .ws-hq-chip { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; border-radius: 4px; font-size: 9px; font-weight: 700; }

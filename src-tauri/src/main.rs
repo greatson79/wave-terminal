@@ -2819,7 +2819,7 @@ mod tests {
 
     #[test]
     fn help_reports_current_app_version() {
-        assert_eq!(super::HELP_APP_VERSION, "app-0.2.2");
+        assert_eq!(super::HELP_APP_VERSION, concat!("app-", env!("CARGO_PKG_VERSION")));
     }
 
     #[tokio::test]

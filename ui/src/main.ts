@@ -246,35 +246,42 @@ function renderSidebarUsage(accounts: UsageAccount[]) {
     box.textContent = "측정 불가";
     return;
   }
-  let lastAccount = "";
+  const groups: { key: string; label: string; provider: string; rows: typeof rows; extra: typeof rows }[] = [];
   for (const row of rows) {
-    if (row.accountKey !== lastAccount) {
-      const head = document.createElement("strong");
-      head.textContent = row.label;
-      box.append(head);
-      lastAccount = row.accountKey;
+    const key = `${row.accountKey}:${row.provider}:${row.group ?? ""}`;
+    if (groups.at(-1)?.key !== key) {
+      groups.push({ key, label: row.provider === "antigravity" || row.provider === "fable" ? row.group || row.label : row.label,
+        provider: row.provider, rows: [], extra: [] });
     }
+    groups.at(-1)!.rows.push(row);
+  }
+  const antigravity = groups.filter((group) => group.provider === "antigravity");
+  for (const group of antigravity.slice(2)) {
+    antigravity[0].extra.push(...group.rows);
+    groups.splice(groups.indexOf(group), 1);
+  }
+  for (const group of groups) {
     const line = document.createElement("div");
-    line.className = `usage-row ${row.severity}${row.age == null || row.age >= 10 ? " stale" : ""}`;
-    line.title = resetTime(row.resetsAt);
-    const window = document.createElement("span");
-    window.className = "usage-window";
-    window.textContent = row.group && !row.window.includes(row.group) ? `${row.group} ${row.window}` : row.window;
-    const bar = document.createElement("span");
-    bar.className = "usage-bar";
-    const fill = document.createElement("span");
-    fill.style.width = `${row.remaining ?? 0}%`;
-    bar.append(fill);
-    const value = document.createElement("span");
-    value.className = "usage-value";
-    value.textContent = row.reset ? `당시 ${row.remaining}%` : `남음 ${row.remaining}%`;
-    line.append(window, bar, value);
-    if (row.age == null || row.age >= 10) {
-      const age = document.createElement("span");
-      age.className = "usage-age";
-      age.textContent = row.age == null ? "시각 미상" : `${row.age}분 전`;
-      line.append(age);
+    line.className = `usage-row${group.rows[0].age == null || group.rows[0].age >= 10 ? " stale" : ""}`;
+    line.tabIndex = 0;
+    const summary = document.createElement("span");
+    summary.className = "usage-summary";
+    const label = document.createElement("span");
+    label.className = "usage-account";
+    label.textContent = group.label;
+    summary.append(label);
+    for (const row of group.rows) {
+      const value = document.createElement("span");
+      value.className = `usage-item ${row.severity}${row.reset ? " reset" : ""}`;
+      value.textContent = `${row.window} ${row.reset ? "당시" : ""}${row.remaining}`;
+      summary.append(value);
     }
+    const detail = document.createElement("span");
+    detail.className = "usage-detail";
+    detail.textContent = [...group.rows, ...group.extra].map((row) =>
+      `${row.label}${row.group ? ` · ${row.group}` : ""} ${row.window}: ${row.reset ? "당시" : "남음"} ${row.remaining}% · ${resetTime(row.resetsAt)} · ${row.age == null ? "시각 미상" : `${row.age}분 전`}`)
+      .join("\n");
+    line.append(summary, detail);
     box.append(line);
   }
 }

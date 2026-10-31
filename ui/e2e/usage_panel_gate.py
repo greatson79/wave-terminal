@@ -90,20 +90,30 @@ window.__TAURI__.core.invoke = (command, args) =>
             page.route("**/*", lambda route: route.continue_() if route.request.url.startswith(origin + "/") else route.abort())
             page.goto(origin + "/index.html")
             panel = page.locator("#sidebar-usage")
-            panel.get_by_text("Argon").first.wait_for(timeout=10_000)
+            panel.get_by_text("Main", exact=True).wait_for(timeout=10_000)
             assert page.locator("#wsbar").evaluate("e => Math.round(e.getBoundingClientRect().width)") == 200
             text = panel.inner_text()
-            assert [h.inner_text() for h in panel.locator("strong").all()] == [
-                "Main", "Codex", "Antigravity", "Second", "Third"], text
-            assert panel.locator(".usage-group").count() == 0, text
-            assert [r.inner_text().split("\n")[0] for r in panel.locator(".usage-row").all()][5:10] == [
-                "Gemini 5h", "Gemini 7d", "Claude·GPT 5h", "Claude·GPT 7d", "Argon 7d"]
-            assert "Fable 7d" in text and "7d Fable" in text and "Fable 7d Fable" not in text
-            assert "당시 98%" in text and "당시 45%" in text
-            assert "641분 전" in text
+            assert [h.inner_text() for h in panel.locator(".usage-account").all()] == [
+                "Main", "Fable", "Codex", "Gemini", "Claude·GPT", "Second", "Third"], text
+            assert panel.locator(".usage-row").count() == 7, text
+            assert "5h 51" in text and "7d 20" in text
+            assert "Fable" in text and "7d 90" in text and "7d Fable 100" in text
+            assert "7d 19" in panel.locator(".usage-row").nth(2).inner_text()
+            assert "5h 당시98" in text and "5h 당시88" in text
+            assert "Argon" not in text and "남음" not in text and "641분 전" not in text
+            assert panel.locator(".usage-row.stale").count() == 2
+            assert panel.locator(".usage-item.reset").count() == 2
+            assert [panel.locator(".usage-item").nth(i).evaluate("e => getComputedStyle(e).color")
+                    for i in (0, 1, 4)] == ["rgb(63, 185, 80)", "rgb(210, 153, 34)", "rgb(248, 81, 73)"]
+            assert panel.evaluate("e => e.getBoundingClientRect().height <= document.querySelector('#wsbar').getBoundingClientRect().height / 4")
             assert panel.evaluate("e => e.scrollWidth <= e.clientWidth")
             assert all(panel.locator(".usage-row").nth(i).evaluate("e => e.scrollWidth <= e.clientWidth")
                        for i in range(panel.locator(".usage-row").count()))
+            panel.locator(".usage-row").nth(3).hover()
+            detail = panel.locator(".usage-row").nth(3).inner_text()
+            assert "남음 69%" in detail and "리셋" in detail and "641분 전" in detail
+            assert "Argon 7d: 당시 45%" in detail
+            assert panel.evaluate("e => e.getBoundingClientRect().height <= document.querySelector('#wsbar').getBoundingClientRect().height / 4")
             page.wait_for_function("typeof window.__daemonEvent === 'function'")
             before_watchdog = page.locator("#toasts .toast.watchdog").count()
             page.evaluate("""() => window.__daemonEvent({payload:{name:'watchdog.duplicate_procs',

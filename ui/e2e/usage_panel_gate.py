@@ -25,7 +25,9 @@ def main():
     def account(provider, account_id, label, age, rates):
         return {"provider": provider, "account_id": account_id, "label": label,
                 "updated_at": now - age * 60 if age is not None else None,
-                "rate": [{"label": name, "used_pct": used, "resets_at": future} for name, used in rates]}
+                "rate": [{"label": name, "used_pct": used, "resets_at": now - 60 if name in (
+                    "Claude and GPT models 5h", "Gemini Models 5h", "Gemini 4 Argon 7d") else future}
+                    for name, used in rates]}
     accounts = [
         account("antigravity", "cli", "Antigravity (agy)", 641, [
             ("Claude and GPT models 5h", 12), ("Claude and GPT models 7d", 35),
@@ -89,6 +91,7 @@ window.__TAURI__.core.invoke = (command, args) =>
             assert [r.inner_text().split("\n")[0] for r in panel.locator(".usage-row").all()][5:10] == [
                 "Gemini 5h", "Gemini 7d", "Claude·GPT 5h", "Claude·GPT 7d", "Argon 7d"]
             assert "Fable 7d" in text and "7d Fable" in text and "Fable 7d Fable" not in text
+            assert "당시 98%" in text and "당시 45%" in text
             assert "641분 전" in text
             assert panel.evaluate("e => e.scrollWidth <= e.clientWidth")
             assert all(panel.locator(".usage-row").nth(i).evaluate("e => e.scrollWidth <= e.clientWidth")

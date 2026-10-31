@@ -267,7 +267,7 @@ function renderSidebarUsage(accounts: UsageAccount[]) {
     bar.append(fill);
     const value = document.createElement("span");
     value.className = "usage-value";
-    value.textContent = row.reset ? "갱신 대기" : row.remaining == null ? "측정 불가" : `남음 ${row.remaining}%`;
+    value.textContent = row.reset ? `당시 ${row.remaining}%` : `남음 ${row.remaining}%`;
     line.append(window, bar, value);
     if (row.age == null || row.age >= 10) {
       const age = document.createElement("span");

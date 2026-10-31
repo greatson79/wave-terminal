@@ -15,7 +15,7 @@ test("remaining thresholds follow green above 50, yellow 20–50, red below 20",
 
 test("reset, stale, hidden, and missing measurements stay distinct", () => {
   expect(sidebarUsage([account(12, 1000, 1100)], [], 1600)[0]).toMatchObject({
-    reset: true, remaining: null, severity: "none", age: 10,
+    reset: true, remaining: 88, severity: "ok", age: 10,
   });
   expect(sidebarUsage([account(12, 1000)], ["claude:account-1"], 1600)).toEqual([]);
   expect(sidebarUsage([account(12, 1590)], [], 2200)[0].age).toBe(10);

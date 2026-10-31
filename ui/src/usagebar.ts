@@ -74,9 +74,9 @@ export function sidebarUsage(accounts: readonly UsageAccount[], hidden: readonly
         label: owners[key]?.trim() || (account.provider === "antigravity" ? agy.map((a) => owners[`antigravity:${a.account_id}`]?.trim()).find(Boolean) : "") || account.label || account.provider,
         group: account.provider === "antigravity" ? window.replace(/ (5h|7d)$/, "") : fableHome ? "Fable" : null,
         window: account.provider === "antigravity" ? window.replace(/^.* /, "") : window,
-        remaining: reset ? null : remaining,
+        remaining,
         resetsAt: rate?.resets_at ?? null, reset, age,
-        severity: reset || remaining === null ? "none" : remaining > 50 ? "ok" : remaining >= 20 ? "warn" : "crit" });
+        severity: remaining > 50 ? "ok" : remaining >= 20 ? "warn" : "crit" });
     }
   }
   return rows;

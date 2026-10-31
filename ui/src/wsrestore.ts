@@ -18,6 +18,8 @@ interface SavedWorkspace {
   name: string;
   socket?: string;
   pending?: boolean;
+  groupId?: number;
+  collapsed?: boolean;
   tree: LayoutNode | null;
 }
 
@@ -41,19 +43,62 @@ export function normalizeWorkspaces<T extends SavedWorkspace>(list: T[]): T[] {
   return out;
 }
 
+// 같은 소켓의 구/신 본부명 패널을 합친다. 빈 중복도 저장 전에 제거한다.
+export function coalesceHqWorkspaces<T extends SavedWorkspace>(
+  workspaces: T[],
+  samePanel: (a: string, b: string) => boolean,
+): Map<number, number> {
+  const removed = new Map<number, number>();
+  for (let i = 0; i < workspaces.length; i++) {
+    if (!workspaces[i].tree) {
+      const occupied = workspaces.findIndex((ws, j) => j > i && ws.tree && !ws.pending
+        && ws.socket === workspaces[i].socket && samePanel(ws.name, workspaces[i].name));
+      if (occupied >= 0) [workspaces[i], workspaces[occupied]] = [workspaces[occupied], workspaces[i]];
+    }
+    const keep = workspaces[i];
+    for (let j = i + 1; j < workspaces.length;) {
+      const extra = workspaces[j];
+      if (keep.pending || extra.pending || keep.socket !== extra.socket || !samePanel(keep.name, extra.name)) { j++; continue; }
+      if (extra.tree) keep.tree = dedupeTree(keep.tree
+        ? { type: "split", dir: "row", a: keep.tree, b: extra.tree }
+        : extra.tree);
+      if (keep.groupId == null) keep.groupId = extra.groupId;
+      if (keep.collapsed == null) keep.collapsed = extra.collapsed;
+      removed.set(extra.id, keep.id);
+      workspaces.splice(j, 1);
+    }
+  }
+  return removed;
+}
+
+// 확인된 기본 데몬의 빈 본부 탭만 정리한다. 사용자 빈 탭·부서 소켓은 보존한다.
+export function pruneEmptyHqWorkspaces<T extends SavedWorkspace>(
+  workspaces: T[], isHqPanel: (name: string) => boolean,
+): number[] {
+  const removed: number[] = [];
+  for (let i = workspaces.length - 1; i >= 0 && workspaces.length > 1; i--) {
+    const ws = workspaces[i];
+    if (ws.tree || ws.pending || ws.socket !== undefined || !isHqPanel(ws.name)) continue;
+    removed.push(ws.id);
+    workspaces.splice(i, 1);
+  }
+  return removed;
+}
+
 // 저장된 큰 격자는 첫 렌더 전에 살아 있는 제목으로 분리한다. 미응답 소켓의 트리는 그대로 둔다.
 export function rehomeRestoredSeats<T extends SavedWorkspace>(
   workspaces: T[],
   live: readonly { socket?: string; surface_id: number; title: string }[],
   target: (workspaceName: string, title: string) => string | null,
   makeWorkspace: (name: string, socket?: string) => T,
+  samePanel: (a: string, b: string) => boolean = (a, b) => a === b,
 ): void {
   for (const seat of live) {
     const from = workspaces.find((ws) => ws.socket === seat.socket && treeSids(ws.tree).includes(seat.surface_id));
     if (!from) continue;
     const name = target(from.name, seat.title);
     if (!name) continue;
-    let to = workspaces.find((ws) => ws.socket === seat.socket && ws.name === name);
+    let to = workspaces.find((ws) => ws.socket === seat.socket && (ws.name === name || samePanel(ws.name, name)));
     const moved = transferTrees(from.tree, to?.tree ?? null, seat.surface_id);
     if (!moved) continue;
     if (!to) { to = makeWorkspace(name, seat.socket); workspaces.push(to); }

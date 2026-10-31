@@ -175,7 +175,7 @@ export function paneRehomeTarget(currentWsName: string, title: string): string |
   // 쓰면 입양이 브랜드로 보낸 pane 을 재배치가 매 틱 되돌리거나(깜박임), 반대로 잘못 앉은 pane 이
   // 영영 구조되지 않는다. 배치의 기준은 한 곳에만 둔다.
   const want = adoptHqOf(title);
-  if (!want || want === currentWsName) return null;
+  if (!want || want === currentWsName || sameHqPanelName(currentWsName, want)) return null;
 
   // 주소 없는 레거시 제목 `사람이름·본부명·직무`에서 첫 토큰만 권위 브랜드로 고친 rename은
   // 같은 본부의 기존 브랜드 ws를 재사용한다. hqOf의 레거시 `닉·본부명` 계약은 그대로 두고,
@@ -229,6 +229,17 @@ export function hqDisplayName(hq: string): string {
   const t = (hq ?? "").trim();
   const dept = brandDept[t];
   return dept ? `${t}${HQ_SEP}${dept}` : t;
+}
+
+// 구 제목(주소 없음)의 `브랜드·본부`와 새 주소 제목의 `브랜드`는 같은 로컬 본부다.
+export function sameHqPanelName(a: string, b: string): boolean {
+  const key = (name: string): string | null => {
+    const first = name.split(HQ_SEP)[0]?.trim() ?? "";
+    if (isHqBrand(first) && (name === first || name === hqDisplayName(first))) return first;
+    return isHqToken(name) ? name : null;
+  };
+  const left = key(a);
+  return left !== null && left === key(b);
 }
 
 export const isHqBrand = (token: string): boolean => Object.prototype.hasOwnProperty.call(brandDept, (token ?? "").trim());

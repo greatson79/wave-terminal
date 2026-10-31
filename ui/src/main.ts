@@ -23,14 +23,14 @@ import { pauseView, type PauseSocketStatus, type PauseView } from "./pausebadge"
 import { DEFAULT_EXIT_POLICY, decideExitAction, shouldDropEmptyWorkspace, shouldReassignFocus, shouldRemoveAfterGrace, type GraceRecheck } from "./exitpolicy";
 import { classifyDrainVerifyFallback, drainVerifyFallbackToast } from "./drainverify";
 import { sendPreparedHelp } from "./helpflow";
-import { adoptHqOf, autoAssignGroups, configureHierarchyNaming, hqTokenOf, nextTeamName, paneRehomeTarget, pickAdoptWs, sortHqMembers, sortHqWorkspaces, tabLabel } from "./hierarchy";
+import { adoptHqOf, autoAssignGroups, configureHierarchyNaming, hqTokenOf, nextTeamName, paneRehomeTarget, pickAdoptWs, sameHqPanelName, sortHqMembers, sortHqWorkspaces, tabLabel } from "./hierarchy";
 import { sidebarTreeSpec, hqCountLabel } from "./sidebartree";
 import { hqColor, parseNamingColors, type HqColorMap } from "./hqbadge";
 import { createHqTabShell, type MiniDoc } from "./wstab";
 import { teamMemberRows } from "./teamtree";
 import { dedupeTree, socketOwnsSid } from "./treededupe";
 import { shouldAdoptSurface } from "./surfaceadopt";
-import { normalizeWorkspaces, rehomeRestoredSeats, shouldKeepEmptyWorkspaceOnRestore } from "./wsrestore";
+import { coalesceHqWorkspaces, normalizeWorkspaces, pruneEmptyHqWorkspaces, rehomeRestoredSeats, shouldKeepEmptyWorkspaceOnRestore } from "./wsrestore";
 import { nextGhostStrike } from "./ghoststrike";
 import { transferTrees } from "./transfer";
 import { resolveEventSocket } from "./eventsocket";
@@ -1636,8 +1636,9 @@ async function refreshPaneTitles() {
   refreshing = true;
   try {
     // 멀티마스터 F4: workspace별 소켓을 순회 — 각 데몬의 surface를 그 소켓 ws에만 귀속시킨다.
-    const sockets = [...new Set(workspaces.map((w) => w.socket))];
+    const sockets = [...new Set([undefined, ...workspaces.map((w) => w.socket)])];
     let adopted = false;
+    let verifiedDefault = false;
     for (const sk of sockets) {
       try {
         const org = (await invoke("org_status", { socket: sk }).catch(() => ({ surfaces: [] }))) as { surfaces?: { surface_id: number; status?: { task?: string | null } }[] };
@@ -1654,6 +1655,7 @@ async function refreshPaneTitles() {
             usage?: ObservedUsage | null;
           }[];
         };
+        if (sk === undefined) verifiedDefault = true;
         for (const s of r.surfaces) {
           surfaceTitles.set(paneKey(s.surface_id, sk), s.title);
           const rt = panes.get(paneKey(s.surface_id, sk));
@@ -1686,11 +1688,15 @@ async function refreshPaneTitles() {
           // !w.pending — 런칭 중 placeholder(socket 미정)에는 입양 금지(타 데몬 surface 오입양 차단).
           const candidates = workspaces.filter((w) => !w.pending && (w.socket ?? undefined) === (sk ?? undefined));
           const name = hierarchyEnabled ? adoptHqOf(s.title) : null;
-          let ws = name ? candidates.find((w) => w.name === name) : hierarchyEnabled
+          let ws = name ? candidates.find((w) => w.name === name || sameHqPanelName(w.name, name)) : hierarchyEnabled
             ? pickAdoptWs(candidates, current()) : candidates[0];
           if (!ws && name) {
             ws = { id: wsCounter++, name, tree: null, socket: sk };
             workspaces.push(ws);
+          }
+          if (!ws && !name && sk === undefined) {
+            ws = { id: wsCounter++, name: UNTITLED, tree: null };
+            workspaces.push(ws); // 기본 탭이 0개여도 무본부 좌석을 숨기지 않는다.
           }
           if (!ws || collectSids(ws.tree).includes(s.surface_id)) continue;
           setRoleDot((await makePane(s.surface_id, s.title, sk)).roleEl, s.role); // 입양 즉시 역할 점 채색(다음 틱 대기 없이)
@@ -1706,7 +1712,8 @@ async function refreshPaneTitles() {
           if (!from) continue;
           const name = paneRehomeTarget(from.name, s.title);
           if (!name) continue;
-          let to = workspaces.find((w) => !w.pending && (w.socket ?? undefined) === (sk ?? undefined) && w.name === name);
+          let to = workspaces.find((w) => !w.pending && (w.socket ?? undefined) === (sk ?? undefined)
+            && (w.name === name || sameHqPanelName(w.name, name)));
           if (!to) { to = { id: wsCounter++, name, tree: null, socket: sk }; workspaces.push(to); }
           from.tree = from.tree ? replaceNode(from.tree, s.surface_id, () => null) : null;
           if (!collectSids(to.tree).includes(s.surface_id)) to.tree = to.tree
@@ -1718,6 +1725,8 @@ async function refreshPaneTitles() {
         // 한 부서가 응답하지 않아도 다른 소켓의 좌석 입양·재배치는 계속한다.
       }
     }
+    if (coalesceHqPanels()) adopted = true;
+    if (verifiedDefault && pruneEmptyHqPanels()) adopted = true;
     renderHeader();
     if (adopted) {
       render();
@@ -2276,7 +2285,27 @@ function paneAtPhysicalPoint(pos?: { x: number; y: number }): PaneRuntime | unde
 
 // ---------- render ----------
 
+function coalesceHqPanels(): boolean {
+  if (!hierarchyEnabled) return false;
+  const activeId = workspaces[activeWs]?.id;
+  const removed = coalesceHqWorkspaces(workspaces, sameHqPanelName);
+  if (!removed.size) return false;
+  const targetId = activeId === undefined ? undefined : (removed.get(activeId) ?? activeId);
+  activeWs = Math.max(0, workspaces.findIndex((ws) => ws.id === targetId));
+  return true;
+}
+
+function pruneEmptyHqPanels(): boolean {
+  if (!hierarchyEnabled) return false;
+  const activeId = workspaces[activeWs]?.id;
+  const removed = pruneEmptyHqWorkspaces(workspaces, (name) => sameHqPanelName(name, name));
+  if (!removed.length) return false;
+  activeWs = Math.max(0, workspaces.findIndex((ws) => ws.id === activeId));
+  return true;
+}
+
 function render() {
+  coalesceHqPanels();
   for (const rt of panes.values()) {
     const state = paneTitleState.get(paneKey(rt.sid, rt.socket));
     displayPaneHeading(rt.titleEl, rt.sid, state);
@@ -4934,7 +4963,7 @@ async function start() {
   if (ghosts.size) workspaces = workspaces.filter((w) => !ghosts.has(w.id));
 
   // 소켓별 live 집계 — 데몬 미응답(ok=false) 소켓은 판정 보류(죽은 pane 제거 스킵, ws 보존).
-  const sockets = [...new Set(workspaces.map((w) => w.socket))];
+  const sockets = [...new Set([undefined, ...workspaces.map((w) => w.socket)])];
   const liveBySock = new Map<
     string | undefined,
     { ids: Set<number>; ok: boolean; list: { surface_id: number; title: string }[] }
@@ -4986,6 +5015,7 @@ async function start() {
   }
   const restoredIdx = workspaces.findIndex((ws) => ws.id === activeWsId);
   activeWs = restoredIdx >= 0 ? restoredIdx : Math.min(activeWs, workspaces.length - 1);
+  coalesceHqPanels(); // 빈 중복을 먼저 합쳐야 같은 부서 소켓에 셸을 여러 개 만들지 않는다.
 
   // 모든 ws의 소유권을 확인한 뒤에만 고아 surface를 같은 소켓의 대상 패널에 입양한다.
   for (const sk of sockets) {
@@ -4997,9 +5027,13 @@ async function start() {
       if (socketOwnsSid(workspaces, sk, s.surface_id)) continue;
       const candidates = workspaces.filter((w) => !w.pending && (w.socket ?? undefined) === (sk ?? undefined));
       const name = hierarchyEnabled ? adoptHqOf(s.title) : null;
-      let ws = name ? candidates.find((w) => w.name === name) : hierarchyEnabled
+      let ws = name ? candidates.find((w) => w.name === name || sameHqPanelName(w.name, name)) : hierarchyEnabled
         ? pickAdoptWs(candidates, current()) : candidates[0];
       if (!ws && name) { ws = { id: wsCounter++, name, tree: null, socket: sk }; workspaces.push(ws); }
+      if (!ws && !name && sk === undefined) {
+        ws = { id: wsCounter++, name: UNTITLED, tree: null };
+        workspaces.push(ws);
+      }
       if (ws) {
         ws.tree = ws.tree
           ? { type: "split", dir: "row", a: ws.tree, b: { type: "pane", sid: s.surface_id } }
@@ -5020,7 +5054,9 @@ async function start() {
   if (hierarchyEnabled) {
     rehomeRestoredSeats(workspaces,
       [...liveBySock].flatMap(([socket, lb]) => lb.ok ? lb.list.map((s) => ({ ...s, socket })) : []),
-      paneRehomeTarget, (name, socket) => ({ id: wsCounter++, name, tree: null, socket }));
+      paneRehomeTarget, (name, socket) => ({ id: wsCounter++, name, tree: null, socket }), sameHqPanelName);
+    coalesceHqPanels();
+    if (liveBySock.get(undefined)?.ok === true) pruneEmptyHqPanels();
     if (!current().tree && activeSeat != null) {
       const destination = workspaces.findIndex((ws) => ws.socket === activeSocket && collectSids(ws.tree).includes(activeSeat));
       if (destination >= 0) activeWs = destination;

@@ -52,6 +52,7 @@ def main():
             browser = playwright.chromium.launch()
             page = browser.new_page(viewport={"width": 900, "height": 900}, device_scale_factor=2)
             script = """
+if (!sessionStorage.getItem('usage-fixture-set')) {
 localStorage.setItem('mock-surfaces', JSON.stringify([
   {surface_id:1,title:'Alpha·샘플A본부·책임자·s1',role:'master',exited:false,usage:null},
   {surface_id:2,title:'Beta·샘플B본부·책임자·s2',role:'master',exited:false,usage:null}
@@ -63,6 +64,8 @@ localStorage.setItem('cys-layout-v2', JSON.stringify({workspaces:[
   {id:10,name:'Alpha',auto:true,collapsed:false,pinned:false},
   {id:11,name:'Beta',auto:true,collapsed:false,pinned:false}
 ],active:0,counter:3,groupCounter:12}));
+sessionStorage.setItem('usage-fixture-set', '1');
+}
 """ + SHIM + "\n" + """
 localStorage.setItem('cys-wsbar-w', '200');
 const previousInvoke = window.__TAURI__.core.invoke;
@@ -113,6 +116,85 @@ window.__TAURI__.core.invoke = (command, args) =>
             page.keyboard.press("Tab")
             page.keyboard.press("Enter")
             assert not page.locator("#wsbar").is_visible()
+            page.get_by_role("button", name="정렬").click()
+            page.get_by_text("사이드바 펼치기", exact=True).click()
+            page.add_init_script("""(() => {
+              if (sessionStorage.getItem('add4-fixture-set')) return;
+              const surfaces = [
+                {surface_id:1,title:'Alpha·샘플A본부·책임자',role:'master',exited:false,usage:null},
+                {surface_id:2,title:'Alpha·작업·s2',role:'worker',exited:false,usage:null}
+              ];
+              localStorage.setItem('mock-surfaces', JSON.stringify(surfaces));
+              window.__mockSurfaces = surfaces;
+              localStorage.setItem('cys-layout-v2', JSON.stringify({workspaces:[
+                {id:1,name:'Alpha·샘플A본부',tree:{type:'pane',sid:1}},
+                {id:2,name:'Alpha',tree:{type:'pane',sid:2}},
+                {id:3,name:'Alpha·샘플A본부',tree:null}
+              ],groups:[],active:2,counter:4,groupCounter:1}));
+              sessionStorage.setItem('add4-fixture-set', '1');
+            })()""")
+            page.reload()
+            page.wait_for_function("""() => {
+              const ws = JSON.parse(localStorage.getItem('cys-layout-v2')).workspaces;
+              return ws.length === 1 && ws[0].tree && document.querySelectorAll('#ws-tabs .ws-tab').length === 1;
+            }""")
+            seats = """() => {
+              const tree = JSON.parse(localStorage.getItem('cys-layout-v2')).workspaces[0].tree;
+              const walk = node => node.type === 'pane' ? [node.sid] : [...walk(node.a), ...walk(node.b)];
+              return walk(tree).sort((a,b) => a-b);
+            }"""
+            assert page.evaluate(seats) == [1, 2]
+            assert "0 pane" not in page.locator("#ws-tabs").inner_text()
+            page.evaluate("""() => {
+              window.__mockSurfaces.push({surface_id:4,title:'Alpha·새 작업·s4',role:'worker',exited:false,usage:null});
+              localStorage.setItem('mock-surfaces', JSON.stringify(window.__mockSurfaces));
+            }""")
+            page.wait_for_function("""() => {
+              const ws = JSON.parse(localStorage.getItem('cys-layout-v2')).workspaces;
+              return ws.length === 1 && JSON.stringify(ws[0].tree).includes('"sid":4');
+            }""", timeout=10_000)
+            assert page.evaluate(seats) == [1, 2, 4]
+            page.locator("#btn-new").click()
+            assert page.locator("#ws-tabs .ws-tab").count() == 1
+            new_sid = page.evaluate("window.__mockSurfaces.at(-1).surface_id")
+            assert page.evaluate(seats) == sorted([1, 2, 4, new_sid])
+            page.reload()
+            page.wait_for_function("""() => document.querySelectorAll('#ws-tabs .ws-tab').length === 1""")
+            assert page.evaluate(seats) == sorted([1, 2, 4, new_sid])
+            assert "0 pane" not in page.locator("#ws-tabs").inner_text()
+            page.locator("#wsbar").screenshot(path=str(args.output.with_name("usage_panel_hq_single.png")))
+            page.add_init_script("""(() => {
+              if (sessionStorage.getItem('add4-empty-fixture-set')) return;
+              localStorage.setItem('mock-surfaces', '[]');
+              window.__mockSurfaces = [];
+              localStorage.setItem('mock-by-socket', JSON.stringify({other:[
+                {surface_id:9,title:'Beta·샘플B본부·책임자·s9',role:'master',exited:false,usage:null}
+              ]}));
+              localStorage.setItem('mock-depts', JSON.stringify({depts:{sample:{socket:'other',display_name:'Beta'}}}));
+              localStorage.setItem('cys-layout-v2', JSON.stringify({workspaces:[
+                {id:1,name:'Alpha·샘플A본부',tree:null},
+                {id:2,name:'Beta',socket:'other',tree:{type:'pane',sid:9}}
+              ],groups:[],active:1,counter:3,groupCounter:1}));
+              sessionStorage.setItem('add4-empty-fixture-set', '1');
+            })()""")
+            page.reload()
+            page.wait_for_function("""() => {
+              const ws = JSON.parse(localStorage.getItem('cys-layout-v2')).workspaces;
+              return ws.length === 1 && ws[0].socket === 'other';
+            }""")
+            page.evaluate("""() => window.__mockSurfaces.push(
+              {surface_id:10,title:'surface 10',role:'worker',exited:false,usage:null})""")
+            page.wait_for_function("""() => JSON.stringify(JSON.parse(localStorage.getItem('cys-layout-v2')).workspaces)
+              .includes('"sid":10')""", timeout=10_000)
+            page.evaluate("""() => window.__mockSurfaces.push(
+              {surface_id:11,title:'Alpha·새 작업·s11',role:'worker',exited:false,usage:null})""")
+            page.wait_for_function("""() => {
+              const ws = JSON.parse(localStorage.getItem('cys-layout-v2')).workspaces;
+              return ws.length === 3 && ws.some(w => w.name === 'Alpha' && JSON.stringify(w.tree).includes('"sid":11'));
+            }""", timeout=10_000)
+            page.reload()
+            page.wait_for_function("""() => JSON.parse(localStorage.getItem('cys-layout-v2')).workspaces.length === 3""")
+            assert "0 pane" not in page.locator("#ws-tabs").inner_text()
             browser.close()
     finally:
         server.shutdown()

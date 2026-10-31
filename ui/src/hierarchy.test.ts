@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { adoptHqOf, autoAssignGroups, configureHierarchyNaming, hqDisplayName, isHqBrand, paneRehomeTarget, pickAdoptWs, sortHqWorkspaces } from "./hierarchy";
+import { adoptHqOf, autoAssignGroups, configureHierarchyNaming, hqDisplayName, isHqBrand, paneRehomeTarget, pickAdoptWs, sameHqPanelName, sortHqWorkspaces } from "./hierarchy";
 
 const naming = JSON.stringify({ roles: {
   master: { name: "Alpha", label: "운영본부·책임자" },
@@ -22,4 +22,14 @@ test("local naming roles determine panels, rehome, group and order", () => {
   expect(members[0].groupId).toBe(1);
   expect(configureHierarchyNaming(null)).toBe(false);
   expect(isHqBrand("Alpha")).toBe(false);
+});
+
+test("addressed and addressless titles share one local headquarters panel", () => {
+  configureHierarchyNaming(naming);
+  expect(adoptHqOf("Alpha·작업·s21")).toBe("Alpha");
+  expect(adoptHqOf("Alpha·운영본부·작업")).toBe("Alpha·운영본부");
+  expect(sameHqPanelName("Alpha", "Alpha·운영본부")).toBe(true);
+  expect(sameHqPanelName("Beta", "Alpha·운영본부")).toBe(false);
+  expect(paneRehomeTarget("Alpha·운영본부", "Alpha·작업·s21")).toBeNull();
+  configureHierarchyNaming(null);
 });

@@ -1,12 +1,59 @@
 import { expect, test } from "bun:test";
-import { normalizeWorkspaces, rehomeRestoredSeats, shouldKeepEmptyWorkspaceOnRestore } from "./wsrestore";
+import { coalesceHqWorkspaces, normalizeWorkspaces, pruneEmptyHqWorkspaces, rehomeRestoredSeats, shouldKeepEmptyWorkspaceOnRestore } from "./wsrestore";
 import { treeSids, type LayoutNode } from "./treededupe";
-import { configureHierarchyNaming, paneRehomeTarget } from "./hierarchy";
+import { configureHierarchyNaming, paneRehomeTarget, sameHqPanelName } from "./hierarchy";
 
 test("live or temporarily unavailable daemon keeps an empty panel", () => {
   expect(shouldKeepEmptyWorkspaceOnRestore(true)).toBe(true);
   expect(shouldKeepEmptyWorkspaceOnRestore(false)).toBe(true);
   expect(shouldKeepEmptyWorkspaceOnRestore(undefined)).toBe(false);
+});
+
+test("wave-spawn, new-surface and restart leave one headquarters panel with every seat", () => {
+  configureHierarchyNaming(JSON.stringify({ roles: { master: { name: "Alpha", label: "운영본부·책임자" } } }));
+  const workspaces = [
+    { id: 1, name: "Alpha·운영본부", tree: { type: "pane" as const, sid: 1 } as LayoutNode | null },
+    { id: 2, name: "Alpha", tree: { type: "pane" as const, sid: 2 } as LayoutNode | null },
+    { id: 3, name: "Alpha·운영본부", tree: null as LayoutNode | null },
+  ];
+  rehomeRestoredSeats(workspaces, [
+    { surface_id: 1, title: "Alpha·운영본부·본부장" },
+    { surface_id: 2, title: "Alpha·작업·s2" },
+  ], paneRehomeTarget, (name) => ({ id: 4, name, tree: null }), sameHqPanelName);
+  const removed = coalesceHqWorkspaces(workspaces, sameHqPanelName);
+  expect(removed.get(2)).toBe(1);
+  expect(removed.get(3)).toBe(1);
+  expect(workspaces).toHaveLength(1);
+  expect(treeSids(workspaces[0].tree)).toEqual([1, 2]);
+  expect(coalesceHqWorkspaces(workspaces, sameHqPanelName).size).toBe(0);
+  configureHierarchyNaming(null);
+});
+
+test("coalescing keeps the occupied panel's user state and never crosses sockets", () => {
+  configureHierarchyNaming(JSON.stringify({ roles: { master: { name: "Alpha", label: "운영본부·책임자" } } }));
+  const workspaces = [
+    { id: 1, name: "Alpha·운영본부", socket: "dept", tree: null as LayoutNode | null, collapsed: true, groupId: undefined as number | undefined },
+    { id: 2, name: "Alpha", socket: "dept", tree: { type: "pane" as const, sid: 2 } as LayoutNode | null, collapsed: false, groupId: 9 as number | undefined },
+    { id: 3, name: "Alpha", socket: "other", tree: null as LayoutNode | null, collapsed: false, groupId: undefined as number | undefined },
+  ];
+  expect(coalesceHqWorkspaces(workspaces, sameHqPanelName).get(1)).toBe(2);
+  expect(workspaces).toHaveLength(2);
+  expect(workspaces[0].groupId).toBe(9);
+  expect(workspaces[0].collapsed).toBe(false);
+  expect(workspaces[1].socket).toBe("other");
+  configureHierarchyNaming(null);
+});
+
+test("confirmed default socket prunes a standalone empty HQ ghost but retains user and department tabs", () => {
+  configureHierarchyNaming(JSON.stringify({ roles: { master: { name: "Alpha", label: "운영본부·책임자" } } }));
+  const workspaces = [
+    { id: 1, name: "Alpha·운영본부", tree: null as LayoutNode | null },
+    { id: 2, name: "notes", tree: null as LayoutNode | null },
+    { id: 3, name: "Alpha", socket: "dept", tree: null as LayoutNode | null },
+  ];
+  expect(pruneEmptyHqWorkspaces(workspaces, (name) => sameHqPanelName(name, name))).toEqual([1]);
+  expect(workspaces.map((ws) => ws.id)).toEqual([2, 3]);
+  configureHierarchyNaming(null);
 });
 
 test("restart retains every panel on one socket and repairs duplicate ids without duplicating seats", () => {
@@ -67,4 +114,16 @@ test("restore leaves seats without a live title in their saved panel", () => {
   rehomeRestoredSeats(workspaces, [], () => "Alpha", () => ({ id: 2, name: "Alpha", tree: null }));
   expect(treeSids(workspaces[0].tree)).toEqual([9]);
   expect(workspaces).toHaveLength(1);
+});
+
+test("restore reuses an exact legacy target even when local HQ aliases do not match", () => {
+  configureHierarchyNaming(null);
+  const workspaces = [
+    { id: 1, name: "misc", tree: { type: "pane" as const, sid: 9 } as LayoutNode | null },
+    { id: 2, name: "legacy·운영본부", tree: null as LayoutNode | null },
+  ];
+  rehomeRestoredSeats(workspaces, [{ surface_id: 9, title: "legacy·운영본부·작업" }],
+    () => "legacy·운영본부", () => { throw new Error("duplicate workspace"); }, sameHqPanelName);
+  expect(workspaces).toHaveLength(2);
+  expect(treeSids(workspaces[1].tree)).toEqual([9]);
 });

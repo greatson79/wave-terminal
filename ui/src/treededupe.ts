@@ -23,7 +23,9 @@ export function dedupeTree(node: LayoutNode | null, seen: Set<number> = new Set(
   }
   const a = dedupeTree(node.a, seen);
   const b = dedupeTree(node.b, seen);
-  if (a && b) return { ...node, a, b };
+  // 바뀐 게 없으면 같은 노드를 돌려준다 — 복사하면 방금 그린 DOM(divider 드래그 클로저)이 쥔 노드와
+  // ws.tree 가 갈라져 끌어 둔 비율이 저장·재그리기에서 사라진다.
+  if (a && b) return a === node.a && b === node.b ? node : { ...node, a, b };
   return a ?? b;
 }
 

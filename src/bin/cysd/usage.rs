@@ -10,7 +10,7 @@
 //! - codex: `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` — `token_count` 이벤트의
 //!   `info.last_token_usage`(컨텍스트)·`model_context_window`·`rate_limits`(primary 5h /
 //!   secondary 7d, used_percent·resets_at).
-//! - gemini(agy): 토큰·쿼터를 평문 로컬 파일에 남기지 않음 — Phase 2(로컬 RPC) 대상, 여기선 스킵.
+//! - gemini(agy): 공식 `agy -p /usage` 헤드리스 출력을 5분마다 별도 수집.
 //!
 //! pane↔세션 매핑 우선순위:
 //! ① `usage.register` RPC (SessionStart hook이 transcript_path를 등록 — 같은 cwd 동시
@@ -160,7 +160,7 @@ fn collect_tick(
         match agent.as_str() {
             "claude" => collect_for(daemon, s, "claude", &bin, tails, attempts),
             "codex" => collect_for(daemon, s, "codex", &bin, tails, attempts),
-            // gemini(agy)·grok: 로컬 평문 산출물에 토큰 미기록 — Phase 2 (로컬 RPC) 대상
+            // gemini(agy)는 별도 공식 CLI 수집기, grok은 로컬 산출물 미지원
             _ => {}
         }
     }
@@ -1046,221 +1046,53 @@ pub fn claude_project_component(cwd: &str) -> String {
     cys::claude_project_component(cwd)
 }
 
-// ───────────────────────── T5 Phase 2-B: agy(Antigravity) 쿼터 ─────────────────────────
-// agy는 토큰·쿼터를 평문 로컬 파일에 안 남긴다 — 실행 중 프로세스의 로컬 LS RPC(HTTPS,
-// self-signed, 127.0.0.1 무인증)로만 노출된다(2026-06-17 라이브 프로브 실측). 포트는 매
-// 실행 변동 → lsof로 발견·probe로 검증·캐시. 파일 tail 수집기와 분리된 저빈도 비동기
-// 태스크(async curl — tokio 워커 미블로킹). HTTP 클라이언트 의존성을 더하지 않으려 curl
-// 셸아웃을 쓴다(codex의 lsof 셸아웃과 동형). 실패·미설치는 graceful(배지 없음 유지).
-
-const AGY_SVC: &str = "exa.language_server_pb.LanguageServerService";
-
-fn agy_poll_secs() -> u64 {
-    cys::env_compat("CYS_AGY_POLL_SECS")
-        .and_then(|v| v.parse().ok())
-        .filter(|v| *v >= 1)
-        .unwrap_or(15)
-}
-
-/// RetrieveUserQuotaSummary 응답 → RateWindow 벡터 (Gemini 그룹만 — agy 기본 모델).
-/// 실측 스키마: `response.groups[].buckets[]{window("5h"|"weekly"), remainingFraction, resetTime}`.
-/// used_pct = (1-remainingFraction)*100, weekly→"7d"(claude/codex 배지와 라벨 통일), ISO8601→epoch.
-/// PII(GetUserStatus의 name/email)는 건드리지 않는다 — 쿼터 숫자만.
-pub fn parse_agy_quota(v: &Value) -> Vec<RateWindow> {
-    let mut out = Vec::new();
-    let Some(groups) = v["response"]["groups"].as_array() else {
-        return out;
-    };
-    for g in groups {
-        if !g["displayName"].as_str().unwrap_or("").contains("Gemini") {
-            continue; // 3p(Claude/GPT) 그룹 제외 — agy 기본은 Gemini
-        }
-        for b in g["buckets"].as_array().into_iter().flatten() {
-            let Some(frac) = b["remainingFraction"].as_f64() else {
-                continue;
-            };
-            let label = match b["window"].as_str().unwrap_or("") {
-                "5h" => "5h",
-                "weekly" => "7d",
-                other => other,
-            };
-            let resets_at = b["resetTime"]
-                .as_str()
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                .map(|dt| dt.timestamp() as f64);
-            out.push(RateWindow {
-                label: label.to_string(),
-                used_pct: ((1.0 - frac) * 100.0).clamp(0.0, 100.0),
-                resets_at,
-            });
-        }
-    }
-    out.sort_by_key(|r| u8::from(r.label != "5h")); // 5h 먼저, 7d 다음 (배지 순서 안정)
-    out
-}
-
-/// agy 프로세스가 LISTEN하는 127.0.0.1/localhost 포트 목록 (lsof — codex 패턴 동형, 와일드카드 제외).
-async fn agy_listen_ports(pid: u32) -> Vec<u16> {
-    let Ok(out) = tokio::process::Command::new("lsof")
-        .args(["-nP", "-p", &pid.to_string(), "-iTCP", "-sTCP:LISTEN", "-Fn"])
-        .output()
-        .await
-    else {
-        return Vec::new();
-    };
-    let mut ports = Vec::new();
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        let Some(rest) = line.strip_prefix('n') else {
-            continue;
-        };
-        if !(rest.starts_with("localhost:") || rest.starts_with("127.0.0.1:")) {
-            continue; // 로컬 바인드만 — agy LS는 localhost
-        }
-        if let Some(p) = rest.rsplit(':').next().and_then(|s| s.parse::<u16>().ok()) {
-            if !ports.contains(&p) {
-                ports.push(p);
-            }
-        }
-    }
-    ports.truncate(12); // 폭주 가드 — 후보 과다 시 probe 비용 상한
-    ports
-}
-
-/// 한 포트로 RetrieveUserQuotaSummary 프로브 (async curl -sk, self-signed 수용·2s 타임아웃).
-/// 성공 시 Gemini 쿼터 RateWindow, 아니면 None(잘못된 포트·실패).
-async fn agy_quota_probe(port: u16) -> Option<Vec<RateWindow>> {
-    use crate::state::HideConsole;
-    let url = format!("https://127.0.0.1:{port}/{AGY_SVC}/RetrieveUserQuotaSummary");
-    let fut = tokio::process::Command::new("curl")
-        .args([
-            "-sk",
-            "--max-time",
-            "2",
-            "-X",
-            "POST",
-            "-H",
-            "content-type: application/json",
-            "-H",
-            "connect-protocol-version: 1",
-            "--data",
-            "{}",
-            // R-CLI-3(부차): URL이 고정 localhost(포트 숫자)라 실위험은 없으나 동형 패턴 방어심층 —
-            // `--` 옵션 종결자로 URL을 위치 인자로 강제한다.
-            "--",
-            &url,
-        ])
-        // Windows: 주기 프로브가 콘솔 창을 반복 플래시하지 않게(콘솔 없는 cysd의 콘솔 자식).
-        .hide_console()
-        .output();
-    let out = tokio::time::timeout(Duration::from_secs(3), fut)
-        .await
-        .ok()?
-        .ok()?;
-    if !out.status.success() {
+// Antigravity CLI의 공식 /usage 출력. 헤드리스 명령은 모델 턴 없이 쿼터만 읽는다.
+fn parse_agy_cli_usage(v: &Value) -> Option<Vec<RateWindow>> {
+    if v["status"] != "SUCCESS" || v["usage"]["total_tokens"].as_u64() != Some(0) {
         return None;
     }
-    let v: Value = serde_json::from_slice(&out.stdout).ok()?;
-    let rate = parse_agy_quota(&v);
-    if rate.is_empty() {
-        None
-    } else {
-        Some(rate)
-    }
-}
-
-/// agy 쿼터를 surface.observed_usage(source:"agy-rpc")에 반영 + usage.updated 발행.
-/// agy는 context window를 안 주므로 ctx_pct=None(배지는 쿼터만). 임계(context.threshold)는
-/// ctx_pct가 없으니 발화 대상 아님.
-fn update_agy_usage(daemon: &Arc<Daemon>, s: &Arc<Surface>, rate: Vec<RateWindow>) {
-    crate::accounts::note_rate(daemon, "gemini", "", &rate, "agy-rpc", now_epoch());
-    let new = ObservedUsage {
-        agent: "gemini".into(),
-        model: None,
-        ctx_tokens: None,
-        ctx_window: None,
-        ctx_pct: None,
-        rate,
-        rate_updated_at: Some(now_epoch()),
-        source: "agy-rpc".into(),
-        session_file: String::new(),
-        updated_at: now_epoch(),
-    };
-    let changed = s
-        .observed_usage
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|p| p.rate != new.rate || p.source != new.source)
-        .unwrap_or(true);
-    *s.observed_usage.lock().unwrap() = Some(new.clone());
-    if changed {
-        daemon.bus.publish(
-            "usage.updated",
-            "usage",
-            Some(s.id),
-            json!({
-                "surface_ref": cys::surface_ref(s.id),
-                "role": s.role.lock().unwrap().clone(),
-                "agent": "gemini", "ctx_pct": Value::Null,
-                "rate": new.rate, "source": "agy-rpc",
-            }),
-        );
-    }
-}
-
-/// 한 agy surface의 쿼터 수집 — 캐시 포트 우선, 실패 시 lsof 재발견·probe. 전부 실패면 graceful.
-async fn collect_agy_for(daemon: &Arc<Daemon>, s: &Arc<Surface>, ports: &mut HashMap<u64, u16>) {
-    let mut candidates: Vec<u16> = Vec::new();
-    if let Some(p) = ports.get(&s.id) {
-        candidates.push(*p);
-    }
-    let (agy_pid, _) = find_agent_descendant(s.pid, "agy");
-    if let Some(pid) = agy_pid {
-        for p in agy_listen_ports(pid).await {
-            if !candidates.contains(&p) {
-                candidates.push(p);
-            }
+    let mut rate = Vec::new();
+    for line in v["response"].as_str()?.lines() {
+        let fields: Vec<_> = line.split('\t').collect();
+        let [group, window, remaining, reset] = fields.as_slice() else { continue };
+        let label = match (*group, *window) {
+            ("Gemini Models", "Five Hour Limit Remaining") => "Gemini Models 5h",
+            ("Gemini Models", "Weekly Limit Remaining") => "Gemini Models 7d",
+            ("Claude and GPT models", "Five Hour Limit Remaining") => "Claude and GPT models 5h",
+            ("Claude and GPT models", "Weekly Limit Remaining") => "Claude and GPT models 7d",
+            ("Gemini 4 Argon", "Gemini 4 Argon Weekly Limit") => "Gemini 4 Argon 7d",
+            _ => continue,
+        };
+        let remaining = remaining.strip_suffix('%')?.parse::<f64>().ok()?;
+        if !remaining.is_finite() || !(0.0..=100.0).contains(&remaining) {
+            return None;
         }
-    }
-    for port in candidates {
-        if let Some(rate) = agy_quota_probe(port).await {
-            ports.insert(s.id, port);
-            update_agy_usage(daemon, s, rate);
-            return;
+        let resets_at = chrono::DateTime::parse_from_rfc3339(reset).ok()?.timestamp() as f64;
+        if rate.iter().any(|w: &RateWindow| w.label == label) {
+            return None;
         }
+        rate.push(RateWindow { label: label.into(), used_pct: 100.0 - remaining, resets_at: Some(resets_at) });
     }
-    ports.remove(&s.id); // 캐시 무효화 — 다음 틱에 재발견 (배지는 갱신 안 함 = 정직)
+    (!rate.is_empty()).then_some(rate)
 }
 
-/// agy(Antigravity) 쿼터 수집기 — 파일 tail과 분리된 저빈도 비동기 태스크.
+async fn collect_agy_cli(daemon: &Arc<Daemon>) {
+    use crate::state::HideConsole;
+    let mut cmd = tokio::process::Command::new("agy");
+    let fut = cmd.args(["-p", "/usage", "--output-format", "json", "--print-timeout", "10s"])
+        .kill_on_drop(true).hide_console().output();
+    let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(15), fut).await else { return };
+    if !out.status.success() || out.stdout.len() > 64 * 1024 { return; }
+    let Some(rate) = serde_json::from_slice::<Value>(&out.stdout).ok().and_then(|v| parse_agy_cli_usage(&v)) else { return };
+    crate::accounts::note_rate(daemon, "agy", "", &rate, "agy-cli", now_epoch());
+}
+
+/// 명령 실행은 최초 1회, 이후 5분마다. 실패하면 기존 스냅샷 시각을 그대로 둔다.
 pub fn spawn_agy_collector(daemon: Arc<Daemon>) {
     tokio::spawn(async move {
-        let mut ports: HashMap<u64, u16> = HashMap::new();
         loop {
-            tokio::time::sleep(Duration::from_secs(agy_poll_secs())).await;
-            let surfaces: Vec<Arc<Surface>> = {
-                daemon
-                    .surfaces
-                    .lock()
-                    .unwrap()
-                    .values()
-                    .filter(|s| !s.exited.load(Ordering::Relaxed))
-                    .filter(|s| {
-                        s.agent_meta
-                            .lock()
-                            .unwrap()
-                            .as_ref()
-                            .map(|(a, _)| a == "gemini")
-                            .unwrap_or(false)
-                    })
-                    .cloned()
-                    .collect()
-            };
-            let live: HashSet<u64> = surfaces.iter().map(|s| s.id).collect();
-            ports.retain(|sid, _| live.contains(sid));
-            for s in surfaces {
-                collect_agy_for(&daemon, &s, &mut ports).await;
-            }
+            collect_agy_cli(&daemon).await;
+            tokio::time::sleep(Duration::from_secs(300)).await;
         }
     });
 }
@@ -1517,38 +1349,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// T5 Phase 2-B: agy RetrieveUserQuotaSummary 파싱 핀 — 2026-06-17 라이브 실측 스키마.
-    /// Gemini 그룹만 추출(3p Claude/GPT 제외)·weekly→"7d"·used_pct=(1-remainingFraction)*100·
-    /// resetTime ISO8601→epoch. PII(GetUserStatus의 name/email)는 만지지 않는다.
     #[test]
-    fn agy_quota_parses_gemini_group_only() {
-        let v: Value = serde_json::from_str(
-            r#"{"response":{"groups":[
-            {"displayName":"Gemini Models","buckets":[
-                {"bucketId":"gemini-weekly","window":"weekly","remainingFraction":0.9484245,"resetTime":"2026-06-19T20:29:38Z"},
-                {"bucketId":"gemini-5h","window":"5h","remainingFraction":0.993488,"resetTime":"2026-06-16T21:04:55Z"}]},
-            {"displayName":"Claude and GPT models","buckets":[
-                {"bucketId":"3p-5h","window":"5h","remainingFraction":1.0,"resetTime":"2026-06-16T21:25:07Z"}]}]}}"#,
-        )
-        .unwrap();
-        let r = parse_agy_quota(&v);
-        assert_eq!(r.len(), 2, "Gemini 그룹 2버킷만 — 3p 그룹 제외");
-        assert_eq!(r[0].label, "5h", "5h 먼저 정렬");
-        assert!((r[0].used_pct - 0.6512).abs() < 0.01, "5h used≈0.65: {}", r[0].used_pct);
-        assert_eq!(r[1].label, "7d", "weekly→7d 라벨 통일");
-        assert!((r[1].used_pct - 5.1576).abs() < 0.01, "weekly used≈5.16: {}", r[1].used_pct);
-        assert!(r[0].resets_at.is_some(), "resetTime ISO8601→epoch 변환");
+    fn agy_cli_usage_parses_official_headless_output() {
+        let v = json!({"status":"SUCCESS","usage":{"total_tokens":0},"response":
+            "Gemini Models\tWeekly Limit Remaining\t99%\t2026-11-03T09:21:43Z\n\
+             Gemini Models\tFive Hour Limit Remaining\t99%\t2026-10-31T05:56:31Z\n\
+             Claude and GPT models\tWeekly Limit Remaining\t100%\t2026-11-07T04:26:29Z\n\
+             Claude and GPT models\tFive Hour Limit Remaining\t100%\t2026-10-31T09:26:29Z\n\
+             Gemini 4 Argon\tGemini 4 Argon Weekly Limit\t77%\t2026-11-07T00:26:45Z\n"});
+        let rate = parse_agy_cli_usage(&v).unwrap();
+        assert_eq!(rate.len(), 5);
+        assert_eq!(rate[0].label, "Gemini Models 7d");
+        assert_eq!(rate[4].label, "Gemini 4 Argon 7d");
+        assert_eq!(rate[4].used_pct, 23.0);
+        assert!(rate.iter().all(|w| w.resets_at.is_some()));
     }
 
     #[test]
-    fn agy_quota_empty_on_no_groups_or_3p_only() {
-        assert!(parse_agy_quota(&json!({})).is_empty());
-        assert!(parse_agy_quota(&json!({"response":{"groups":[]}})).is_empty());
-        // 3p 그룹만 있으면 빈 벡터 (Gemini 그룹 없음)
-        let only3p = json!({"response":{"groups":[
-            {"displayName":"Claude and GPT models","buckets":[
-                {"bucketId":"3p-5h","window":"5h","remainingFraction":1.0}]}]}});
-        assert!(parse_agy_quota(&only3p).is_empty());
+    fn agy_cli_usage_rejects_model_turn_and_bad_values() {
+        let response = "Gemini Models\tWeekly Limit Remaining\t99%\t2026-11-03T09:21:43Z";
+        assert!(parse_agy_cli_usage(&json!({"status":"SUCCESS","usage":{"total_tokens":1},"response":response})).is_none());
+        assert!(parse_agy_cli_usage(&json!({"status":"ERROR","usage":{"total_tokens":0},"response":response})).is_none());
+        assert!(parse_agy_cli_usage(&json!({"status":"SUCCESS","usage":{"total_tokens":0},"response":response.replace("99%", "-1%")})).is_none());
+        assert!(parse_agy_cli_usage(&json!({"status":"SUCCESS","usage":{"total_tokens":0},"response":""})).is_none());
     }
 
     /// T7: 메시지별 토큰 4종 + 모델 파싱(cost 환산 입력) — cache_read·model 포함, sidechain·전부0은 None.

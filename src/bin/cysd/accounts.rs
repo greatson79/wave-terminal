@@ -29,7 +29,7 @@ const BOOT_RESTORE_SECS: f64 = 7.0 * 86400.0;
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AccountKey {
     pub provider: String,   // "claude" | "codex" | "antigravity" | (accounts.json 선언 provider)
-    pub account_id: String, // claude: accountUuid · 그 외 단일 홈: "default"
+    pub account_id: String, // claude: accountUuid · agy: "cli" · 그 외 단일 홈: "default"
 }
 
 #[derive(Clone, Debug)]
@@ -40,7 +40,7 @@ pub struct AccountView {
     pub profiles: BTreeSet<String>, // 이 계정으로 관측된 프로필 dir들(홈 상대 표기)
     pub rate: Vec<RateWindow>,
     pub updated_at: f64, // 0.0 = 관측 전(발견만)
-    pub source: String,  // "statusline" | "rollout" | "agy-rpc" | "adapter:<p>" | "snapshot"(부트 복원)
+    pub source: String,  // "statusline" | "rollout" | "agy-cli" | "adapter:<p>" | "snapshot"(부트 복원)
     pub adapter: bool,   // false = 관측 어댑터 없음(accounts.json adapter:"none" 선언 계정)
 }
 
@@ -151,7 +151,7 @@ fn resolve(
             Some(".codex".into()),
         )),
         "gemini" | "agy" | "antigravity" => Some((
-            AccountKey { provider: "antigravity".into(), account_id: "default".into() },
+            AccountKey { provider: "antigravity".into(), account_id: "cli".into() },
             "Antigravity (agy)".into(),
             None,
             Some(".antigravity".into()),
@@ -299,12 +299,12 @@ fn seed_known_in(daemon: &Arc<Daemon>, home: Option<&Path>) {
                 st.views
                     .entry(AccountKey {
                         provider: "antigravity".into(),
-                        account_id: "default".into(),
+                        account_id: "cli".into(),
                     })
                     .or_insert_with(|| AccountView {
                         key: AccountKey {
                             provider: "antigravity".into(),
-                            account_id: "default".into(),
+                            account_id: "cli".into(),
                         },
                         label: "Antigravity (agy)".into(),
                         plan: None,
@@ -332,8 +332,7 @@ fn seed_known_in(daemon: &Arc<Daemon>, home: Option<&Path>) {
                         .to_string();
                     let adapter =
                         a.get("adapter").and_then(|x| x.as_str()).unwrap_or("none") != "none";
-                    let key =
-                        AccountKey { provider: provider.into(), account_id: "default".into() };
+                    let key = AccountKey { account_id: if provider == "antigravity" { "cli" } else { "default" }.into(), provider: provider.into() };
                     st.views.entry(key.clone()).or_insert_with(|| AccountView {
                         key,
                         label,
@@ -358,9 +357,11 @@ fn seed_known_in(daemon: &Arc<Daemon>, home: Option<&Path>) {
             )
         })
     };
-    if let Some(rows) = rows {
+    if let Some(mut rows) = rows {
+        rows.sort_by(|a, b| a.0.total_cmp(&b.0));
         let mut st = daemon.accounts.lock().unwrap();
         for (ts, provider, account, label, win, pct, resets) in rows {
+            let account = if provider == "antigravity" { "cli".into() } else { account };
             let key = AccountKey { provider, account_id: account };
             let v = st.views.entry(key.clone()).or_insert_with(|| AccountView {
                 key,
@@ -455,7 +456,8 @@ pub fn spawn_custom_adapters(daemon: Arc<Daemon>) {
 /// 선언 provider(비 내장) 계정에 rate 반영 — note_rate의 resolve를 우회하는 직접 키 경로.
 fn note_custom(daemon: &Arc<Daemon>, provider: &str, rate: &[RateWindow], source: &str, now: f64) {
     let mut st = daemon.accounts.lock().unwrap();
-    let key = AccountKey { provider: provider.into(), account_id: "default".into() };
+    let account_id = if provider == "antigravity" { "cli" } else { "default" };
+    let key = AccountKey { provider: provider.into(), account_id: account_id.into() };
     let label = st.views.get(&key).map(|v| v.label.clone()).unwrap_or_else(|| provider.into());
     let v = st.views.entry(key.clone()).or_insert_with(|| AccountView {
         key,
@@ -475,7 +477,7 @@ fn note_custom(daemon: &Arc<Daemon>, provider: &str, rate: &[RateWindow], source
     drop(st);
     if let Some(conn) = daemon.analytics.lock().unwrap().as_ref() {
         for w in rate {
-            crate::analytics::record_rate_snapshot(conn, now, provider, "default", &label,
+            crate::analytics::record_rate_snapshot(conn, now, provider, account_id, &label,
                 &w.label, w.used_pct, w.resets_at);
         }
         crate::analytics::prune_rate_snapshots(conn, now - SNAPSHOT_RETAIN_SECS);
@@ -527,14 +529,15 @@ pub fn local_json(daemon: &Arc<Daemon>, now: f64) -> Value {
                 row["provider"].as_str().unwrap_or("").to_string(),
                 row["account_id"].as_str().unwrap_or("").to_string(),
             );
-            let resets_at = row["rate"]
+            let five_hour = row["rate"]
                 .as_array()
                 .into_iter()
                 .flatten()
-                .find(|w| w["label"] == "5h")
-                .and_then(|w| w["resets_at"].as_f64());
-            let series = crate::analytics::rate_series(conn, &provider, &account, "5h", now - 3600.0);
-            if let Some(t) = predict_exhaust(&series, now, resets_at) {
+                .find(|w| w["label"] == "5h" || (provider == "antigravity" && w["label"] == "Gemini Models 5h"));
+            let Some(five_hour) = five_hour else { continue };
+            let label = five_hour["label"].as_str().unwrap_or("5h");
+            let series = crate::analytics::rate_series(conn, &provider, &account, label, now - 3600.0);
+            if let Some(t) = predict_exhaust(&series, now, five_hour["resets_at"].as_f64()) {
                 row["exhaust_at"] = json!(t);
             }
         }
@@ -683,10 +686,52 @@ mod tests {
         assert_eq!(l, "OpenAI Codex");
         let (k, ..) = resolve(&mut st, "gemini", "").unwrap();
         assert_eq!(k.provider, "antigravity");
+        assert_eq!(k.account_id, "cli");
         // 미지 agent → None
         assert!(resolve(&mut st, "mystery", "").is_none());
         // claude인데 신원 해석 불가 → None(스킵 — 유령 계정 금지)
         assert!(resolve(&mut st, "claude", "/nonexist/projects/x/s.jsonl").is_none());
+    }
+
+    #[test]
+    fn agy_legacy_snapshot_and_discovery_share_one_row() {
+        let root = tmp("agy-dedupe");
+        let home = root.join("home");
+        std::fs::create_dir_all(home.join(".antigravity")).unwrap();
+        let daemon = Daemon::new(root.join("state/cys.sock"));
+        if let Some(conn) = daemon.analytics.lock().unwrap().as_ref() {
+            let now = crate::state::now_epoch() - 3600.0;
+            crate::analytics::record_rate_snapshot(conn, now, "antigravity", "cli", "Antigravity (agy)", "Gemini Models 5h", 12.0, None);
+            crate::analytics::record_rate_snapshot(conn, now - 100.0, "antigravity", "default", "Antigravity (agy)", "Gemini Models 5h", 99.0, None);
+            crate::analytics::record_rate_snapshot(conn, now - 100.0, "antigravity", "default", "Antigravity (agy)", "Gemini Models 7d", 20.0, None);
+        }
+        seed_known_in(&daemon, Some(&home));
+        let rows = local_json(&daemon, crate::state::now_epoch());
+        let agy: Vec<_> = rows.as_array().unwrap().iter().filter(|row| row["provider"] == "antigravity").collect();
+        assert_eq!(agy.len(), 1);
+        assert_eq!(agy[0]["account_id"], "cli");
+        assert_eq!(agy[0]["rate"].as_array().unwrap().len(), 2);
+        assert_eq!(agy[0]["rate"].as_array().unwrap().iter().find(|w| w["label"] == "Gemini Models 5h").unwrap()["used_pct"], 12.0);
+        assert!(agy[0]["stale_secs"].as_f64().unwrap() >= 3500.0);
+        drop(daemon);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn agy_five_hour_window_keeps_exhaust_prediction() {
+        let root = tmp("agy-predict");
+        let daemon = Daemon::new(root.join("state/cys.sock"));
+        let now = crate::state::now_epoch();
+        for (age, used_pct) in [(700.0, 10.0), (350.0, 20.0), (0.0, 30.0)] {
+            note_rate(&daemon, "agy", "", &[RateWindow {
+                label: "Gemini Models 5h".into(), used_pct, resets_at: None,
+            }], "agy-cli", now - age);
+        }
+        let rows = local_json(&daemon, now);
+        let agy = rows.as_array().unwrap().iter().find(|r| r["provider"] == "antigravity").unwrap();
+        assert!(agy["exhaust_at"].as_f64().unwrap() > now);
+        drop(daemon);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

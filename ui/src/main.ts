@@ -23,7 +23,7 @@ import { pauseView, type PauseSocketStatus, type PauseView } from "./pausebadge"
 import { DEFAULT_EXIT_POLICY, decideExitAction, shouldDropEmptyWorkspace, shouldReassignFocus, shouldRemoveAfterGrace, type GraceRecheck } from "./exitpolicy";
 import { classifyDrainVerifyFallback, drainVerifyFallbackToast } from "./drainverify";
 import { sendPreparedHelp } from "./helpflow";
-import { adoptHqOf, autoAssignGroups, configureHierarchyNaming, hqTokenOf, nextTeamName, paneRehomeTarget, pickAdoptWs, sameHqPanelName, sortHqMembers, sortHqWorkspaces, tabLabel } from "./hierarchy";
+import { adoptHqOf, autoAssignGroups, configureHierarchyNaming, hqTokenOf, isHqLeadName, nextTeamName, paneRehomeTarget, pickAdoptWs, sameHqPanelName, sortHqMembers, sortHqWorkspaces, tabLabel } from "./hierarchy";
 import { sidebarTreeSpec, hqCountLabel } from "./sidebartree";
 import { hqColor, parseNamingColors, type HqColorMap } from "./hqbadge";
 import { createHqTabShell, type MiniDoc } from "./wstab";
@@ -35,6 +35,7 @@ import { nextGhostStrike } from "./ghoststrike";
 import { transferTrees } from "./transfer";
 import { resolveEventSocket } from "./eventsocket";
 import { commitPaneRename } from "./panerename";
+import { gridLayout, gridSpecFor, keepManualTree, treeEquals, type GridResult } from "./gridlayout";
 
 declare global {
   interface Window {
@@ -143,6 +144,8 @@ interface Workspace {
   // 06: 소속 그룹 id(undefined=ungrouped). 부서 ws도 그룹에 들어가면 set. 진실원=localStorage(cys-layout-v2).
   groupId?: number;
   collapsed?: boolean;
+  // 사람이 divider 를 끌거나 pane 을 옮기고 나눈 워크스페이스 — 자동 반응형 배치가 덮지 않는다(정렬 버튼이 해제).
+  manual?: boolean;
 }
 
 // 06: 워크스페이스 그룹 메타데이터. 진실원=localStorage(cys-layout-v2). 데몬은 모름(그룹=UI/solution 층).
@@ -2252,6 +2255,7 @@ function movePane(sid: number, targetSid: number, side: DropSide) {
       b: before ? old : moved,
     }));
   }
+  ws.manual = true; // 사람이 옮긴 배치
   render();
   setFocus(sid);
 }
@@ -2321,9 +2325,12 @@ function render() {
   root.innerHTML = "";
   const ws = current();
   if (ws?.tree) ws.tree = dedupeTree(ws.tree) as Node;
+  const grid = ws && !ws.manual ? autoGrid(ws) : null;
+  if (ws && grid) ws.tree = keepManualTree(ws.manual, ws.tree, grid.tree as Node | null);
   const tree = ws?.tree;
   if (tree) root.appendChild(renderNode(tree));
   else if (ws?.pending) root.appendChild(renderDeptPending()); // WP-10: 부서 준비 중 빈 pane 스피너·안내
+  applyGridSize(grid);
   if (hierarchyEnabled) {
     const assigned = autoAssignGroups(workspaces, groups, groupCounter);
     groups = assigned.groups;
@@ -2394,7 +2401,9 @@ function attachDividerDrag(
     down.preventDefault();
     divider.classList.add("dragging");
     const horizontal = node.dir === "row";
+    let moved = false;
     const move = (e: MouseEvent) => {
+      moved = true;
       const rect = container.getBoundingClientRect();
       const pos = horizontal ? e.clientX - rect.left : e.clientY - rect.top;
       const size = horizontal ? rect.width : rect.height;
@@ -2407,6 +2416,7 @@ function attachDividerDrag(
       divider.classList.remove("dragging");
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", up);
+      if (moved) current().manual = true; // 사람이 끈 비율 — 자동 재배치가 덮지 않는다
       saveLayout();
       for (const sid of collectSids(node)) {
         const rt = panes.get(paneKey(sid, current()?.socket));
@@ -2561,65 +2571,66 @@ function startGroupDrag(e0: MouseEvent, srcId: number) {
   window.addEventListener("mouseup", up, true);
 }
 
-// ---------- 정렬: 역할(role) 기반 고정 배치 ----------
-// 현재 워크스페이스의 살아있는 surface를 역할별 표준 자리로 재배치한다:
-//   · 왼쪽 끝 컬럼  = master(위) / cso(아래), 세로 3:1
-//   · 가운데        = worker·미분류 surface를 같은 폭 컬럼으로 균등 분배(좌→우 순서 보존)
-//   · 오른쪽 끝 컬럼 = reviewer-gemini(agy, 위) / reviewer-codex(codex, 아래), 세로 1:1
-// 트리 위상만 새로 짜고 attachDividerDrag는 건드리지 않으므로 수동 크기 조절은 그대로 보존된다
-// (정렬 후에도 divider를 다시 끌 수 있다 — 현재 크기만 표준 배치로 리셋될 뿐이다).
-// divider 1px·pane 헤더 등으로 컬럼 폭엔 셀 1칸 이내 잔차가 있을 수 있다.
-function evenComb(nodes: Node[], dir: "row" | "col"): Node {
-  let acc = nodes[nodes.length - 1];
-  for (let i = nodes.length - 2; i >= 0; i--) {
-    acc = { type: "split", dir, ratio: 1 / (nodes.length - i), a: nodes[i], b: acc };
+// ---------- 정렬: 반응형 격자 배치 ----------
+// 계산은 순수 모듈 gridlayout.ts 가 한다(열·줄 수 = 패널 실제 크기 ÷ 좌석 최소 크기).
+// 여기서는 좌석 정보(역할·본부장)를 모으고 결과를 화면에 건다.
+//   · 사람이 divider 를 끌거나 pane 을 옮기면 ws.manual — 자동 재배치가 그 크기를 덮지 않는다.
+//   · 「정렬」은 manual 을 내리고 자동으로 돌아간다.
+//   · 칸이 최소 크기에 못 미치게 좁은 창이면 줄이지 않고 패널을 스크롤로 보인다(gridlayout 의 minWidth·minHeight).
+const GRID_RESIZE_DEBOUNCE_MS = 150;
+
+function autoGrid(ws: Workspace, roleOf?: Map<number, string | null>, sids = collectSids(ws.tree)): GridResult | null {
+  if (!sids.length || root.offsetWidth < 1 || root.offsetHeight < 1) return null; // 숨겨진 패널은 계산하지 않는다
+  const seats = sids.map((sid) => {
+    const key = paneKey(sid, ws.socket);
+    return { sid, role: roleOf?.get(sid) ?? paneTitleState.get(key)?.role ?? null, head: isHqLeadName(surfaceTitles.get(key) ?? "") };
+  });
+  return gridLayout(seats, { w: root.offsetWidth, h: root.offsetHeight }, gridSpecFor(fontSize));
+}
+
+function applyGridSize(grid: GridResult | null) {
+  const top = root.firstElementChild as HTMLElement | null;
+  if (top) {
+    top.style.minWidth = grid?.minWidth ? `${grid.minWidth}px` : "";
+    top.style.minHeight = grid?.minHeight ? `${grid.minHeight}px` : "";
   }
-  return acc;
+  root.style.overflow = grid?.minWidth || grid?.minHeight ? "auto" : "";
 }
 
-function firstWithRole(sids: number[], roleOf: Map<number, string | null>, role: string): number | null {
-  for (const sid of sids) if (roleOf.get(sid) === role) return sid;
-  return null;
+// 창·패널 크기가 바뀌면 다시 계산한다. 구조(열 수)가 그대로면 DOM 을 다시 만들지 않고, 바뀔 때만 render 하되 포커스를 되돌린다.
+let gridResizeTimer: number | undefined;
+function reflowGrid() {
+  const ws = current();
+  if (!ws?.tree || ws.manual) return;
+  const grid = autoGrid(ws);
+  if (!grid?.tree) return;
+  if (treeEquals(ws.tree, grid.tree as Node)) { applyGridSize(grid); return; }
+  const active = document.activeElement as HTMLElement | null;
+  ws.tree = grid.tree as Node;
+  render();
+  if (active?.isConnected) active.focus({ preventScroll: true });
 }
-
-function roleLayout(sids: number[], roleOf: Map<number, string | null>): Node {
-  const master = firstWithRole(sids, roleOf, "master");
-  const cso = firstWithRole(sids, roleOf, "cso");
-  const agy = firstWithRole(sids, roleOf, "reviewer-gemini"); // 안티그래피티
-  const codex = firstWithRole(sids, roleOf, "reviewer-codex");
-  const corners = new Set([master, cso, agy, codex].filter((x): x is number => x != null));
-  const middle = sids.filter((sid) => !corners.has(sid)); // worker·미분류 전부 가운데
-  const pane = (sid: number): Node => ({ type: "pane", sid });
-
-  const columns: Node[] = [];
-  // 왼쪽 끝: master(위) / cso(아래) = 3:1 (누락 시 있는 쪽이 컬럼 전체)
-  if (master != null && cso != null) columns.push({ type: "split", dir: "col", ratio: 3 / 4, a: pane(master), b: pane(cso) });
-  else if (master != null) columns.push(pane(master));
-  else if (cso != null) columns.push(pane(cso));
-  // 가운데: worker·미분류 균등 컬럼
-  for (const sid of middle) columns.push(pane(sid));
-  // 오른쪽 끝: agy(위) / codex(아래) = 1:1 (누락 시 있는 쪽이 컬럼 전체)
-  if (agy != null && codex != null) columns.push({ type: "split", dir: "col", ratio: 1 / 2, a: pane(agy), b: pane(codex) });
-  else if (agy != null) columns.push(pane(agy));
-  else if (codex != null) columns.push(pane(codex));
-
-  return evenComb(columns, "row"); // 컬럼들을 같은 폭으로 가로 배치
-}
+new ResizeObserver(() => {
+  clearTimeout(gridResizeTimer);
+  gridResizeTimer = window.setTimeout(reflowGrid, GRID_RESIZE_DEBOUNCE_MS);
+}).observe(root);
 
 async function actionEqualize() {
   const ws = current();
   if (!ws?.tree) return;
+  ws.manual = false; // 정렬 = 자동 배치로 복귀
   const live = collectSids(ws.tree).filter((sid) => panes.has(paneKey(sid, ws.socket))); // 죽은/placeholder 노드 제외 (F4 복합키)
-  if (live.length < 2) return; // 0~1개는 정렬할 대상이 없음
+  if (!live.length) return;
   // 역할은 데몬 surface.list에서 조회 (UI 생성 pane은 role=null → 가운데로)
   const roleOf = new Map<number, string | null>();
   try {
     const r = (await invoke("list_surfaces", { socket: ws.socket })) as { surfaces: { surface_id: number; role: string | null }[] };
     for (const s of r.surfaces) roleOf.set(s.surface_id, s.role);
   } catch {
-    /* 데몬 일시 미응답: role 없이 진행 → 전부 가운데 균등 */
+    /* 데몬 일시 미응답: 캐시된 역할로 진행 */
   }
-  ws.tree = roleLayout(live, roleOf);
+  const grid = autoGrid(ws, roleOf, live);
+  if (grid?.tree) ws.tree = grid.tree as Node;
   render(); // 새 트리로 DOM 재구성 + fitPane→resize_surface + saveLayout
 }
 
@@ -3547,6 +3558,7 @@ async function actionSplit(dir: "row" | "col") {
       b: { type: "pane", sid },
     }));
   }
+  ws.manual = true; // 사람이 고른 분할 방향
   render();
   setFocus(sid);
 }

@@ -4633,11 +4633,8 @@ function onDaemonEvent(event: Record<string, unknown>) {
   if (category === "health") {
     toast("health", `⚠ ${name}`, `surface:${sid} rule=${payload.rule} — ${String(payload.line ?? "").slice(0, 120)}`);
   } else if (category === "watchdog") {
-    const detail =
-      name === "watchdog.duplicate_procs"
-        ? `중복 서버 ${payload.count}개: ${String(payload.cmdline ?? "").slice(0, 80)}`
-        : JSON.stringify(payload).slice(0, 120);
-    toast("watchdog", `🐕 ${name}`, detail);
+    if (name !== "watchdog.duplicate_procs")
+      toast("watchdog", `🐕 ${name}`, JSON.stringify(payload).slice(0, 120));
   } else if (category === "feed") {
     if (name === "feed.item.created") {
       toast("feed", "📥 승인 요청", String(payload.title ?? ""));

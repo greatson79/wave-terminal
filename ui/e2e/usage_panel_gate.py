@@ -69,6 +69,11 @@ sessionStorage.setItem('usage-fixture-set', '1');
 """ + SHIM + "\n" + """
 localStorage.setItem('cys-wsbar-w', '200');
 const previousInvoke = window.__TAURI__.core.invoke;
+const previousListen = window.__TAURI__.event.listen;
+window.__TAURI__.event.listen = (name, handler) => {
+  if (name === 'daemon-event') window.__daemonEvent = handler;
+  return previousListen(name, handler);
+};
 window.__TAURI__.core.invoke = (command, args) =>
   command === 'take_update_preserved_notices' ? Promise.resolve([]) :
   command === 'naming_config' ? Promise.resolve(JSON.stringify({roles:{
@@ -99,6 +104,14 @@ window.__TAURI__.core.invoke = (command, args) =>
             assert panel.evaluate("e => e.scrollWidth <= e.clientWidth")
             assert all(panel.locator(".usage-row").nth(i).evaluate("e => e.scrollWidth <= e.clientWidth")
                        for i in range(panel.locator(".usage-row").count()))
+            page.wait_for_function("typeof window.__daemonEvent === 'function'")
+            before_watchdog = page.locator("#toasts .toast.watchdog").count()
+            page.evaluate("""() => window.__daemonEvent({payload:{name:'watchdog.duplicate_procs',
+              category:'watchdog',payload:{count:3,cmdline:'sleep'}}})""")
+            assert page.locator("#toasts .toast.watchdog").count() == before_watchdog
+            page.evaluate("""() => window.__daemonEvent({payload:{name:'watchdog.load_high',
+              category:'watchdog',payload:{count:90}}})""")
+            assert page.locator("#toasts .toast.watchdog").count() == before_watchdog + 1
             heads = page.locator("#ws-tabs .ws-group-head")
             heads.nth(1).wait_for(timeout=10_000)
             assert [h.evaluate("e => getComputedStyle(e).borderLeftColor") for h in heads.all()] == [

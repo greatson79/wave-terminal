@@ -41,20 +41,20 @@ describe("settings", () => {
 
   it("migrates and validates layout and help-panel preferences", () => {
     expect(readSettings(null, null, null)).toMatchObject({
-      layout: { sidebarSide: "left" }, panels: { helpCollapsed: false },
+      layout: { sidebarSide: "left", sidebarCollapsed: false }, panels: { helpCollapsed: false },
       header: { daemonCollapsed: true },
       usage: { enabled: true, hiddenAccounts: [] },
     });
-    expect(readSettings(JSON.stringify({ ver: 1, layout: { sidebarSide: "right" },
+    expect(readSettings(JSON.stringify({ ver: 1, layout: { sidebarSide: "right", sidebarCollapsed: true },
       panels: { helpCollapsed: true }, header: { daemonCollapsed: false },
       usage: { enabled: false, hiddenAccounts: ["claude:id", "codex:id"] } }), null, null)).toMatchObject({
-      layout: { sidebarSide: "right" }, panels: { helpCollapsed: true },
+      layout: { sidebarSide: "right", sidebarCollapsed: true }, panels: { helpCollapsed: true },
       header: { daemonCollapsed: false },
       usage: { enabled: false, hiddenAccounts: ["claude:id", "codex:id"] },
     });
     expect(readSettings(JSON.stringify({ ver: 1, layout: { sidebarSide: "outside" },
       panels: { helpCollapsed: "true" }, header: { daemonCollapsed: "yes" } }), null, null)).toMatchObject({
-      layout: { sidebarSide: "left" }, panels: { helpCollapsed: false },
+      layout: { sidebarSide: "left", sidebarCollapsed: false }, panels: { helpCollapsed: false },
       header: { daemonCollapsed: true },
     });
   });

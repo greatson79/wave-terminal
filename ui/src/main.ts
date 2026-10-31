@@ -23,7 +23,7 @@ import { pauseView, type PauseSocketStatus, type PauseView } from "./pausebadge"
 import { DEFAULT_EXIT_POLICY, decideExitAction, shouldDropEmptyWorkspace, shouldReassignFocus, shouldRemoveAfterGrace, type GraceRecheck } from "./exitpolicy";
 import { classifyDrainVerifyFallback, drainVerifyFallbackToast } from "./drainverify";
 import { sendPreparedHelp } from "./helpflow";
-import { adoptHqOf, autoAssignGroups, configureHierarchyNaming, nextTeamName, paneRehomeTarget, pickAdoptWs, sortHqMembers, sortHqWorkspaces, tabLabel } from "./hierarchy";
+import { adoptHqOf, autoAssignGroups, configureHierarchyNaming, hqTokenOf, nextTeamName, paneRehomeTarget, pickAdoptWs, sortHqMembers, sortHqWorkspaces, tabLabel } from "./hierarchy";
 import { sidebarTreeSpec, hqCountLabel } from "./sidebartree";
 import { hqColor, parseNamingColors, type HqColorMap } from "./hqbadge";
 import { createHqTabShell, type MiniDoc } from "./wstab";
@@ -235,54 +235,46 @@ function renderUsage(el: HTMLElement, u: ObservedUsage | null | undefined) {
 
 let sidebarUsageAccounts: UsageAccount[] = [];
 let accountOwners: Record<string, string> = {};
+let accountOrder: string[] = [];
 function renderSidebarUsage(accounts: UsageAccount[]) {
   const box = document.getElementById("sidebar-usage")!;
   box.replaceChildren();
   box.hidden = !settings.usage.enabled;
   if (box.hidden) return;
-  const rows = sidebarUsage(accounts, settings.usage.hiddenAccounts, Date.now() / 1000, accountOwners);
+  const rows = sidebarUsage(accounts, settings.usage.hiddenAccounts, Date.now() / 1000, accountOwners, accountOrder);
   if (!rows.length) {
     box.textContent = "측정 불가";
     return;
   }
   let lastAccount = "";
-  let lastGroup: string | null = null;
   for (const row of rows) {
     if (row.accountKey !== lastAccount) {
       const head = document.createElement("strong");
-      const engine = ({ claude: "Claude", codex: "Codex", antigravity: "Antigravity" } as Record<string, string>)[row.provider] ?? row.provider;
-      head.textContent = `${row.label} · ${engine}`;
+      head.textContent = row.label;
       box.append(head);
       lastAccount = row.accountKey;
-      lastGroup = null;
-    }
-    if (row.group && row.group !== lastGroup) {
-      const group = document.createElement("div");
-      group.className = "usage-group";
-      group.textContent = row.group;
-      box.append(group);
-      lastGroup = row.group;
     }
     const line = document.createElement("div");
     line.className = `usage-row ${row.severity}${row.age == null || row.age >= 10 ? " stale" : ""}`;
+    line.title = resetTime(row.resetsAt);
     const window = document.createElement("span");
-    window.textContent = row.window;
+    window.className = "usage-window";
+    window.textContent = row.group && !row.window.includes(row.group) ? `${row.group} ${row.window}` : row.window;
     const bar = document.createElement("span");
     bar.className = "usage-bar";
     const fill = document.createElement("span");
     fill.style.width = `${row.remaining ?? 0}%`;
     bar.append(fill);
     const value = document.createElement("span");
+    value.className = "usage-value";
     value.textContent = row.reset ? "갱신 대기" : row.remaining == null ? "측정 불가" : `남음 ${row.remaining}%`;
     line.append(window, bar, value);
     if (row.age == null || row.age >= 10) {
       const age = document.createElement("span");
+      age.className = "usage-age";
       age.textContent = row.age == null ? "시각 미상" : `${row.age}분 전`;
       line.append(age);
     }
-    const reset = document.createElement("span");
-    reset.textContent = resetTime(row.resetsAt);
-    line.append(reset);
     box.append(line);
   }
 }
@@ -1415,6 +1407,7 @@ applyUsageSettings();
 const helpPanelDetails = document.getElementById("help-panel-details") as HTMLDetailsElement;
 function applyLayoutSettings() {
   document.getElementById("body-row")!.classList.toggle("sidebar-right", settings.layout.sidebarSide === "right");
+  document.getElementById("body-row")!.classList.toggle("sidebar-collapsed", settings.layout.sidebarCollapsed);
   helpPanelDetails.open = !settings.panels.helpCollapsed;
 }
 helpPanelDetails.addEventListener("toggle", () => {
@@ -2897,7 +2890,7 @@ function buildGroupSection(g: GroupMeta): HTMLElement {
 
   const head = document.createElement("div");
   head.className = "ws-group-head" + (g.pinned ? " pinned" : "");
-  head.style.borderLeftColor = g.auto ? hqColor(g.name, hqColors, WS_COLORS) ?? "" : g.color || WS_COLORS[g.id % WS_COLORS.length];
+  head.style.borderLeftColor = g.auto ? hqColor(hqTokenOf(g.name), hqColors, WS_COLORS) ?? "" : g.color || WS_COLORS[g.id % WS_COLORS.length];
 
   const chevron = document.createElement("span");
   chevron.className = "ws-group-chevron";
@@ -3108,6 +3101,7 @@ function showCtxMenu(x: number, y: number, items: { label: string; action: () =>
   document.getElementById("ctx-menu")?.remove();
   const menu = document.createElement("div");
   menu.id = "ctx-menu";
+  menu.setAttribute("role", "menu");
   const closeMenu = () => {
     menu.remove();
     window.removeEventListener("mousedown", dismiss, true);
@@ -3123,7 +3117,15 @@ function showCtxMenu(x: number, y: number, items: { label: string; action: () =>
   for (const it of items) {
     const row = document.createElement("div");
     row.className = "ctx-item";
+    row.setAttribute("role", "menuitem");
+    row.tabIndex = 0;
     row.textContent = it.label;
+    row.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      e.preventDefault();
+      closeMenu();
+      it.action();
+    });
     row.addEventListener("mousedown", (e) => {
       e.preventDefault();
       closeMenu();
@@ -3134,6 +3136,7 @@ function showCtxMenu(x: number, y: number, items: { label: string; action: () =>
   menu.style.left = `${x}px`;
   menu.style.top = `${y}px`;
   document.body.appendChild(menu);
+  menu.querySelector<HTMLElement>(".ctx-item")?.focus();
   // 화면 밖으로 나가면 안쪽으로 보정
   const r = menu.getBoundingClientRect();
   if (r.right > window.innerWidth) menu.style.left = `${window.innerWidth - r.width - 4}px`;
@@ -3315,14 +3318,18 @@ function openSettingsMenu(anchor: HTMLElement) {
     });
     row(usage, "사용량 패널 표시", usageEnabled);
     for (const account of sidebarUsageAccounts) {
+      if (account.provider === "antigravity" && !account.rate?.length
+        && sidebarUsageAccounts.some((a) => a.provider === "antigravity" && a.rate?.length)) continue;
       const key = `${account.provider}:${account.account_id}`;
+      const keys = account.provider === "antigravity"
+        ? sidebarUsageAccounts.filter((a) => a.provider === "antigravity").map((a) => `antigravity:${a.account_id}`)
+        : [key];
       const visible = document.createElement("input");
       visible.type = "checkbox";
-      visible.checked = !settings.usage.hiddenAccounts.includes(key);
+      visible.checked = !keys.some((k) => settings.usage.hiddenAccounts.includes(k));
       visible.addEventListener("change", () => {
-        settings.usage.hiddenAccounts = visible.checked
-          ? settings.usage.hiddenAccounts.filter((v) => v !== key)
-          : [...settings.usage.hiddenAccounts, key];
+        settings.usage.hiddenAccounts = settings.usage.hiddenAccounts.filter((v) => !keys.includes(v));
+        if (!visible.checked) settings.usage.hiddenAccounts.push(...keys);
         saveSettings(); renderSidebarUsage(sidebarUsageAccounts);
       });
       const accountControls = document.createElement("span");
@@ -4675,6 +4682,7 @@ async function start() {
   info.textContent = `daemon pid=${status.daemon_pid} sock=${status.socket_path}`;
   headerDaemonInfo.textContent = `pid=${status.daemon_pid} sock=${status.socket_path}`;
   accountOwners = await invoke("account_owners").catch(() => ({})) as Record<string, string>;
+  accountOrder = await invoke("account_order").catch(() => []) as string[];
   void refreshSidebarUsage();
   setInterval(() => void refreshSidebarUsage(), 30_000);
 
@@ -5046,7 +5054,16 @@ async function start() {
 document.getElementById("btn-new")!.addEventListener("click", actionNew);
 document.getElementById("btn-split-h")!.addEventListener("click", () => actionSplit("row"));
 document.getElementById("btn-split-v")!.addEventListener("click", () => actionSplit("col"));
-document.getElementById("btn-equalize")!.addEventListener("click", actionEqualize);
+document.getElementById("btn-equalize")!.addEventListener("click", (event) => {
+  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+  showCtxMenu(rect.left, rect.bottom, [
+    { label: "역할별 표준 배치", action: actionEqualize },
+    { label: settings.layout.sidebarCollapsed ? "사이드바 펼치기" : "사이드바 접기", action: () => {
+      settings.layout.sidebarCollapsed = !settings.layout.sidebarCollapsed;
+      saveSettings(); applyLayoutSettings();
+    } },
+  ]);
+});
 document.getElementById("btn-close")!.addEventListener("click", actionClose);
 document.getElementById("btn-files")!.addEventListener("click", () => setFtOpen(!ftOpen));
 document.getElementById("btn-ft-close")!.addEventListener("click", () => setFtOpen(false));

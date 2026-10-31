@@ -29,16 +29,38 @@ test("local account-owner labels replace provider email only in the UI model", (
   });
 });
 
-test("Antigravity shows Gemini and Claude·GPT 5h/7d without inventing unavailable quota", () => {
-  const agy: UsageAccount = { provider: "antigravity", account_id: "default", label: "Agy",
-    updated_at: 1000, rate: [{ label: "5h", used_pct: 12, resets_at: 5000 }] };
-  expect(sidebarUsage([agy], [], 1100).map((r) => [r.group, r.window, r.remaining, r.resetsAt])).toEqual([
-    ["Gemini", "5h", 88, 5000], ["Gemini", "7d", null, null],
-    ["Claude·GPT", "5h", null, null], ["Claude·GPT", "7d", null, null],
+test("Antigravity merges empty account and normalizes measured English windows", () => {
+  const agy: UsageAccount = { provider: "antigravity", account_id: "cli", label: "Antigravity (agy)",
+    updated_at: 1000, rate: [
+      { label: "Claude and GPT models 7d", used_pct: 75, resets_at: 6000 },
+      { label: "Gemini 4 Argon 7d", used_pct: 55, resets_at: 6000 },
+      { label: "Gemini Models 5h", used_pct: 12, resets_at: 5000 },
+      { label: "Claude and GPT models 5h", used_pct: 30, resets_at: 5000 },
+      { label: "Gemini Models 7d", used_pct: 20, resets_at: 6000 },
+    ] };
+  const empty: UsageAccount = { ...agy, account_id: "default", updated_at: null, rate: [] };
+  const rows = sidebarUsage([empty, agy], [], 1100);
+  expect(rows.map((r) => [r.accountKey, r.group, r.window, r.remaining])).toEqual([
+    ["antigravity:cli", "Gemini", "5h", 88],
+    ["antigravity:cli", "Gemini", "7d", 80],
+    ["antigravity:cli", "Claude·GPT", "5h", 70],
+    ["antigravity:cli", "Claude·GPT", "7d", 25],
+    ["antigravity:cli", "Argon", "7d", 45],
   ]);
-  expect(sidebarUsage([agy], ["antigravity:default"], 1100)).toEqual([]);
-  agy.rate.push({ label: "Claude·GPT 7d", used_pct: 75, resets_at: 6000 });
-  expect(sidebarUsage([agy], [], 1100)[3]).toMatchObject({ group: "Claude·GPT", window: "7d", remaining: 25, resetsAt: 6000 });
+  expect(sidebarUsage([empty, agy], ["antigravity:default"], 1100)).toEqual([]);
+});
+
+test("local account order puts Fable rows inside the matching Claude owner group", () => {
+  const simple = (provider: string): UsageAccount => ({ provider, account_id: "default", label: provider,
+    updated_at: 1000, rate: [{ label: "7d", used_pct: 10, resets_at: 6000 }] });
+  const rows = sidebarUsage([simple("fable"), simple("antigravity"), simple("codex"), simple("claude")], [], 1100,
+    { "claude:default": "Main", "fable:default": "Main" },
+    ["claude:default", "fable:default", "codex:default", "antigravity:default"]);
+  expect(rows.map((r) => r.provider)).toEqual(["claude", "fable", "codex", "antigravity"]);
+  expect(rows[1]).toMatchObject({ accountKey: "claude:default", group: "Fable", window: "7d" });
+  expect(rows.map((r) => r.remaining)).toEqual([90, 90, 90, 90]);
+  expect(sidebarUsage([simple("fable"), simple("codex")], [], 1100).map((r) => r.provider))
+    .toEqual(["fable", "codex"]);
 });
 
 test("reset time is local and unknown timestamps are explicit", () => {

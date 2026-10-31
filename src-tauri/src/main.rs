@@ -204,6 +204,11 @@ fn account_owners(app: AppHandle) -> Result<std::collections::HashMap<String, St
 }
 
 #[tauri::command]
+fn account_order(app: AppHandle) -> Result<Vec<String>, String> {
+    user_settings::account_order(&user_settings_file(&app)?)
+}
+
+#[tauri::command]
 fn set_account_owner(app: AppHandle, key: String, owner: String) -> Result<std::collections::HashMap<String, String>, String> {
     user_settings::set_account_owner(&user_settings_file(&app)?, &key, &owner)
 }
@@ -2638,6 +2643,7 @@ fn main() {
             daemon_status,
             set_custom_header,
             account_owners,
+            account_order,
             owner_custom_header,
             set_account_owner,
             list_surfaces,

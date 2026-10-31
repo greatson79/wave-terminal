@@ -22,6 +22,26 @@ pub fn account_owners(file: &Path) -> Result<HashMap<String, String>, String> {
     Ok(owners)
 }
 
+pub fn account_order(file: &Path) -> Result<Vec<String>, String> {
+    let data = match std::fs::read(file) {
+        Ok(data) => data,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.to_string()),
+    };
+    if data.len() > 1_048_576 { return Err("user-settings.json is too large".into()); }
+    let root: Value = serde_json::from_slice(&data).map_err(|_| "user-settings.json is invalid".to_string())?;
+    let Some(order) = root.get("accountOrder") else { return Ok(Vec::new()) };
+    let keys: Vec<String> = serde_json::from_value(order.clone())
+        .map_err(|_| "accountOrder must be a string array".to_string())?;
+    if keys.len() > 128 { return Err("accountOrder is too long".into()); }
+    let mut unique = Vec::new();
+    for key in keys {
+        validate_key(&key)?;
+        if !unique.contains(&key) { unique.push(key); }
+    }
+    Ok(unique)
+}
+
 pub fn custom_header(file: &Path) -> Result<bool, String> {
     let data = match std::fs::read(file) {
         Ok(data) => data,
@@ -95,7 +115,7 @@ fn write_and_replace(temp: &Path, target: &Path, bytes: &[u8]) -> Result<(), Str
 
 #[cfg(test)]
 mod tests {
-    use super::{account_owners, custom_header, set_account_owner};
+    use super::{account_order, account_owners, custom_header, set_account_owner};
     use std::path::PathBuf;
 
     fn temp_file() -> PathBuf {
@@ -132,6 +152,17 @@ mod tests {
         assert!(!custom_header(&file).unwrap());
         std::fs::write(&file, r#"{"customHeader":true}"#).unwrap();
         assert!(custom_header(&file).unwrap());
+        std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn account_order_reads_valid_local_keys_without_touching_student_defaults() {
+        let file = temp_file();
+        assert!(account_order(&file).unwrap().is_empty());
+        std::fs::write(&file, r#"{"accountOrder":["claude:main","fable:default","codex:default","claude:main"]}"#).unwrap();
+        assert_eq!(account_order(&file).unwrap(), ["claude:main", "fable:default", "codex:default"]);
+        std::fs::write(&file, r#"{"accountOrder":["bad key"]}"#).unwrap();
+        assert!(account_order(&file).is_err());
         std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
     }
 }

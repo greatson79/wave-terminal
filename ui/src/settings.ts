@@ -10,7 +10,7 @@ export interface Settings {
     titleIcon: boolean; bodyWeight: number; menuWeight: number; menuScale: number;
   };
   bar: { order: string[]; hidden: string[] };
-  layout: { sidebarSide: "left" | "right" };
+  layout: { sidebarSide: "left" | "right"; sidebarCollapsed: boolean };
   panels: { helpCollapsed: boolean };
   header: { daemonCollapsed: boolean };
   usage: { enabled: boolean; hiddenAccounts: string[] };
@@ -21,7 +21,7 @@ export const DEFAULT_SETTINGS: Settings = {
   look: { bg: null, font: null, titleSize: 11, titleWeight: 400,
     titleIcon: true, bodyWeight: 400, menuWeight: 400, menuScale: 100 },
   bar: { order: [...BAR_IDS], hidden: [] },
-  layout: { sidebarSide: "left" },
+  layout: { sidebarSide: "left", sidebarCollapsed: false },
   panels: { helpCollapsed: false },
   header: { daemonCollapsed: true },
   usage: { enabled: true, hiddenAccounts: [] },
@@ -58,7 +58,8 @@ export function readSettings(raw: string | null, legacyBg: string | null, legacy
       menuScale: numberIn(look?.menuScale, 70, 150) ? look.menuScale : DEFAULT_SETTINGS.look.menuScale,
     },
     bar: { order, hidden: [...new Set(savedHidden.filter((id: unknown): id is string => typeof id === "string" && ids.includes(id))) ] },
-    layout: { sidebarSide: layout?.sidebarSide === "right" ? "right" : "left" },
+    layout: { sidebarSide: layout?.sidebarSide === "right" ? "right" : "left",
+      sidebarCollapsed: typeof layout?.sidebarCollapsed === "boolean" ? layout.sidebarCollapsed : false },
     panels: { helpCollapsed: typeof panels?.helpCollapsed === "boolean" ? panels.helpCollapsed : false },
     header: { daemonCollapsed: typeof header?.daemonCollapsed === "boolean" ? header.daemonCollapsed : true },
     usage: {

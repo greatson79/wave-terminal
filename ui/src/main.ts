@@ -262,7 +262,7 @@ function renderSidebarUsage(accounts: UsageAccount[]) {
   }
   for (const group of groups) {
     const line = document.createElement("div");
-    line.className = `usage-row${group.rows.every((row) => row.stale) ? " stale" : ""}`;
+    line.className = `usage-row${group.rows.every((row) => row.dimmed) ? " stale" : ""}`;
     line.tabIndex = 0;
     const summary = document.createElement("span");
     summary.className = "usage-summary";

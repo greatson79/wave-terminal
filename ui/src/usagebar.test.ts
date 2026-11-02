@@ -78,7 +78,7 @@ test("stale readings hide remaining values after reset or beyond their window", 
   expect(sidebarUsage([account(0, 1000, 99999)], [], 1599)[0])
     .toMatchObject({ stale: false, remaining: 100, severity: "ok" });
   expect(sidebarUsage([account(0, 1000, 99999)], [], 1600)[0])
-    .toMatchObject({ stale: true, remaining: null, severity: "none" });
+    .toMatchObject({ stale: false, dimmed: true, remaining: 100, severity: "ok" });
   const shortWindow = { ...account(0, 1000, 99999), rate: [{ label: "5m", used_pct: 0, resets_at: 99999 }] };
   expect(sidebarUsage([shortWindow], [], 1300)[0]).toMatchObject({ stale: false, remaining: 100 });
   expect(sidebarUsage([shortWindow], [], 1301)[0]).toMatchObject({ stale: true, remaining: null });
@@ -94,4 +94,16 @@ test("merging Antigravity accounts retains each window's measurement age", () =>
     rate: [{ label: "7d", used_pct: 25, resets_at: 999999 }] };
   expect(sidebarUsage([fresh, old], [], 20000).map(r => [r.window, r.remaining, r.stale]))
     .toEqual([["5h", null, true], ["7d", 75, false]]);
+});
+
+
+test("15-minute Claude measurements keep the number and dim the row", () => {
+  expect(sidebarUsage([account(12, 1000, 99999)], [], 1900)[0])
+    .toMatchObject({ age: 15, stale: false, dimmed: true, remaining: 88, severity: "ok" });
+});
+
+test("Antigravity past reset hides the number even when the reading is fresh", () => {
+  const agy = { ...account(12, 1000, 1050), provider: "antigravity" };
+  expect(sidebarUsage([agy], [], 1100)[0])
+    .toMatchObject({ age: 1, reset: true, stale: true, dimmed: true, remaining: null, severity: "none" });
 });

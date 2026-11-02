@@ -17,6 +17,7 @@ export interface SidebarUsageRow {
   resetsAt: number | null;
   reset: boolean;
   stale: boolean;
+  dimmed: boolean;
   age: number | null;
   severity: "ok" | "warn" | "crit" | "none";
 }
@@ -79,13 +80,13 @@ export function sidebarUsage(accounts: readonly UsageAccount[], hidden: readonly
       const reset = rate.resets_at != null && rate.resets_at <= now;
       const duration = window.match(/\b(\d+)(m|h|d)\b/);
       const windowSecs = duration ? Number(duration[1]) * ({ m: 60, h: 3600, d: 86400 }[duration[2]] ?? 0) : null;
-      const stale = reset || age === null || age >= 10 || (windowSecs !== null && now - updatedAt! > windowSecs);
+      const stale = reset || age === null || (windowSecs !== null && now - updatedAt! > windowSecs);
       rows.push({ key: `${key}:${window}`, accountKey: displayKey, provider: account.provider,
         label: owners[key]?.trim() || (account.provider === "antigravity" ? agy.map((a) => owners[`antigravity:${a.account_id}`]?.trim()).find(Boolean) : "") || account.label || account.provider,
         group: account.provider === "antigravity" ? window.replace(/ (5h|7d)$/, "") : fableHome ? "Fable" : null,
         window: account.provider === "antigravity" ? window.replace(/^.* /, "") : window,
         remaining: stale ? null : remaining,
-        resetsAt: rate.resets_at ?? null, reset, stale, age,
+        resetsAt: rate.resets_at ?? null, reset, stale, dimmed: stale || age! >= 10, age,
         severity: stale ? "none" : remaining > 50 ? "ok" : remaining >= 20 ? "warn" : "crit" });
     }
   }

@@ -1063,6 +1063,8 @@ fn parse_agy_cli_usage(v: &Value) -> Option<Vec<RateWindow>> {
             ("Gemini 4 Argon", "Gemini 4 Argon Weekly Limit") => "Gemini 4 Argon 7d",
             _ => continue,
         };
+        // Weekly exhaustion disables 5h buckets; keep the valid weekly reading.
+        if *remaining == "disabled" && window == &"Five Hour Limit Remaining" { continue; }
         let remaining = remaining.strip_suffix('%')?.parse::<f64>().ok()?;
         if !remaining.is_finite() || !(0.0..=100.0).contains(&remaining) {
             return None;
@@ -1363,6 +1365,15 @@ mod tests {
         assert_eq!(rate[4].label, "Gemini 4 Argon 7d");
         assert_eq!(rate[4].used_pct, 23.0);
         assert!(rate.iter().all(|w| w.resets_at.is_some()));
+    }
+
+    #[test]
+    fn agy_cli_usage_keeps_exhausted_weekly_when_five_hour_is_disabled() {
+        let v = json!({"status":"SUCCESS", "usage":{"total_tokens":0}, "response":
+            "Gemini Models\tWeekly Limit Remaining\t0%\t2026-11-03T09:21:43Z\nGemini Models\tFive Hour Limit Remaining\tdisabled\t\nClaude and GPT models\tWeekly Limit Remaining\t0%\t2026-11-07T17:16:12Z\nClaude and GPT models\tFive Hour Limit Remaining\tdisabled\t\nGemini 4 Argon\tGemini 4 Argon Weekly Limit\t0%\t2026-11-07T00:26:45Z\n"});
+        let rate = parse_agy_cli_usage(&v).expect("disabled 5h must not discard weekly quota");
+        assert_eq!(rate.len(), 3);
+        assert!(rate.iter().all(|r| r.label.ends_with("7d") && r.used_pct == 100.0));
     }
 
     #[test]

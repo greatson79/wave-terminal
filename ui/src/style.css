@@ -112,6 +112,7 @@ body.wsbar-resizing { cursor: col-resize; -webkit-user-select: none; user-select
 #sidebar-usage .usage-item { flex: none; color: var(--ok); }
 #sidebar-usage .usage-item.warn { color: var(--warn); }
 #sidebar-usage .usage-item.crit { color: var(--error); }
+#sidebar-usage .usage-item.none { color: var(--text); }
 #sidebar-usage .usage-item.reset { text-decoration: underline dotted; }
 #sidebar-usage .usage-detail { display: none; white-space: pre-line; color: var(--text); font-size: 9px; }
 #sidebar-usage .usage-row:is(:hover, :focus) .usage-detail { display: block; }

@@ -262,7 +262,7 @@ function renderSidebarUsage(accounts: UsageAccount[]) {
   }
   for (const group of groups) {
     const line = document.createElement("div");
-    line.className = `usage-row${group.rows[0].age == null || group.rows[0].age >= 10 ? " stale" : ""}`;
+    line.className = `usage-row${group.rows.every((row) => row.stale) ? " stale" : ""}`;
     line.tabIndex = 0;
     const summary = document.createElement("span");
     summary.className = "usage-summary";
@@ -273,13 +273,13 @@ function renderSidebarUsage(accounts: UsageAccount[]) {
     for (const row of group.rows) {
       const value = document.createElement("span");
       value.className = `usage-item ${row.severity}${row.reset ? " reset" : ""}`;
-      value.textContent = `${row.window} ${row.reset ? "당시" : ""}${row.remaining}`;
+      value.textContent = `${row.window} ${row.stale ? "오래됨" : row.remaining}`;
       summary.append(value);
     }
     const detail = document.createElement("span");
     detail.className = "usage-detail";
     detail.textContent = [...group.rows, ...group.extra].map((row) =>
-      `${row.label}${row.group ? ` · ${row.group}` : ""} ${row.window}: ${row.reset ? "당시" : "남음"} ${row.remaining}% · ${resetTime(row.resetsAt)} · ${row.age == null ? "시각 미상" : `${row.age}분 전`}`)
+      `${row.label}${row.group ? ` · ${row.group}` : ""} ${row.window}: ${row.stale ? "오래된 측정값" : `남음 ${row.remaining}%`} · ${resetTime(row.resetsAt)} · ${row.age == null ? "시각 미상" : `${row.age}분 전`}`)
       .join("\n");
     line.append(summary, detail);
     box.append(line);

@@ -16,6 +16,7 @@ export interface SidebarUsageRow {
   remaining: number | null;
   resetsAt: number | null;
   reset: boolean;
+  stale: boolean;
   age: number | null;
   severity: "ok" | "warn" | "crit" | "none";
 }
@@ -32,6 +33,7 @@ const AGY_LABELS: Record<string, string> = {
 export function sidebarUsage(accounts: readonly UsageAccount[], hidden: readonly string[] = [], now = Date.now() / 1000,
   owners: Readonly<Record<string, string>> = {}, accountOrder: readonly string[] = []): SidebarUsageRow[] {
   const rows: SidebarUsageRow[] = [];
+  const measuredAt = new Map<UsageAccount["rate"][number], number | null>();
   const displayAccounts = accounts.filter((a) => a.provider !== "antigravity");
   const agy = accounts.filter((a) => a.provider === "antigravity")
     .sort((a, b) => (b.updated_at ?? 0) - (a.updated_at ?? 0));
@@ -40,11 +42,15 @@ export function sidebarUsage(accounts: readonly UsageAccount[], hidden: readonly
     const windows = new Map<string, UsageAccount["rate"][number]>();
     for (const account of agy) for (const rate of account.rate ?? []) {
       const label = Object.hasOwn(AGY_LABELS, rate.label) ? AGY_LABELS[rate.label] : undefined;
-      if (label && !windows.has(label)) windows.set(label, rate);
+      if (label && !windows.has(label)) {
+        const normalized = { ...rate, label };
+        windows.set(label, normalized);
+        measuredAt.set(normalized, account.updated_at);
+      }
     }
     displayAccounts.splice(Math.min(accounts.findIndex((a) => a.provider === "antigravity"), displayAccounts.length), 0,
       { ...measured, rate: AGY_WINDOWS.filter((label) => windows.has(label))
-        .map((label) => ({ ...windows.get(label)!, label })) });
+        .map((label) => windows.get(label)!) });
   }
   const position = (account: UsageAccount) => {
     const key = `${account.provider}:${account.account_id}`;
@@ -67,16 +73,20 @@ export function sidebarUsage(accounts: readonly UsageAccount[], hidden: readonly
       const remaining = rate && Number.isFinite(rate.used_pct)
         ? Math.max(0, Math.min(100, Math.round(100 - rate.used_pct))) : null;
       if (remaining === null) continue;
-      const age = typeof account.updated_at === "number" && Number.isFinite(account.updated_at) && account.updated_at > 0
-        ? Math.max(0, Math.floor((now - account.updated_at) / 60)) : null;
-      const reset = rate?.resets_at != null && rate.resets_at <= now;
+      const updatedAt = measuredAt.has(rate) ? measuredAt.get(rate) : account.updated_at;
+      const age = typeof updatedAt === "number" && Number.isFinite(updatedAt) && updatedAt > 0
+        ? Math.max(0, Math.floor((now - updatedAt) / 60)) : null;
+      const reset = rate.resets_at != null && rate.resets_at <= now;
+      const duration = window.match(/\b(\d+)(m|h|d)\b/);
+      const windowSecs = duration ? Number(duration[1]) * ({ m: 60, h: 3600, d: 86400 }[duration[2]] ?? 0) : null;
+      const stale = reset || age === null || age >= 10 || (windowSecs !== null && now - updatedAt! > windowSecs);
       rows.push({ key: `${key}:${window}`, accountKey: displayKey, provider: account.provider,
         label: owners[key]?.trim() || (account.provider === "antigravity" ? agy.map((a) => owners[`antigravity:${a.account_id}`]?.trim()).find(Boolean) : "") || account.label || account.provider,
         group: account.provider === "antigravity" ? window.replace(/ (5h|7d)$/, "") : fableHome ? "Fable" : null,
         window: account.provider === "antigravity" ? window.replace(/^.* /, "") : window,
-        remaining,
-        resetsAt: rate?.resets_at ?? null, reset, age,
-        severity: remaining > 50 ? "ok" : remaining >= 20 ? "warn" : "crit" });
+        remaining: stale ? null : remaining,
+        resetsAt: rate.resets_at ?? null, reset, stale, age,
+        severity: stale ? "none" : remaining > 50 ? "ok" : remaining >= 20 ? "warn" : "crit" });
     }
   }
   return rows;

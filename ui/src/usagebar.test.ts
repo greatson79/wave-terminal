@@ -15,7 +15,7 @@ test("remaining thresholds follow green above 50, yellow 20–50, red below 20",
 
 test("reset, stale, hidden, and missing measurements stay distinct", () => {
   expect(sidebarUsage([account(12, 1000, 1100)], [], 1600)[0]).toMatchObject({
-    reset: true, remaining: 88, severity: "ok", age: 10,
+    reset: true, remaining: null, severity: "none", age: 10,
   });
   expect(sidebarUsage([account(12, 1000)], ["claude:account-1"], 1600)).toEqual([]);
   expect(sidebarUsage([account(12, 1590)], [], 2200)[0].age).toBe(10);
@@ -68,4 +68,30 @@ test("reset time is local and unknown timestamps are explicit", () => {
   expect(resetTime(date.getTime() / 1000)).toBe("리셋 11/2 09:05");
   expect(resetTime(null)).toBe("리셋 미상");
   expect(resetTime(1e20)).toBe("리셋 미상");
+});
+
+test("stale readings hide remaining values after reset or beyond their window", () => {
+  expect(sidebarUsage([account(0, 1000, 1100)], [], 1100)[0])
+    .toMatchObject({ stale: true, remaining: null, severity: "none" });
+  expect(sidebarUsage([account(0, 1000, 99999)], [], 19001)[0])
+    .toMatchObject({ stale: true, remaining: null, severity: "none", reset: false });
+  expect(sidebarUsage([account(0, 1000, 99999)], [], 1599)[0])
+    .toMatchObject({ stale: false, remaining: 100, severity: "ok" });
+  expect(sidebarUsage([account(0, 1000, 99999)], [], 1600)[0])
+    .toMatchObject({ stale: true, remaining: null, severity: "none" });
+  const shortWindow = { ...account(0, 1000, 99999), rate: [{ label: "5m", used_pct: 0, resets_at: 99999 }] };
+  expect(sidebarUsage([shortWindow], [], 1300)[0]).toMatchObject({ stale: false, remaining: 100 });
+  expect(sidebarUsage([shortWindow], [], 1301)[0]).toMatchObject({ stale: true, remaining: null });
+  expect(sidebarUsage([{ ...account(0), updated_at: null }], [], 1100)[0])
+    .toMatchObject({ stale: true, remaining: null, severity: "none" });
+  const weekly = { ...account(20, 1000, 999999), rate: [{ label: "7d Fable", used_pct: 20, resets_at: 999999 }] };
+  expect(sidebarUsage([weekly], [], 605801)[0]).toMatchObject({ stale: true, remaining: null });
+});
+
+test("merging Antigravity accounts retains each window's measurement age", () => {
+  const old: UsageAccount = { ...account(0, 1000, 999999), provider: "antigravity", account_id: "cli" };
+  const fresh: UsageAccount = { ...old, account_id: "default", updated_at: 19999,
+    rate: [{ label: "7d", used_pct: 25, resets_at: 999999 }] };
+  expect(sidebarUsage([fresh, old], [], 20000).map(r => [r.window, r.remaining, r.stale]))
+    .toEqual([["5h", null, true], ["7d", 75, false]]);
 });

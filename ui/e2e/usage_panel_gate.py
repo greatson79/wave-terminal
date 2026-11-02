@@ -80,7 +80,7 @@ window.__TAURI__.core.invoke = (command, args) =>
     master:{name:'Alpha',label:'샘플A본부·책임자'},
     worker:{name:'Beta',label:'샘플B본부·책임자'}
   },colors:{'샘플A본부':'#1266aa','샘플B본부':'#bb3311','_neutral':'#555555'}})) :
-  command === 'usage_accounts_all' ? Promise.resolve({accounts: %s}) :
+  command === 'usage_accounts_all' ? Promise.resolve({accounts: JSON.parse(localStorage.getItem('usage-mixed-fixture') || 'null') || %s}) :
   command === 'account_owners' ? Promise.resolve({'claude:one':'Main','fable:default':'Main',
     'codex:default':'Codex','antigravity:cli':'Antigravity','claude:two':'Second','claude:three':'Third'}) :
   command === 'account_order' ? Promise.resolve(['claude:one','fable:default','codex:default',
@@ -99,7 +99,8 @@ window.__TAURI__.core.invoke = (command, args) =>
             assert "5h 51" in text and "7d 20" in text
             assert "Fable" in text and "7d 90" in text and "7d Fable 100" in text
             assert "7d 19" in panel.locator(".usage-row").nth(2).inner_text()
-            assert "5h 당시98" in text and "5h 당시88" in text
+            assert text.count("5h 오래됨") == 2 and text.count("7d 오래됨") == 2
+            assert "당시" not in text and "5h 98" not in text and "5h 88" not in text
             assert "Argon" not in text and "남음" not in text and "641분 전" not in text
             assert panel.locator(".usage-row.stale").count() == 2
             assert panel.locator(".usage-item.reset").count() == 2
@@ -111,8 +112,8 @@ window.__TAURI__.core.invoke = (command, args) =>
                        for i in range(panel.locator(".usage-row").count()))
             panel.locator(".usage-row").nth(3).hover()
             detail = panel.locator(".usage-row").nth(3).inner_text()
-            assert "남음 69%" in detail and "리셋" in detail and "641분 전" in detail
-            assert "Argon 7d: 당시 45%" in detail
+            assert "남음" not in detail and "69%" not in detail and "리셋" in detail and "641분 전" in detail
+            assert "Argon 7d: 오래된 측정값" in detail and "45%" not in detail
             assert panel.evaluate("e => e.getBoundingClientRect().height <= document.querySelector('#wsbar').getBoundingClientRect().height / 4")
             page.wait_for_function("typeof window.__daemonEvent === 'function'")
             before_watchdog = page.locator("#toasts .toast.watchdog").count()
@@ -218,6 +219,18 @@ window.__TAURI__.core.invoke = (command, args) =>
             page.reload()
             page.wait_for_function("""() => JSON.parse(localStorage.getItem('cys-layout-v2')).workspaces.length === 3""")
             assert "0 pane" not in page.locator("#ws-tabs").inner_text()
+            mixed = [
+                account("antigravity", "cli", "Antigravity", 641, [("Gemini Models 5h", 0)]),
+                account("antigravity", "default", "Antigravity", 1, [("Gemini Models 7d", 25)]),
+            ]
+            page.evaluate("data => localStorage.setItem('usage-mixed-fixture', JSON.stringify(data))", mixed)
+            page.reload()
+            panel.get_by_text("7d 75", exact=True).wait_for()
+            assert panel.locator(".usage-row").count() == 1
+            assert panel.locator(".usage-row.stale").count() == 0
+            assert panel.locator(".usage-item.none").inner_text() == "5h 오래됨"
+            assert panel.locator(".usage-item.ok").inner_text() == "7d 75"
+            panel.screenshot(path=str(args.output.with_name(args.output.stem + "_mixed.png")))
             browser.close()
     finally:
         server.shutdown()

@@ -30,8 +30,8 @@ if [ "$(uname -m)" = "$ARCH" ]; then
   RT="$(cd "$RT" && pwd)"
   export PATH="$RT/python/bin:$RT/git/bin:$RT/uv:$RT/node/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   export PYTHONDONTWRITEBYTECODE=1
-  "$RT/python/bin/python3" -I -c 'import ssl, sqlite3, ctypes, venv, json; print("bundled Python imports OK")'
-  "$RT/python/bin/python3" -I -m pip --version
+  "$RT/python/bin/python3" -I -B -c 'import ssl, sqlite3, ctypes, venv, json; print("bundled Python imports OK")'
+  "$RT/python/bin/python3" -I -B -m pip --version
   "$RT/git/bin/git" --version
   "$RT/uv/uv" --version
   "$RT/uv/uvx" --version

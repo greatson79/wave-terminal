@@ -4,6 +4,7 @@ import json
 import shutil
 import pathlib
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -90,6 +91,23 @@ class MacRuntimeGate(unittest.TestCase):
                 path.write_text("#!/bin/sh\nexit 0\n")
                 path.chmod(0o755)
             self.assertNotEqual(self.check_runtime(root).returncode, 0)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS runtime only")
+    def test_verification_does_not_write_private_path_bytecode(self):
+        runtime = ROOT / "src-tauri/runtime"
+        if not (runtime / "python/bin/python3").exists():
+            self.skipTest("bundled runtime not prepared")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp) / "runtime"
+            root.mkdir()
+            shutil.copytree(runtime / "python", root / "python",
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+            for name in ("git", "uv", "node"):
+                (root / name).symlink_to(runtime / name, target_is_directory=True)
+            target = "aarch64-apple-darwin" if os.uname().machine == "arm64" else "x86_64-apple-darwin"
+            result = self.check_runtime(root, target)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(any(root.rglob("*.pyc")), "verification wrote machine-path bytecode")
 
 class NodeEntrypointCopyTests(unittest.TestCase):
     ENTRIES = {

@@ -748,3 +748,15 @@ body.cc-office #cc-view-office { flex: 1; min-height: 0; }
    오피스가 상시 렌더되던 leak 봉인(CORS 수정으로 3D가 실로드되며 가시화된 잠복 버그). */
 #cc-view-office[hidden] { display: none; }
 #cc-view-office iframe { flex: 1; width: 100%; min-height: 480px; border: 0; background: #05080f; }
+
+/* Team forms use the existing app palette and leave project folders untouched. */
+.team-dialog { background: var(--bg, #161b22); color: var(--fg, #e6edf3); border: 1px solid #768390; border-radius: 6px; padding: 24px; width: min(440px, 85vw); }
+.team-dialog::backdrop { background: #0008; }
+.team-dialog label { display: block; margin: 12px 0; }
+.team-dialog input { display: block; box-sizing: border-box; width: 100%; margin-top: 6px; padding: 8px; color: inherit; background: inherit; border: 1px solid #768390; }
+.team-dialog button, #team-starters button { margin: 4px; padding: 6px 10px; }
+.team-dialog [role=alert] { color: #ffb4ab; white-space: pre-wrap; }
+.team-empty { padding: 32px; margin: auto; text-align: center; }
+.ws-legacy-label { padding: 12px 8px 6px; color: inherit; font-size: 0.9em; }
+#team-starters { padding: 8px; }
+#team-starters[hidden] { display: none; }

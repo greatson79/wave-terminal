@@ -127,3 +127,44 @@ test("restore reuses an exact legacy target even when local HQ aliases do not ma
   expect(workspaces).toHaveLength(2);
   expect(treeSids(workspaces[1].tree)).toEqual([9]);
 });
+
+test("managed teams never coalesce, reorder, prune or rehome by their display names", () => {
+  const pane = (sid: number) => ({ type: "pane" as const, sid });
+  const workspaces = [
+    { id: 1, teamId: "a", name: "Alpha", tree: null as LayoutNode | null },
+    { id: 2, teamId: "b", name: "Alpha", tree: pane(8) as LayoutNode | null },
+    { id: 3, name: "Alpha", tree: pane(9) as LayoutNode | null },
+  ];
+  expect(coalesceHqWorkspaces(workspaces, () => true).size).toBe(0);
+  expect(workspaces.map((ws) => ws.id)).toEqual([1, 2, 3]);
+  expect(pruneEmptyHqWorkspaces(workspaces, () => true)).toEqual([]);
+  let calls = 0;
+  rehomeRestoredSeats(workspaces, [{ surface_id: 8, title: "Beta·작업·s123" }],
+    () => { calls++; return "Beta"; }, () => { throw new Error("managed title was routed"); });
+  expect(calls).toBe(0);
+  expect(treeSids(workspaces[1].tree)).toEqual([8]);
+});
+
+test("legacy title routing never adopts a seat into a managed target", () => {
+  const workspaces = [
+    { id: 1, name: "misc", tree: { type: "pane" as const, sid: 3 } as LayoutNode | null },
+    { id: 2, teamId: "team", name: "Alpha", tree: null as LayoutNode | null },
+  ];
+  rehomeRestoredSeats(workspaces, [{ surface_id: 3, title: "Alpha" }], () => "Alpha",
+    (name) => ({ id: 3, name, tree: null }));
+  expect(workspaces[1].tree).toBeNull();
+  expect(treeSids(workspaces[2].tree)).toEqual([3]);
+});
+
+test("normalization favors the managed socket owner without changing display order", () => {
+  const workspaces = [
+    { id: 1, name: "old", socket: "team-a", tree: { type: "pane" as const, sid: 7 } as LayoutNode | null },
+    { id: 2, teamId: "a", name: "Alpha", socket: "team-a", tree: { type: "pane" as const, sid: 7 } as LayoutNode | null },
+    { id: 3, teamId: "b", name: "Alpha", socket: "team-b", tree: { type: "pane" as const, sid: 7 } as LayoutNode | null },
+  ];
+  const normalized = normalizeWorkspaces(workspaces);
+  expect(normalized.map((ws) => ws.id)).toEqual([1, 2, 3]);
+  expect(normalized[0].tree).toBeNull();
+  expect(treeSids(normalized[1].tree)).toEqual([7]);
+  expect(treeSids(normalized[2].tree)).toEqual([7]);
+});

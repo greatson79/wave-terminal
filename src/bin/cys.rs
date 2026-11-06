@@ -1603,7 +1603,7 @@ fn run(command: Command) -> i32 {
         Command::Team { action, json } => return run_team(action, json),
         Command::Ping => request("system.ping", json!({})).map(|r| println!("{}", r.as_str().unwrap_or("pong"))),
         Command::PhoenixIdentity => {
-            // 데몬 접속 없이 이 바이너리 자신의 3필드를 출력(phoenix 폴백 identity 대조의 self-report 측).
+            // Identity fields plus an additive read-only home probe; no daemon or filesystem writes.
             println!(
                 "{}",
                 json!({
@@ -1611,6 +1611,7 @@ fn run(command: Command) -> i32 {
                     "build_id": cys::pack::build_id(),
                     "embedded_pack_hash": cys::pack::embedded_pack_hash(),
                     "protocol_version": cys::pack::PHOENIX_PROTOCOL_VERSION,
+                    "home_dir": cys::home_dir(),
                 })
             );
             return 0;

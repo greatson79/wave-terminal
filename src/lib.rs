@@ -435,8 +435,16 @@ fn read_registry_string(
 
 /// 홈 디렉토리(RC-7 공용). Windows는 HOME 미설정이 기본이라 `env::var("HOME")`은 빈값으로 폴백돼
 /// `~/.cys/...` 경로를 CWD 상대경로로 붕괴시킨다(부서목록·프로파일·pending-restore 오지정). dirs::home_dir()
-/// (Windows=USERPROFILE/HOMEDRIVE 기반·unix=$HOME)로 OS중립 해소. 코어(cys)·GUI(src-tauri) 공유.
+/// (Windows=OS Known Folder profile · unix=$HOME)로 OS중립 해소. 코어(cys)·GUI(src-tauri) 공유.
 pub fn home_dir() -> PathBuf {
+    #[cfg(all(feature = "test-home-seam", debug_assertions))]
+    {
+        let home = std::env::var_os("CYS_HOME").map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .expect("CYS_HOME must be an absolute test path when test-home-seam is enabled");
+        return home;
+    }
+    #[cfg(not(all(feature = "test-home-seam", debug_assertions)))]
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 

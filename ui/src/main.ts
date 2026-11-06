@@ -2,7 +2,7 @@
 // 세션 영속은 구조로 해결: 세션(PTY)은 데몬 소유, UI는 attach만 한다.
 
 import { loadTeamLayout, saveTeamLayout } from "./teamlayout";
-import { openTeamDialog } from "./teamdialog";
+import { openTeamDialog, teamErrorMessage } from "./teamdialog";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
@@ -246,10 +246,11 @@ async function loadTeams() {
     if (teamStoreStatus?.corrupt) throw new Error(teamStoreStatus.corrupt.message_ko);
     teams = next as Team[];
     teamReadFailed = false;
-  } catch {
+  } catch (error) {
     if (revision !== teamReadRevision) return;
     teamReadFailed = true;
-    toast("health", "팀을 불러오지 못했습니다", teamStoreStatus?.corrupt?.message_ko ?? "저장된 팀 파일을 확인해 주세요. 추천 팀은 추가하지 않습니다.");
+    toast("health", "팀을 불러오지 못했습니다", teamErrorMessage(error,
+      teamStoreStatus?.corrupt?.message_ko ?? "저장된 팀 파일을 확인해 주세요. 추천 팀은 추가하지 않습니다."));
     return;
   }
   await refreshTeamSockets().catch(() => reconcileTeams());
@@ -274,7 +275,7 @@ async function offerTeamStarters(explicit = false) {
   skip.addEventListener("click", async () => {
     skip.disabled = true;
     try { await mark(); panel.hidden = true; }
-    catch { skip.disabled = false; toast("health", "선택을 저장하지 못했습니다", "다시 시도해 주세요."); }
+    catch (error) { skip.disabled = false; toast("health", "선택을 저장하지 못했습니다", teamErrorMessage(error, "다시 시도해 주세요.")); }
   });
   panel.append(skip);
 }

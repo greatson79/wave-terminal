@@ -135,7 +135,7 @@ test("Enter on a focused button keeps its native action; composing Enter cancels
 });
 
 test("structured invalid_folder rejection shows the required Korean error for saving and picking", async () => {
-  const rejection = { code: "invalid_folder", message: "Invalid work folder" };
+  const rejection = { code: "invalid_folder", message: "작업 폴더를 찾을 수 없습니다. 폴더를 다시 선택하세요." };
   const saving = setup({ save: async () => { throw rejection; } });
   saving.folder.value = "/missing";
   await saving.dialog.button("만들기").fire("click");
@@ -163,4 +163,18 @@ test("every composition guard blocks plain, Command and Control Enter", async ()
       expect(saves).toEqual([]);
     }
   }
+});
+
+test("structured backend messages are shown verbatim and validation branches on code", async () => {
+  const message = "팀 정보를 저장하지 못했습니다. 폴더 권한을 확인하세요.";
+  const store = setup({ save: async () => { throw { code: "store_io", message }; } });
+  store.folder.value = "C:\\Users\\최형석\\내 팀 폴더";
+  await store.dialog.button("만들기").fire("click");
+  expect(store.dialog.all().find(e => e.attrs.role === "alert")!.textContent).toBe(message);
+  expect(store.folder.attrs["aria-invalid"]).not.toBe("true");
+  const invalid = setup({ save: async () => { throw { code: "invalid_name", message: "팀 이름을 다시 입력하세요." }; } });
+  invalid.folder.value = "/fixture";
+  await invalid.dialog.button("만들기").fire("click");
+  expect(invalid.dialog.all().find(e => e.attrs.role === "alert")!.textContent).toBe("팀 이름을 다시 입력하세요.");
+  expect(invalid.name.attrs["aria-invalid"]).toBe("true");
 });

@@ -1,3 +1,11 @@
+export function teamErrorMessage(error: unknown, fallback: string): string {
+  if (error && typeof error === "object") {
+    const detail = error as {code?: unknown; message?: unknown};
+    if (typeof detail.code === "string" && typeof detail.message === "string" && detail.message.trim()) return detail.message;
+  }
+  return fallback;
+}
+
 export interface TeamDialogOptions {
   team?: { id: string; name: string; folder: string; color?: string };
   suggestion?: string;
@@ -48,11 +56,13 @@ export function openTeamDialog(options: TeamDialogOptions): HTMLDialogElement {
   };
   const showError = (e: unknown, fallback = "팀을 저장하지 못했습니다. 다시 시도해 주세요.") => {
     const details = e && typeof e === "object" ? e as { code?: unknown; message?: unknown } : null;
-    const text = details ? [details.code, details.message].filter(value => typeof value === "string").join(" ")
-      : typeof e === "string" ? e : "";
-    error.textContent = /folder|directory|폴더/i.test(text)
+    const code = typeof details?.code === "string" ? details.code : null;
+    name.setAttribute("aria-invalid", String(code === "invalid_name"));
+    folder.setAttribute("aria-invalid", String(code === "invalid_folder"));
+    const text = e instanceof Error ? e.message : typeof e === "string" ? e : "";
+    error.textContent = teamErrorMessage(e, /folder|directory|폴더/i.test(text)
       ? "작업 폴더를 찾을 수 없습니다. 폴더를 다시 선택하세요."
-      : fallback;
+      : fallback);
   };
   const run = async (action: () => Promise<void>) => {
     if (busy || composing) return;

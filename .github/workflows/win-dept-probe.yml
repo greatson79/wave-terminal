@@ -18,12 +18,13 @@ jobs:
       matrix:
         shell: [pwsh, powershell]
         path_context: [gui, user-path-fix]
+        entry: [allocate, create]
     steps:
       - name: Prepare common probe (UTF-8 BOM for PowerShell 5.1)
         shell: pwsh
         run: |
           $script = @'
-          param([string]$ProbeShell, [string]$PathContext)
+          param([string]$ProbeShell, [string]$PathContext, [ValidateSet('allocate','create')][string]$Entry)
           $ErrorActionPreference = 'Stop'
           Set-StrictMode -Version Latest
           [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
@@ -35,23 +36,34 @@ jobs:
             catch { Write-Host ("{0:o} FAIL {1} exit=1 elapsed_ms={2}: {3}" -f (Get-Date), $label, $timer.ElapsedMilliseconds, $_); throw }
           }
           function Assert($condition, $message) { if (-not $condition) { throw $message } }
-          function Native($exe, [string[]]$argv, [int]$expected = 0) {
-            # Start-Process joins argv on PS5.1; apply Windows argv quoting explicitly.
+          function Native($exe, [string[]]$argv, [Nullable[int]]$expected = 0) {
             $quoted = @($argv | ForEach-Object { '"' + (($_ -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"' })
-            $out = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString() + '.out')
-            $err = $out + '.err'
             $timer = [Diagnostics.Stopwatch]::StartNew()
             Write-Host ("{0:o} EXEC {1} {2}" -f (Get-Date), $exe, ($argv -join ' | '))
-            $p = Start-Process -FilePath $exe -ArgumentList $quoted -PassThru -NoNewWindow -RedirectStandardOutput $out -RedirectStandardError $err
-            if (-not $p.WaitForExit(120000)) { throw "TIMEOUT pid=$($p.Id) exe=$exe (job timeout is final containment)" }
-            $p.Refresh()
-            $stdout = [IO.File]::ReadAllText($out, [Text.Encoding]::UTF8)
-            $stderr = [IO.File]::ReadAllText($err, [Text.Encoding]::UTF8)
-            Write-Host $stdout
-            Write-Host $stderr
-            Write-Host ("{0:o} EXIT code={1} elapsed_ms={2}" -f (Get-Date), $p.ExitCode, $timer.ElapsedMilliseconds)
-            Assert ($p.ExitCode -eq $expected) "Unexpected exit $($p.ExitCode), expected $expected from $exe"
-            return $stdout
+            # Own the Process from Start through ExitCode; PS5 Start-Process -PassThru lost fast-exit status.
+            $p = New-Object Diagnostics.Process
+            $p.StartInfo.FileName = $exe
+            $p.StartInfo.Arguments = $quoted -join ' '
+            $p.StartInfo.UseShellExecute = $false
+            $p.StartInfo.RedirectStandardOutput = $true
+            $p.StartInfo.RedirectStandardError = $true
+            $p.StartInfo.StandardOutputEncoding = [Text.Encoding]::UTF8
+            $p.StartInfo.StandardErrorEncoding = [Text.Encoding]::UTF8
+            try {
+              Assert ($p.Start()) "Cannot start $exe"
+              $stdoutTask = $p.StandardOutput.ReadToEndAsync()
+              $stderrTask = $p.StandardError.ReadToEndAsync()
+              if (-not $p.WaitForExit(120000)) { throw "TIMEOUT pid=$($p.Id) exe=$exe (job timeout is final containment)" }
+              $code = $p.ExitCode
+              $stdout = $stdoutTask.GetAwaiter().GetResult()
+              $stderr = $stderrTask.GetAwaiter().GetResult()
+              Write-Host $stdout
+              Write-Host $stderr
+              Write-Host ("{0:o} EXIT code={1} elapsed_ms={2}" -f (Get-Date), $code, $timer.ElapsedMilliseconds)
+              Assert ($null -ne $code) "Missing native exit status from $exe"
+              if ($null -ne $expected) { Assert ($code -eq $expected) "Unexpected exit $code, expected $expected from $exe" }
+              return $stdout
+            } finally { $p.Dispose() }
           }
           # Verbatim: wave-install 419cf078688e8d4a0d374cd4a868ecf148298ad0/bootstrap.ps1:696-730.
           function Say($message) { Write-Host $message }
@@ -97,7 +109,7 @@ jobs:
           function ProcessTree([int[]]$roots) {
             $all = @(Get-CimInstance Win32_Process)
             $ids = New-Object 'System.Collections.Generic.HashSet[int]'
-            foreach ($root in $roots) { $null = $ids.Add($root) }
+            foreach ($root in $roots) { if ($root -gt 0) { $null = $ids.Add($root) } }
             do {
               $added = $false
               foreach ($item in $all) {
@@ -112,6 +124,30 @@ jobs:
               $survivors = @($now | Where-Object { $_.ProcessId -eq $old.ProcessId -and $_.CreationDate -eq $old.CreationDate })
               Assert ($survivors.Count -eq 0) "Process survived: pid=$($old.ProcessId) command=$($old.CommandLine)"
             }
+          }
+          function WaitForTreeExit($recorded, [int]$seconds = 30) {
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            $gone = New-Object 'System.Collections.Generic.HashSet[int]'
+            do {
+              $now = @(Get-CimInstance Win32_Process)
+              $pending = @()
+              foreach ($old in $recorded) {
+                $alive = @($now | Where-Object { $_.ProcessId -eq $old.ProcessId -and $_.CreationDate -eq $old.CreationDate }).Count -gt 0
+                if ($alive) {
+                  $pending += $old
+                  Write-Host ("TEARDOWN alive pid={0} elapsed_ms={1}" -f $old.ProcessId, $watch.ElapsedMilliseconds)
+                } elseif ($gone.Add([int]$old.ProcessId)) {
+                  Write-Host ("TEARDOWN first_observed_gone pid={0} elapsed_ms={1}" -f $old.ProcessId, $watch.ElapsedMilliseconds)
+                }
+              }
+              $left = $seconds * 1000 - $watch.ElapsedMilliseconds
+              if ($pending.Count -eq 0 -or $left -le 0) { break }
+              Start-Sleep -Milliseconds ([int][Math]::Min(1000, $left))
+            } while ($true)
+            foreach ($old in $pending) {
+              Write-Host ("TEARDOWN SURVIVOR pid={0} elapsed_ms={1} created={2:o} exe={3} command={4}" -f $old.ProcessId, $watch.ElapsedMilliseconds, $old.CreationDate, $old.ExecutablePath, $old.CommandLine)
+            }
+            return $pending
           }
           $probeRoot = Join-Path $env:RUNNER_TEMP ('cc-' + [guid]::NewGuid().ToString())
           $probeHome = Join-Path $probeRoot '최형석'
@@ -129,16 +165,24 @@ jobs:
           $env:HOME = $probeHome
           $env:LOCALAPPDATA = Join-Path $probeHome 'AppData\Local'
           $env:APPDATA = Join-Path $probeHome 'AppData\Roaming'
-          $env:CYS_DEPTS_JSON = Join-Path $probeHome '.cys\depts.json'
+          $registryPath = Join-Path $probeHome '.cys\depts.json'
           $env:CYS_PACK_DIR = Join-Path $probeHome '.cys\pack'
           $env:PYTHONUTF8 = '1'
           $env:PYTHONIOENCODING = 'utf-8'
           $env:PYTHONDONTWRITEBYTECODE = '1'
           $env:CYS_SHELL = (Get-Command $ProbeShell -CommandType Application).Source
-          foreach ($key in @('CYS_ROLE','CYS_SURFACE_ID','CYS_SOCKET','CYS_ACCOUNT_DIR','CYS_DEPT_NO_MASTER','CYS_DEPT_DEFAULT_ACCOUNT')) {
+          foreach ($key in @('CYS_ROLE','CYS_SURFACE_ID','CYS_SOCKET','CYS_ACCOUNT_DIR','CYS_DEPT_NO_MASTER','CYS_DEPT_DEFAULT_ACCOUNT','CYS_DEPTS_JSON')) {
             [Environment]::SetEnvironmentVariable($key, $null, 'Process')
           }
           try {
+            . Step 'Native exit-capture self-check (before any product evidence)' {
+              $cmd = Join-Path $env:WINDIR 'System32\cmd.exe'
+              $null = Native $cmd @('/d','/c','exit 0')
+              $null = Native $cmd @('/d','/c','exit 7') 7
+              $rejected = $false
+              try { $null = Native $cmd @('/d','/c','exit 7') } catch { $rejected = $_.Exception.Message -match 'Unexpected exit 7' }
+              Assert $rejected 'Native helper accepted a nonzero exit as success'
+            }
             . Step 'Isolated Korean profile and Windows shell' {
               New-Item -ItemType Directory -Force -Path $team,$env:LOCALAPPDATA,$env:APPDATA | Out-Null
               Write-Host "PS=$($PSVersionTable.PSVersion) profile=$probeHome team=$team context=$PathContext"
@@ -154,11 +198,15 @@ jobs:
             }
             . Step 'Silent install shipped bits (no source build)' {
               # NSIS /D must be last and unquoted, including a destination containing spaces.
-              $p = Start-Process -FilePath $setup -ArgumentList "/S /D=$install" -PassThru
+              $p = New-Object Diagnostics.Process
+              $p.StartInfo.FileName = $setup
+              $p.StartInfo.Arguments = "/S /D=$install"
+              $p.StartInfo.UseShellExecute = $false
+              Assert ($p.Start()) 'Cannot start installer'
               Assert ($p.WaitForExit(180000)) 'Installer timeout'
-              $p.Refresh()
               Write-Host "installer exit=$($p.ExitCode)"
               Assert ($p.ExitCode -eq 0) 'Installer failed'
+              $p.Dispose()
               foreach ($relative in @('cys.exe','cysd.exe','runtime\git\usr\bin\bash.exe','runtime\python\python3.exe')) {
                 $file = Join-Path $install $relative
                 Assert (Test-Path -LiteralPath $file -PathType Leaf) "Missing shipped file: $file"
@@ -198,6 +246,13 @@ jobs:
               Assert (Test-Path -LiteralPath $dept) 'init-pack did not seed shipped department tool'
               Write-Host "cys-dept sha256=$((Get-FileHash -LiteralPath $dept -Algorithm SHA256).Hash)"
             }
+            . Step 'Observed reg_count Windows-literal error (diagnostic, not a runtime patch)' {
+              # Exact python -c expression in shipped cys-dept:105; SyntaxError occurs before file access.
+              $windowsReg = 'C:\Users\최형석\.cys\depts.json'
+              $expression = "import json;print(len(json.load(open('$windowsReg'))['depts']))"
+              Write-Host "REG_COUNT_DIAGNOSTIC REG=<$windowsReg>"
+              $null = Native (Join-Path $install 'runtime\python\python3.exe') @('-c',$expression) 1
+            }
             . Step 'Catalog fixture (no credentials, no AI)' {
               $account = Join-Path $probeHome '.cys\probe-account'
               New-Item -ItemType Directory -Force -Path $account | Out-Null
@@ -206,7 +261,7 @@ jobs:
               [IO.File]::WriteAllText($env:CYS_DEPT_CATALOG, ($catalog | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
               $env:CYS_DEPT_CWD = $team
             }
-            foreach ($entry in @('allocate','create')) {
+            foreach ($entry in @($Entry)) {
               $socket = $null
               $daemonPid = $null
               $surfacePids = @()
@@ -214,10 +269,12 @@ jobs:
                 . Step "$entry via GUI department tool" {
                   $argv = @($dept,$entry)
                   if ($entry -eq 'create') { $argv += 'probe' }
-                  $answer = Native $bash $argv
+                  # Log the GUI-default REG expression in the same Bash environment, then run the unmodified tool.
+                  $envLog = 'printf "DEPT_ENV HOME=<%s> USERPROFILE=<%s> REG=<%s> CYS_DEPTS_JSON=<%s>\n" "$HOME" "$USERPROFILE" "${CYS_DEPTS_JSON:-$HOME/.cys/depts.json}" "${CYS_DEPTS_JSON-<unset>}" >&2; exec bash "$@"'
+                  $answer = Native $bash (@('-c',$envLog,'cc-env') + $argv)
                   $name = ($answer.Trim() -split "`r?`n")[-1].Trim()
                   Assert ($name -match '^dept-\d+$') "Invalid department output: $answer"
-                  $registry = Get-Content -LiteralPath $env:CYS_DEPTS_JSON -Raw -Encoding UTF8 | ConvertFrom-Json
+                  $registry = Get-Content -LiteralPath $registryPath -Raw -Encoding UTF8 | ConvertFrom-Json
                   $socket = $registry.depts.$name.socket
                   Assert ($socket -eq "\\.\pipe\cys-dept-$name") "Wrong named pipe: $socket"
                   $env:CYS_SOCKET = $socket
@@ -270,13 +327,11 @@ jobs:
                     $departmentTree = @(ProcessTree (@([int]$daemonPid) + $surfacePids))
                     $departmentTree | Select-Object ProcessId,ParentProcessId,CreationDate,ExecutablePath,CommandLine | Format-List | Out-Host
                     $null = Native $bash @($dept,'down-sock',$socket)
-                    Start-Sleep -Seconds 2
-                    $remaining = @(Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -eq $daemonPid -or $surfacePids -contains $_.ProcessId })
-                    $remaining | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine | Format-List | Out-Host
-                    Assert ($remaining.Count -eq 0) 'Department daemon or shell processes survived teardown'
-                    AssertGone $departmentTree
-                    $registryText = Get-Content -LiteralPath $env:CYS_DEPTS_JSON -Raw -Encoding UTF8
+                    $remaining = @(WaitForTreeExit $departmentTree 30)
+                    $registryText = Get-Content -LiteralPath $registryPath -Raw -Encoding UTF8
                     Write-Host "depts.json after teardown=$registryText"
+                    Assert ($remaining.Count -eq 0) "Department processes survived 30 seconds: $((@($remaining | ForEach-Object { $_.ProcessId })) -join ',')"
+                    AssertGone $departmentTree
                     $registry = $registryText | ConvertFrom-Json
                     Assert (@($registry.depts.PSObject.Properties).Count -eq 0) 'Department registry not empty'
                     # ping does not autostart; any success here means teardown failed.
@@ -296,7 +351,7 @@ jobs:
               foreach ($process in $owned) {
                 $current = Get-CimInstance Win32_Process -Filter "ProcessId=$($process.ProcessId)"
                 if ($current -and $current.ExecutablePath -eq $process.ExecutablePath -and $current.CreationDate -eq $process.CreationDate) {
-                  $null = Native (Join-Path $env:WINDIR 'System32\taskkill.exe') @('/PID',"$($process.ProcessId)",'/T','/F')
+                  $null = Native (Join-Path $env:WINDIR 'System32\taskkill.exe') @('/PID',"$($process.ProcessId)",'/T','/F') $null
                 }
               }
               Start-Sleep -Seconds 2
@@ -322,7 +377,7 @@ jobs:
               }
             }
           }
-          Write-Host ("{0:o} CC_PROBE_PASS shell={1} context={2} entrypoints=allocate,create" -f (Get-Date), $ProbeShell, $PathContext)
+          Write-Host ("{0:o} CC_PROBE_PASS shell={1} context={2} entrypoint={3}" -f (Get-Date), $ProbeShell, $PathContext, $Entry)
           '@
           [IO.File]::WriteAllText((Join-Path $env:RUNNER_TEMP 'cc-dept-probe.ps1'), $script, (New-Object Text.UTF8Encoding($true)))
 
@@ -331,11 +386,13 @@ jobs:
         shell: pwsh
         env:
           PROBE_PATH_CONTEXT: ${{ matrix.path_context }}
-        run: '& "$env:RUNNER_TEMP\cc-dept-probe.ps1" -ProbeShell pwsh -PathContext $env:PROBE_PATH_CONTEXT'
+          PROBE_ENTRY: ${{ matrix.entry }}
+        run: '& "$env:RUNNER_TEMP\cc-dept-probe.ps1" -ProbeShell pwsh -PathContext $env:PROBE_PATH_CONTEXT -Entry $env:PROBE_ENTRY'
 
       - name: Probe under Windows PowerShell 5.1
         if: matrix.shell == 'powershell'
         shell: powershell
         env:
           PROBE_PATH_CONTEXT: ${{ matrix.path_context }}
-        run: '& "$env:RUNNER_TEMP\cc-dept-probe.ps1" -ProbeShell powershell -PathContext $env:PROBE_PATH_CONTEXT'
+          PROBE_ENTRY: ${{ matrix.entry }}
+        run: '& "$env:RUNNER_TEMP\cc-dept-probe.ps1" -ProbeShell powershell -PathContext $env:PROBE_PATH_CONTEXT -Entry $env:PROBE_ENTRY'

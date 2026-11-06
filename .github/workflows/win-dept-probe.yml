@@ -157,11 +157,15 @@ jobs:
           Assert ($identity.User.Value -eq $ExpectedSid) 'Probe did not run as the newly created Korean account'
           $bootstrapHome = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
           Assert (-not [string]::IsNullOrWhiteSpace($bootstrapHome)) 'Loaded account has no native user profile'
-          # PS5 Add-Type uses TEMP; an inherited runner TEMP may be inaccessible to the new account.
-          $env:TEMP = Join-Path $bootstrapHome 'AppData\Local\Temp'
-          $env:TMP = $env:TEMP
-          New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
+          $nativeTemp = Join-Path $bootstrapHome 'AppData\Local\Temp'
+          New-Item -ItemType Directory -Force -Path $nativeTemp | Out-Null
+          # PS5 csc failed writing its DLL in Korean TEMP; compile in the launcher's SID-writable ASCII scratch.
+          Assert ($env:TEMP -match '^[\x00-\x7F]+$' -and (Test-Path -LiteralPath $env:TEMP -PathType Container)) 'Compiler scratch must exist and be ASCII'
+          Write-Host "PROFILE_HELPER_COMPILER_TEMP=$env:TEMP"
           Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class CCProfile { [DllImport("shell32.dll")] public static extern int SHGetKnownFolderPath(ref Guid id, uint flags, IntPtr token, out IntPtr path); }'
+          $env:TEMP = $nativeTemp
+          $env:TMP = $nativeTemp
+          Write-Host "PRODUCT_TEMP=$env:TEMP"
           $folderId = [guid]'5E6C858F-0E22-4760-9AFE-EA3317B67173'
           $pointer = [IntPtr]::Zero
           try {

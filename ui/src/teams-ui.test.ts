@@ -2,24 +2,27 @@ import { expect, test } from 'bun:test';
 import { harness } from '../tests/teams-harness';
 const team = (id:string,name=id) => ({id,name,folder:'/fixture/'+id,runtime_key:'team-'+id,stopped:false,created_at:'2026-11-06T12:00:00Z'});
 const socket = (id:string) => '/fixture/cys-dept-team-'+id+'/cys.sock';
-async function sidebarRegression(negative = false) {
-  const teams = [team('A'),team('B'),team('C','같은 팀'),team('D','같은 팀')];
+async function sidebarRegression(negative = false, windows = false) {
+  const folder = (id: string) => windows ? 'C:\\Users\\최형석\\내 팀 폴더\\' + id : '/fixture/'+id;
+  const sock = (id: string) => windows ? String.raw`\\.\pipe\cys-dept-team-${id}` : socket(id);
+  const teams = [team('A'),team('B'),team('C','같은 팀'),team('D','같은 팀')].map(t=>({...t,folder:folder(t.id)}));
+  if (windows) expect(folder('A')).toBe('C:\\Users\\최형석\\내 팀 폴더\\A');
   let title = 'B·개발본부·worker·s123';
   let unblock!:()=>void, entered!:()=>void; let delayed = true;
   const attaching = new Promise<void>(r=>entered=r);
   const gate = new Promise<void>(r=>unblock=r);
   const {api,ids,storage} = await harness(async (cmd,args) => {
     if(cmd==='team_list') return structuredClone(teams);
-    if(cmd==='list_depts') return {depts:Object.fromEntries(teams.map(t=>[t.runtime_key,{socket:socket(t.id)}]))};
-    if(cmd==='attach_surface' && args.socket===socket('A') && delayed) {entered();await gate;return {output_event:'out-A',exited_event:'exit-A'};}
+    if(cmd==='list_depts') return windows ? {depts:{}} : {depts:Object.fromEntries(teams.map(t=>[t.runtime_key,{socket:sock(t.id)}]))};
+    if(cmd==='attach_surface' && args.socket===sock('A') && delayed) {entered();await gate;return {output_event:'out-A',exited_event:'exit-A'};}
     if(cmd==='team_update') {const i=teams.findIndex(t=>t.id===args.id);teams[i]={...teams[i],...args.patch};return teams[i];}
-    if(cmd==='team_create') {const added=team('E',args.name);teams.push(added);return added;}
+    if(cmd==='team_create') {const added={...team('E',args.name),folder:args.folder};teams.push(added);return added;}
     if(cmd==='team_delete') {teams.splice(teams.findIndex(t=>t.id===args.id),1);return;}
-    if(cmd==='list_surfaces') { return {surfaces:args.socket===socket('A')?[{surface_id:123,title,role:'worker',exited:false,live_cwd:'/fixture/A'}]:[]}; }
+    if(cmd==='list_surfaces') { return {surfaces:args.socket===sock('A')?[{surface_id:123,title,role:'worker',exited:false,live_cwd:folder('A')}]:[]}; }
     if(cmd==='org_status') return {surfaces:[]};
     return {};
-  }, new Map(), negative);
-  api.set(teams.map((t,i)=>({id:i+1,teamId:t.id,name:t.name,socket:socket(t.id),tree:null})),structuredClone(teams));
+  }, new Map(), negative, windows);
+  api.set(teams.map((t,i)=>({id:i+1,teamId:t.id,name:t.name,socket:sock(t.id),tree:null})),structuredClone(teams));
   api.active(2);
   const pending=api.refreshPaneTitles();
   await attaching; api.active(3); api.reorder(); api.active(2); delayed=false; unblock(); await pending;
@@ -30,11 +33,11 @@ async function sidebarRegression(negative = false) {
     expect(ids.get('ws-tabs')!.children.some((t:any)=>t.dataset.teamId==='A')).toBe(true);
   };
   check(); title='전혀 다른 한글 · Alpha · 개발본부 · s123'; await api.refreshPaneTitles(); check();
-  await api.create({name:'이름 변경',folder:'/fixture/A'},'A');
+  await api.create({name:'이름 변경',folder:folder('A')},'A');
   api.state().find((w:any)=>w.teamId==='A').collapsed=true;
-  await api.remove('B');await api.create({name:'A',folder:'/fixture/E'});check();
-  expect(api.state().find((w:any)=>w.teamId==='A').socket).toBe(socket('A'));
-  expect(teams.find(t=>t.id==='A')!.folder).toBe('/fixture/A');
+  await api.remove('B');await api.create({name:'A',folder:folder('E')});check();
+  expect(api.state().find((w:any)=>w.teamId==='A').socket).toBe(sock('A'));
+  expect(teams.find(t=>t.id==='A')!.folder).toBe(folder('A'));
   api.allowSave(); api.saveLayout(); expect(storage.has('cys-layout-v3')).toBe(true);
   await api.reload(); check();
 }
@@ -42,6 +45,10 @@ test('real main wiring binds delayed adoption to team id across reorder, rename,
 
 test('negative control restores active-tab routing in an isolated main.ts copy and the SAME regression fails', async () => {
   await expect(sidebarRegression(true)).rejects.toThrow('expect(received).toEqual(expected)');
+});
+test('Windows named-pipe sidebar regression preserves Korean user and team folders with spaces', () => sidebarRegression(false,true));
+test('Windows negative control fails the same ownership regression', async () => {
+  await expect(sidebarRegression(true,true)).rejects.toThrow('expect(received).toEqual(expected)');
 });
 test('fresh starters are suggestions only; skip-all persists and upgrades never auto-offer', async () => {
   let offered=false;

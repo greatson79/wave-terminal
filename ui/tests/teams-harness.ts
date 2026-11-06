@@ -16,7 +16,7 @@ export class Element {
   getBoundingClientRect() { return {width: 1000, height: 700, x: 0, y: 0, left:0, top:0}; }
   async fire(k: string, extra: any = {}) { for (const fn of this.listeners[k] ?? []) await fn({target:this, currentTarget:this, stopPropagation(){}, preventDefault(){}, ...extra}); }
 }
-export async function harness(invoke: (cmd: string, args?: any) => Promise<any>, storage = new Map<string,string>(), negative = false) {
+export async function harness(invoke: (cmd: string, args?: any) => Promise<any>, storage = new Map<string,string>(), negative = false, windows = false) {
   const ids = new Map<string,Element>();
   const doc: any = { body: new Element(), documentElement: new Element(), createElement: () => new Element(),
     createTextNode: (s: string) => s, getElementById: (id: string) => { if (!ids.has(id)) ids.set(id, new Element()); return ids.get(id); },
@@ -48,6 +48,6 @@ export async function harness(invoke: (cmd: string, args?: any) => Promise<any>,
     watch:()=>watchTeams(), ready(){teamsReady=true;}, allowSave(){layoutWritable=true;}, create:(...args)=>saveTeam(...args), remove:(...args)=>deleteTeam(...args)};`;
   const js = new Bun.Transpiler({loader:'ts'}).transformSync(source);
   const run = new Function(...names,'window','document','localStorage','navigator','requestAnimationFrame','setInterval','ResizeObserver','getComputedStyle',js);
-  const api = run(...values,win,doc,localStorage,{platform:'MacIntel'},()=>{},()=>0,class {observe(){} disconnect(){}},()=>({getPropertyValue:()=>''}));
+  const api = run(...values,win,doc,localStorage,{platform:windows?'Win32':'MacIntel',userAgent:windows?'Windows':'Macintosh'},()=>{},()=>0,class {observe(){} disconnect(){}},()=>({getPropertyValue:()=>''}));
   return {api, ids, storage, events, windowEvents};
 }

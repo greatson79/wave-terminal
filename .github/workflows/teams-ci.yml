@@ -26,6 +26,13 @@ jobs:
           python-version: '3.12'
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2
+      - name: Check out unchanged Windows baseline
+        if: runner.os == 'Windows'
+        uses: actions/checkout@v4
+        with:
+          ref: '85f160fde191593c290293e6295961f712ff3e47'
+          path: .ci-baseline
+
 
       - name: Prepare test-only Tauri resources (no runtime build or execution)
         shell: bash
@@ -49,30 +56,96 @@ jobs:
                   path.write_text(content, encoding='utf-8')
           PY
 
-      - name: Core library suite (isolated home)
-        shell: bash
-        run: node scripts/gates-v024/cargo-isolated.mjs test --lib -- --test-threads=1
+      - name: Prove known Windows assertions against the pinned baseline
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python scripts/tests/compare_teams_windows_baseline.py --baseline .ci-baseline --candidate . --output "$env:RUNNER_TEMP/teams-baseline-evidence"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Real CLI and event forwarding regressions (isolated home)
-        shell: bash
-        run: node scripts/gates-v024/cargo-isolated.mjs test --test teams_cli -- --test-threads=1
+      - name: Default-feature release CLI ignores CYS_HOME (Windows)
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --release --no-default-features --bin cys --target-dir target/default-home-check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/tests/test_home_seam_default.py --binary target/default-home-check/release/cys.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: CLI command contract (isolated home)
+      - name: Default-feature release CLI ignores CYS_HOME (macOS)
+        if: runner.os == 'macOS'
         shell: bash
-        run: node scripts/gates-v024/cargo-isolated.mjs test --bin cys team_cli_contract_is_typed_and_in_help -- --test-threads=1
-
-      - name: Team event RPC unit harness (no daemon startup)
-        shell: bash
-        run: node scripts/gates-v024/cargo-isolated.mjs test --bin cysd team_changed_rpc_publishes_only_fixed_refresh_event -- --test-threads=1
-
-      - name: Tauri unit suite (isolated home, no native app launch)
-        shell: bash
-        run: node scripts/gates-v024/cargo-isolated.mjs test -p cys-app -- --test-threads=1
+        run: |
+          set -euo pipefail
+          cargo build --release --no-default-features --bin cys --target-dir target/default-home-check
+          python scripts/tests/test_home_seam_default.py --binary target/default-home-check/release/cys
 
       - name: Install existing UI dependencies
+        if: always()
         shell: bash
         run: bun install --cwd ui --frozen-lockfile
 
-      - name: Complete Bun UI suite including sidebar negative control
+      - name: Complete Windows suites under PowerShell 7
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $failed = $false
+          node scripts/gates-v024/cargo-isolated.mjs test --lib -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { $failed = $true }
+          node scripts/gates-v024/cargo-isolated.mjs test --test home_seam --test teams_cli --test teams_reaper -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { $failed = $true }
+          node scripts/gates-v024/cargo-isolated.mjs test --bin cys team_cli_contract_is_typed_and_in_help -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { $failed = $true }
+          node scripts/gates-v024/cargo-isolated.mjs test --bin cysd team_changed_rpc_publishes_only_fixed_refresh_event -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { $failed = $true }
+          node scripts/gates-v024/cargo-isolated.mjs test -p cys-app -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { $failed = $true }
+          python scripts/tests/test_compare_teams_windows_baseline.py
+          if ($LASTEXITCODE -ne 0) { $failed = $true }
+          bun test --cwd ui
+          if ($LASTEXITCODE -ne 0) { $failed = $true }
+          python scripts/tests/test_home_seam_default.py --binary target/default-home-check/release/cys.exe
+          if ($LASTEXITCODE -ne 0) { $failed = $true }
+          if ($failed) { exit 1 }
+
+      - name: Complete Windows suites under Windows PowerShell 5.1
+        if: always() && runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $failed = $false
+          node scripts/gates-v024/cargo-isolated.mjs test --lib -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { $failed = $true }
+          node scripts/gates-v024/cargo-isolated.mjs test --test home_seam --test teams_cli --test teams_reaper -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { $failed = $true }
+          node scripts/gates-v024/cargo-isolated.mjs test --bin cys team_cli_contract_is_typed_and_in_help -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { $failed = $true }
+          node scripts/gates-v024/cargo-isolated.mjs test --bin cysd team_changed_rpc_publishes_only_fixed_refresh_event -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { $failed = $true }
+          node scripts/gates-v024/cargo-isolated.mjs test -p cys-app -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { $failed = $true }
+          python scripts/tests/test_compare_teams_windows_baseline.py
+          if ($LASTEXITCODE -ne 0) { $failed = $true }
+          bun test --cwd ui
+          if ($LASTEXITCODE -ne 0) { $failed = $true }
+          python scripts/tests/test_home_seam_default.py --binary target/default-home-check/release/cys.exe
+          if ($LASTEXITCODE -ne 0) { $failed = $true }
+          if ($failed) { exit 1 }
+
+      - name: Complete macOS suites
+        if: runner.os == 'macOS'
         shell: bash
-        run: bun test --cwd ui
+        run: |
+          set -euo pipefail
+          node scripts/gates-v024/cargo-isolated.mjs test --lib -- --test-threads=1
+          node scripts/gates-v024/cargo-isolated.mjs test --test home_seam --test teams_cli --test teams_reaper -- --test-threads=1
+          node scripts/gates-v024/cargo-isolated.mjs test --bin cys team_cli_contract_is_typed_and_in_help -- --test-threads=1
+          node scripts/gates-v024/cargo-isolated.mjs test --bin cysd team_changed_rpc_publishes_only_fixed_refresh_event -- --test-threads=1
+          node scripts/gates-v024/cargo-isolated.mjs test -p cys-app -- --test-threads=1
+          python scripts/tests/test_compare_teams_windows_baseline.py
+          bun test --cwd ui

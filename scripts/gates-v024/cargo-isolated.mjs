@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 const temp = mkdtempSync(join(tmpdir(), 'cys-v024-test-'));
-const env = { ...process.env, HOME: temp, USERPROFILE: temp, CYS_PACK_DIR: join(temp, 'pack'),
+const env = { ...process.env, HOME: temp, USERPROFILE: temp, CYS_HOME: temp, CYS_PACK_DIR: join(temp, 'pack'),
   RUSTUP_HOME: process.env.RUSTUP_HOME || join(homedir(), '.rustup'),
   CARGO_HOME: process.env.CARGO_HOME || join(homedir(), '.cargo') };
 try {
@@ -14,7 +14,9 @@ try {
     : args[1] === 'recover_scope_' ? ['G20 recover-scope PASS', 12]
     : args[1] === 'label_scope_' ? ['G21 label-scope PASS', 10]
     : args[1] === 'pack_owner_' ? ['G24 pack-owner PASS', 4] : null;
-  const result = spawnSync('cargo', args, { env, cwd: process.cwd(),
+  const feature = args.includes('cys-app') ? 'cys/test-home-seam' : 'test-home-seam';
+  const testArgs = ['test', '--features', feature, ...args.slice(1)];
+  const result = spawnSync('cargo', testArgs, { env, cwd: process.cwd(),
     stdio: gate ? 'pipe' : 'inherit', encoding: gate ? 'utf8' : undefined });
   if (gate) { process.stdout.write(result.stdout || ''); process.stderr.write(result.stderr || ''); }
   if (result.error) throw result.error;

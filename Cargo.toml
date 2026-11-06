@@ -22,6 +22,10 @@ path = "src/bin/cysd/main.rs"
 name = "cys"
 path = "src/bin/cys.rs"
 
+# Test harness only; release/default home resolution never uses CYS_HOME.
+[features]
+test-home-seam = []
+
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal", "process"] }
 serde = { version = "1", features = ["derive"] }

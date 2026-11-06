@@ -112,17 +112,38 @@ jobs:
               $_.ExecutablePath -and $_.ExecutablePath.StartsWith($install + '\', [StringComparison]::OrdinalIgnoreCase)
             })
           }
-          function ProcessTree([int[]]$roots) {
+          function ProcessTree([object[]]$roots) {
             $all = @(Get-CimInstance Win32_Process)
-            $ids = New-Object 'System.Collections.Generic.HashSet[int]'
-            foreach ($root in $roots) { if ($root -gt 0) { $null = $ids.Add($root) } }
+            $current = @{}
+            foreach ($item in $all) { $current[[int]$item.ProcessId] = $item }
+            $members = @{}
+            $recorded = @{}
+            foreach ($root in $roots) {
+              if ($null -eq $root) { continue }
+              Assert ($root.ProcessId -gt 0 -and $null -ne $root.CreationDate) 'Process tree root needs PID and creation time'
+              $key = [int]$root.ProcessId
+              $recorded[$key] = $root
+              if ($current.ContainsKey($key) -and $current[$key].CreationDate -eq $root.CreationDate) {
+                $members[$key] = $current[$key]
+              } else { Write-Host "TREE_ROOT_GONE_OR_REUSED pid=$key recorded_created=$($root.CreationDate)" }
+            }
             do {
               $added = $false
               foreach ($item in $all) {
-                if ($ids.Contains([int]$item.ParentProcessId) -and $ids.Add([int]$item.ProcessId)) { $added = $true }
+                $parent = $members[[int]$item.ParentProcessId]
+                $key = [int]$item.ProcessId
+                if ($null -eq $parent -or $members.ContainsKey($key)) { continue }
+                # A stale PPID may refer to a reused PID; its old children predate the current parent.
+                if ($null -eq $item.CreationDate -or $item.CreationDate -lt $parent.CreationDate) {
+                  Write-Host "TREE_REJECT_OLDER_CHILD pid=$key parent=$($parent.ProcessId) child_created=$($item.CreationDate) parent_created=$($parent.CreationDate)"
+                  continue
+                }
+                $members[$key] = $item
+                $recorded[$key] = $item
+                $added = $true
               }
             } while ($added)
-            @($all | Where-Object { $ids.Contains([int]$_.ProcessId) })
+            @($recorded.Values | Sort-Object ProcessId)
           }
           function AssertGone($recorded) {
             $now = @(Get-CimInstance Win32_Process)
@@ -298,7 +319,9 @@ jobs:
             foreach ($entry in @($Entry)) {
               $socket = $null
               $daemonPid = $null
+              $daemonRecord = $null
               $surfacePids = @()
+              $surfaceRecords = @()
               try {
                 . Step "$entry via GUI department tool" {
                   $argv = @($dept,$entry)
@@ -319,6 +342,7 @@ jobs:
                   Assert ($identity.version -eq '0.3.1') "Wrong daemon version $($identity.version)"
                   $process = Get-CimInstance Win32_Process -Filter "ProcessId=$daemonPid"
                   Assert ($process.ExecutablePath -eq (Join-Path $install 'cysd.exe')) 'Daemon is not the installed binary'
+                  $daemonRecord = $process
                   $process | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine | Format-List | Out-Host
                   $state = (Native $cys @('status','--json')) | ConvertFrom-Json
                   $masters = @($state.surfaces | Where-Object { $_.role -eq 'master' -and -not $_.exited })
@@ -354,11 +378,18 @@ jobs:
                   $list = Native $cys @('list')
                   $surfacePids = @([regex]::Matches($list, '\bpid=(\d+)') | ForEach-Object { [int]$_.Groups[1].Value })
                   Assert ($surfacePids.Count -eq 2) 'Cannot bind both shell PIDs for teardown evidence'
+                  $surfaceRecords = @($surfacePids | ForEach-Object {
+                    $record = Get-CimInstance Win32_Process -Filter "ProcessId=$_"
+                    Assert ($record -and $record.CreationDate -ge $daemonRecord.CreationDate) 'Shell PID identity predates daemon or is missing'
+                    Assert ($record.ExecutablePath -eq $env:CYS_SHELL) 'Recorded surface PID is not the selected shell'
+                    Assert ($record.ParentProcessId -eq $daemonRecord.ProcessId) 'Recorded surface shell is not a child of the daemon'
+                    $record
+                  })
                 }
               } finally {
                 if ($socket) {
                   . Step "$entry down-sock and prove department removal" {
-                    $departmentTree = @(ProcessTree (@([int]$daemonPid) + $surfacePids))
+                    $departmentTree = @(ProcessTree (@($daemonRecord) + $surfaceRecords))
                     $departmentTree | Select-Object ProcessId,ParentProcessId,CreationDate,ExecutablePath,CommandLine | Format-List | Out-Host
                     $null = Native $bash @($dept,'down-sock',$socket)
                     $remaining = @(WaitForTreeExit $departmentTree 30)
@@ -379,7 +410,7 @@ jobs:
             try {
             . Step 'Final process inventory and isolated base-runtime cleanup' {
               $owned = @(OwnedProcesses)
-              $runtimeTree = @(ProcessTree @($owned | ForEach-Object { [int]$_.ProcessId }))
+              $runtimeTree = @(ProcessTree $owned)
               $runtimeTree | Select-Object ProcessId,ParentProcessId,CreationDate,ExecutablePath,CommandLine | Format-List | Out-Host
               # Department assertions happen before this fallback; cleanup never converts a failed probe to PASS.
               foreach ($process in $owned) {

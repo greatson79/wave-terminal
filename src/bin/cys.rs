@@ -1039,6 +1039,17 @@ fn run_team(action: TeamAction, json_output: bool) -> i32 {
 }
 
 fn main() {
+    // Clap's debug command builder exceeds Windows' 1 MiB main stack; include parsing on this stack.
+    std::thread::Builder::new()
+        .name("cys-cli".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(run_cli)
+        .expect("cannot start cys CLI thread")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+}
+
+fn run_cli() {
     // 파이프(head 등)로 출력이 끊겨도 패닉하지 않도록 SIGPIPE 기본 동작 복원
     #[cfg(unix)]
     unsafe {

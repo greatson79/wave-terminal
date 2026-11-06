@@ -112,11 +112,11 @@ jobs:
               $script:failed = $true
             }
           }
-          Invoke-RequiredTests { node scripts/gates-v024/cargo-isolated.mjs test --lib -- --test-threads=1 } 'test result: ok\. [1-9][0-9]* passed'
-          Invoke-RequiredTests { node scripts/gates-v024/cargo-isolated.mjs test --test home_seam --test teams_cli --test teams_reaper -- --test-threads=1 } 'test result: ok\. [1-9][0-9]* passed'
-          Invoke-RequiredTests { node scripts/gates-v024/cargo-isolated.mjs test --bin cys team_cli_contract_is_typed_and_in_help -- --test-threads=1 } 'test result: ok\. [1-9][0-9]* passed'
-          Invoke-RequiredTests { node scripts/gates-v024/cargo-isolated.mjs test --bin cysd team_changed_rpc_publishes_only_fixed_refresh_event -- --test-threads=1 } 'test result: ok\. [1-9][0-9]* passed'
-          Invoke-RequiredTests { node scripts/gates-v024/cargo-isolated.mjs test -p cys-app -- --test-threads=1 } 'test result: ok\. [1-9][0-9]* passed'
+          Invoke-RequiredTests { node scripts/gates-v024/cargo-isolated.mjs test --no-fail-fast --lib -- --test-threads=1 } 'test result: ok\. [1-9][0-9]* passed'
+          Invoke-RequiredTests { node scripts/gates-v024/cargo-isolated.mjs test --no-fail-fast --test cli_stack --test home_seam --test teams_cli --test teams_reaper -- --test-threads=1 } 'test result: ok\. [1-9][0-9]* passed'
+          Invoke-RequiredTests { node scripts/gates-v024/cargo-isolated.mjs test --no-fail-fast --bin cys team_cli_contract_is_typed_and_in_help -- --test-threads=1 } 'test result: ok\. [1-9][0-9]* passed'
+          Invoke-RequiredTests { node scripts/gates-v024/cargo-isolated.mjs test --no-fail-fast --bin cysd team_changed_rpc_publishes_only_fixed_refresh_event -- --test-threads=1 } 'test result: ok\. [1-9][0-9]* passed'
+          Invoke-RequiredTests { node scripts/gates-v024/cargo-isolated.mjs test --no-fail-fast -p cys-app -- --test-threads=1 } 'test result: ok\. [1-9][0-9]* passed'
           Invoke-RequiredTests { python scripts/tests/test_compare_teams_windows_baseline.py } 'Ran [1-9][0-9]* tests?'
           Invoke-RequiredTests { bun test --cwd ui } '(?m)^\s*[1-9][0-9]* pass\s*$'
           Invoke-RequiredTests { python scripts/tests/test_home_seam_default.py --binary target/default-home-check/release/cys.exe } 'PASS default home resolution ignores CYS_HOME'
@@ -129,15 +129,15 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
           $failed = $false
-          node scripts/gates-v024/cargo-isolated.mjs test --lib -- --test-threads=1
+          node scripts/gates-v024/cargo-isolated.mjs test --no-fail-fast --lib -- --test-threads=1
           if ($LASTEXITCODE -ne 0) { $failed = $true }
-          node scripts/gates-v024/cargo-isolated.mjs test --test home_seam --test teams_cli --test teams_reaper -- --test-threads=1
+          node scripts/gates-v024/cargo-isolated.mjs test --no-fail-fast --test cli_stack --test home_seam --test teams_cli --test teams_reaper -- --test-threads=1
           if ($LASTEXITCODE -ne 0) { $failed = $true }
-          node scripts/gates-v024/cargo-isolated.mjs test --bin cys team_cli_contract_is_typed_and_in_help -- --test-threads=1
+          node scripts/gates-v024/cargo-isolated.mjs test --no-fail-fast --bin cys team_cli_contract_is_typed_and_in_help -- --test-threads=1
           if ($LASTEXITCODE -ne 0) { $failed = $true }
-          node scripts/gates-v024/cargo-isolated.mjs test --bin cysd team_changed_rpc_publishes_only_fixed_refresh_event -- --test-threads=1
+          node scripts/gates-v024/cargo-isolated.mjs test --no-fail-fast --bin cysd team_changed_rpc_publishes_only_fixed_refresh_event -- --test-threads=1
           if ($LASTEXITCODE -ne 0) { $failed = $true }
-          node scripts/gates-v024/cargo-isolated.mjs test -p cys-app -- --test-threads=1
+          node scripts/gates-v024/cargo-isolated.mjs test --no-fail-fast -p cys-app -- --test-threads=1
           if ($LASTEXITCODE -ne 0) { $failed = $true }
           python scripts/tests/test_compare_teams_windows_baseline.py
           if ($LASTEXITCODE -ne 0) { $failed = $true }
@@ -161,7 +161,7 @@ jobs:
         run: |
           set -euo pipefail
           node scripts/gates-v024/cargo-isolated.mjs test --lib -- --test-threads=1
-          node scripts/gates-v024/cargo-isolated.mjs test --test home_seam --test teams_cli --test teams_reaper -- --test-threads=1
+          node scripts/gates-v024/cargo-isolated.mjs test --test cli_stack --test home_seam --test teams_cli --test teams_reaper -- --test-threads=1
           node scripts/gates-v024/cargo-isolated.mjs test --bin cys team_cli_contract_is_typed_and_in_help -- --test-threads=1
           node scripts/gates-v024/cargo-isolated.mjs test --bin cysd team_changed_rpc_publishes_only_fixed_refresh_event -- --test-threads=1
           node scripts/gates-v024/cargo-isolated.mjs test -p cys-app -- --test-threads=1

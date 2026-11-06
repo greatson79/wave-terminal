@@ -1,0 +1,78 @@
+name: Teams M1 CI
+
+on:
+  push:
+    branches: ['feat/0.4.0-teams', 'feat/0.4.0-teams-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.11'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+
+      - name: Prepare test-only Tauri resources (no runtime build or execution)
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          host = next(line.split(': ', 1)[1] for line in subprocess.check_output(['rustc', '-vV'], text=True).splitlines() if line.startswith('host: '))
+          suffix = '.exe' if 'windows' in host else ''
+          fixtures = {
+              f'src-tauri/binaries/cys-{host}{suffix}': '',
+              f'src-tauri/binaries/cysd-{host}{suffix}': '',
+              'src-tauri/resources/pack.tar.gz': '',
+              'src-tauri/resources/pack-manifest.json': '{}',
+              'ui/dist/index.html': '<html></html>',
+          }
+          for name, content in fixtures.items():
+              path = Path(name)
+              if not path.exists():
+                  path.parent.mkdir(parents=True, exist_ok=True)
+                  path.write_text(content, encoding='utf-8')
+          PY
+
+      - name: Core library suite (isolated home)
+        shell: bash
+        run: node scripts/gates-v024/cargo-isolated.mjs test --lib -- --test-threads=1
+
+      - name: Real CLI and event forwarding regressions (isolated home)
+        shell: bash
+        run: node scripts/gates-v024/cargo-isolated.mjs test --test teams_cli -- --test-threads=1
+
+      - name: CLI command contract (isolated home)
+        shell: bash
+        run: node scripts/gates-v024/cargo-isolated.mjs test --bin cys team_cli_contract_is_typed_and_in_help -- --test-threads=1
+
+      - name: Team event RPC unit harness (no daemon startup)
+        shell: bash
+        run: node scripts/gates-v024/cargo-isolated.mjs test --bin cysd team_changed_rpc_publishes_only_fixed_refresh_event -- --test-threads=1
+
+      - name: Tauri unit suite (isolated home, no native app launch)
+        shell: bash
+        run: node scripts/gates-v024/cargo-isolated.mjs test -p cys-app -- --test-threads=1
+
+      - name: Install existing UI dependencies
+        shell: bash
+        run: bun install --cwd ui --frozen-lockfile
+
+      - name: Complete Bun UI suite including sidebar negative control
+        shell: bash
+        run: bun test --cwd ui

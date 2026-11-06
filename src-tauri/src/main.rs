@@ -14,6 +14,8 @@ use tauri_plugin_updater::UpdaterExt;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 mod user_settings;
+mod teams;
+mod team_events;
 
 type Stream = Box<dyn AsyncReadWrite>;
 trait AsyncReadWrite: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -1787,6 +1789,9 @@ fn spawn_event_forwarder(app: AppHandle, socket: std::path::PathBuf) {
                             if let Some(obj) = v.as_object_mut() {
                                 obj.insert("socket_slug".into(), json!(slug));
                             }
+                            team_events::forward(&v, |name, payload| {
+                                let _ = app.emit(name, payload);
+                            });
                             let _ = app.emit("daemon-event", v);
                         }
                     }
@@ -2632,9 +2637,17 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(Attachments(Mutex::new(HashMap::new())))
         .manage(PreservedNotices::default())
         .invoke_handler(tauri::generate_handler![
+            teams::team_list,
+            teams::team_create,
+            teams::team_update,
+            teams::team_delete,
+            teams::team_mark_starters_offered,
+            teams::team_store_status,
+            teams::team_pick_folder,
             dept_tombstone_by_socket,
             dept_tombstones,
             start_master,

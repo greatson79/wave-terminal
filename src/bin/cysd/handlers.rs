@@ -799,6 +799,11 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
     match req.method.as_str() {
         "system.ping" => Reply::Single(ok_response(&id, json!("pong"))),
 
+        "team.changed" => {
+            crate::team_events::publish(&daemon.bus);
+            Reply::Single(ok_response(&id, Value::Null))
+        }
+
         "system.identify" => {
             let caller = params.get("caller").cloned().unwrap_or(Value::Null);
             Reply::Single(ok_response(
@@ -3767,6 +3772,25 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn team_changed_rpc_publishes_only_fixed_refresh_event() {
+        let _g = ACL_ENV_LOCK.lock().unwrap();
+        let (daemon, dir, _dirs) = daemon_with_acl("team-event", r#"{"default":"allow","rules":[]}"#);
+        let mut events = daemon.bus.subscribe();
+        let Reply::Single(response) = dispatch(&daemon, Request {
+            id: json!(1), method: "team.changed".into(), params: json!({"name":"ignored", "event":"surface.closed"}),
+        }, None) else { panic!("single response expected") };
+        assert_eq!(response["ok"], true, "{response}");
+        let event = events.try_recv().unwrap();
+        assert_eq!(event["name"], "team.changed");
+        assert_eq!(event["category"], "team");
+        assert_eq!(event["payload"], json!({}));
+        assert!(events.try_recv().is_err());
+        drop(events);
+        drop(daemon);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     use super::*;
 
     #[test]

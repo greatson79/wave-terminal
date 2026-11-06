@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 const temp = mkdtempSync(join(tmpdir(), 'cys-v024-test-'));
-const env = { ...process.env, HOME: temp, CYS_PACK_DIR: join(temp, 'pack'),
+const env = { ...process.env, HOME: temp, USERPROFILE: temp, CYS_PACK_DIR: join(temp, 'pack'),
   RUSTUP_HOME: process.env.RUSTUP_HOME || join(homedir(), '.rustup'),
   CARGO_HOME: process.env.CARGO_HOME || join(homedir(), '.cargo') };
 try {

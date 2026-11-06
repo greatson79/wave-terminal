@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+pub mod teams;
 pub mod action_catalog;
 pub mod directive_compose;
 pub mod edit_kinds;

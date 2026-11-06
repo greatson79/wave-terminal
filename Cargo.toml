@@ -36,6 +36,9 @@ strip-ansi-escapes = "0.2"
 dirs = "6"
 libc = "0.2"
 chrono = "0.4"
+getrandom = "0.2"
+unicode-segmentation = "1"
+unicode-width = "0.2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
 # 무중단 팩 채널 manifest 서명검증(§7-①): verify-only 순수 Rust(서명키 미포함=공격면 최소).

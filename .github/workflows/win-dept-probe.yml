@@ -20,6 +20,7 @@ jobs:
         shell: [powershell]
         path_context: [gui, user-path-fix]
         entry: [allocate, create]
+    # Anchors: https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations#yaml-anchors-and-aliases
     steps: &department-probe-steps
       - name: Prepare common probe (UTF-8 BOM for PowerShell 5.1)
         shell: pwsh
@@ -567,6 +568,7 @@ jobs:
   secondary-ps7:
     name: Secondary PS7 / ${{ matrix.path_context }} / ${{ matrix.entry }}
     needs: department
+    if: always()
     runs-on: windows-latest
     timeout-minutes: 20
     strategy:

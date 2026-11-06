@@ -11,15 +11,16 @@ permissions:
 
 jobs:
   department:
+    name: Required PS5.1 / ${{ matrix.path_context }} / ${{ matrix.entry }}
     runs-on: windows-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        shell: [pwsh, powershell]
+        shell: [powershell]
         path_context: [gui, user-path-fix]
         entry: [allocate, create]
-    steps:
+    steps: &department-probe-steps
       - name: Prepare common probe (UTF-8 BOM for PowerShell 5.1)
         shell: pwsh
         run: |
@@ -512,7 +513,18 @@ jobs:
           '@
           [IO.File]::WriteAllText((Join-Path $env:RUNNER_TEMP 'cc-korean-account.ps1'), $launcher, (New-Object Text.UTF8Encoding($true)))
 
-      - name: Probe under PowerShell 7
+      - name: Required Windows PowerShell 5.1 probe
+        id: ps51
+        if: matrix.shell == 'powershell'
+        shell: powershell
+        env:
+          PROBE_PATH_CONTEXT: ${{ matrix.path_context }}
+          PROBE_ENTRY: ${{ matrix.entry }}
+        run: |
+          if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1) { throw 'Required Windows PowerShell 5.1 did not execute' }
+          & "$env:RUNNER_TEMP\cc-korean-account.ps1" -ProbeShell powershell -PathContext $env:PROBE_PATH_CONTEXT -Entry $env:PROBE_ENTRY
+
+      - name: Secondary PowerShell 7 regression
         if: matrix.shell == 'pwsh'
         shell: pwsh
         env:
@@ -520,13 +532,13 @@ jobs:
           PROBE_ENTRY: ${{ matrix.entry }}
         run: '& "$env:RUNNER_TEMP\cc-korean-account.ps1" -ProbeShell pwsh -PathContext $env:PROBE_PATH_CONTEXT -Entry $env:PROBE_ENTRY'
 
-      - name: Probe under Windows PowerShell 5.1
-        if: matrix.shell == 'powershell'
-        shell: powershell
+      - name: Fail unless the required PS5.1 probe executed successfully
+        if: always() && matrix.shell == 'powershell'
+        shell: pwsh
         env:
-          PROBE_PATH_CONTEXT: ${{ matrix.path_context }}
-          PROBE_ENTRY: ${{ matrix.entry }}
-        run: '& "$env:RUNNER_TEMP\cc-korean-account.ps1" -ProbeShell powershell -PathContext $env:PROBE_PATH_CONTEXT -Entry $env:PROBE_ENTRY'
+          PS51_OUTCOME: ${{ steps.ps51.outcome }}
+        run: |
+          if ($env:PS51_OUTCOME -ne 'success') { throw "Required PS5.1 probe did not succeed: $env:PS51_OUTCOME" }
 
       - name: Assert Korean test account is gone
         if: always()
@@ -551,3 +563,16 @@ jobs:
           } else {
             Write-Host "ACCOUNT_ABSENT name=$name"
           }
+
+  secondary-ps7:
+    name: Secondary PS7 / ${{ matrix.path_context }} / ${{ matrix.entry }}
+    needs: department
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [pwsh]
+        path_context: [gui, user-path-fix]
+        entry: [allocate, create]
+    steps: *department-probe-steps

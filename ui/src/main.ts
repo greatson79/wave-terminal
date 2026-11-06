@@ -1,6 +1,8 @@
 // cys UI — xterm.js panes over the cysd socket (thin client).
 // 세션 영속은 구조로 해결: 세션(PTY)은 데몬 소유, UI는 attach만 한다.
 
+import { loadTeamLayout, saveTeamLayout } from "./teamlayout";
+import { openTeamDialog } from "./teamdialog";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
@@ -132,7 +134,13 @@ type Node =
   | { type: "split"; dir: "row" | "col"; ratio?: number; a: Node; b: Node }
   | { type: "pane"; sid: number };
 
+interface Team {
+  id: string; name: string; folder: string; color?: string; runtime_key: string;
+  stopped: boolean; last_engine?: string; last_model?: string; created_at: string;
+}
+
 interface Workspace {
+  teamId?: string;
   id: number;
   name: string;
   tree: Node | null;
@@ -161,6 +169,146 @@ interface GroupMeta {
 }
 
 const LAYOUT_KEY = "cys-layout-v2";
+let teams: Team[] = [];
+let layoutWritable = false;
+let teamReadFailed = false;
+let teamStoreStatus: {starters_offered: boolean; corrupt?: {message_ko: string} | null} | null = null;
+let teamReadRevision = 0;
+let teamsReady = false;
+let teamChangePending = false;
+async function watchTeams() {
+  const changed = async () => {
+    teamChangePending = true;
+    if (!teamsReady) return;
+    await loadTeams();
+    render();
+  };
+  await listen("teams-changed", changed);
+  window.addEventListener("focus", changed);
+}
+const teamSockets = new Map<string, string>();
+const retiredTeamSockets = new Set<string>();
+function teamForSocket(socket?: string): Team | undefined {
+  if (!socket) return;
+  return teams.find((t) => teamSockets.get(t.id) === socket || (!teamSockets.has(t.id) && deptNameFromSocket(socket) === t.runtime_key));
+}
+function managedWorkspaceForSocket(socket?: string): Workspace | undefined {
+  const team = teamForSocket(socket);
+  return team && workspaces.find((w) => w.teamId === team.id);
+}
+function reconcileTeams() {
+  const activeId = current()?.id;
+  const live = new Set(teams.map((t) => t.id));
+  for (const ws of workspaces) {
+    if (ws.teamId && !live.has(ws.teamId)) {
+      if (ws.socket) retiredTeamSockets.add(ws.socket);
+      for (const sid of collectSids(ws.tree)) destroyPaneRuntime(sid, ws.socket);
+    }
+  }
+  workspaces = workspaces.filter((w) => !w.teamId || live.has(w.teamId));
+  for (const team of teams) {
+    let ws = workspaces.find((w) => w.teamId === team.id);
+    if (!ws) { ws = {id: wsCounter++, name: team.name, teamId: team.id, tree: null}; workspaces.push(ws); }
+    ws.name = team.name;
+    ws.groupId = undefined;
+    const socket = teamSockets.get(team.id) ?? (teamForSocket(ws.socket)?.id === team.id ? ws.socket : undefined);
+    if (ws.socket !== socket) {
+      for (const sid of collectSids(ws.tree)) destroyPaneRuntime(sid, ws.socket);
+      ws.tree = null;
+    }
+    ws.socket = socket;
+    // Runtime ownership repairs a stale legacy cache before any title routing.
+    if (socket) for (const other of workspaces) {
+      if (other === ws || other.socket !== socket || !other.tree) continue;
+      ws.tree = ws.tree ? {type: "split", dir: "row", a: ws.tree, b: other.tree} : other.tree;
+      other.tree = null;
+    }
+  }
+  workspaces = normalizeWorkspaces(workspaces);
+  const index = workspaces.findIndex((w) => w.id === activeId);
+  activeWs = index < 0 ? 0 : index;
+}
+async function refreshTeamSockets() {
+  const reg = await invoke("list_depts") as {depts?: Record<string, {socket?: string}>};
+  teamSockets.clear();
+  for (const team of teams) {
+    const socket = reg.depts?.[team.runtime_key]?.socket;
+    if (socket) teamSockets.set(team.id, socket);
+  }
+  reconcileTeams();
+}
+async function loadTeams() {
+  const revision = ++teamReadRevision;
+  try {
+    const [next, status] = await Promise.all([invoke("team_list"), invoke("team_store_status")]);
+    if (revision !== teamReadRevision) return;
+    teamStoreStatus = status as typeof teamStoreStatus;
+    if (teamStoreStatus?.corrupt) throw new Error(teamStoreStatus.corrupt.message_ko);
+    teams = next as Team[];
+    teamReadFailed = false;
+  } catch {
+    if (revision !== teamReadRevision) return;
+    teamReadFailed = true;
+    toast("health", "팀을 불러오지 못했습니다", teamStoreStatus?.corrupt?.message_ko ?? "저장된 팀 파일을 확인해 주세요. 추천 팀은 추가하지 않습니다.");
+    return;
+  }
+  await refreshTeamSockets().catch(() => reconcileTeams());
+}
+async function offerTeamStarters(explicit = false) {
+  if (teamReadFailed || !teamStoreStatus) return;
+  if (!explicit && (teamStoreStatus.starters_offered || localStorage.getItem(LAYOUT_KEY) !== null || localStorage.getItem("cys-layout-v3") !== null || teams.length > 0)) return;
+  const panel = document.getElementById("team-starters")!;
+  panel.replaceChildren(); panel.hidden = false;
+  const mark = async () => {
+    await invoke("team_mark_starters_offered");
+    teamStoreStatus!.starters_offered = true;
+  };
+  for (const suggestion of ["기획팀", "제작팀", "검토팀"]) {
+    const button = document.createElement("button"); button.type = "button"; button.textContent = suggestion;
+    button.addEventListener("click", () => openTeamDialog({suggestion,
+      chooseFolder: () => invoke("team_pick_folder") as Promise<string | null>,
+      save: async (values) => { await mark(); await saveTeam(values); button.remove(); }}));
+    panel.append(button);
+  }
+  const skip = document.createElement("button"); skip.type = "button"; skip.textContent = "건너뛰기";
+  skip.addEventListener("click", async () => {
+    skip.disabled = true;
+    try { await mark(); panel.hidden = true; }
+    catch { skip.disabled = false; toast("health", "선택을 저장하지 못했습니다", "다시 시도해 주세요."); }
+  });
+  panel.append(skip);
+}
+async function saveTeam(values: {name: string; folder: string}, id?: string) {
+  ++teamReadRevision;
+  const saved = await invoke(id ? "team_update" : "team_create", id ? {id, patch: values} : values) as Team;
+  const index = teams.findIndex((t) => t.id === saved.id);
+  if (index < 0) teams.push(saved); else teams[index] = saved;
+  reconcileTeams();
+  activeWs = workspaces.findIndex((w) => w.teamId === saved.id);
+  layoutWritable = true;
+  render();
+}
+async function deleteTeam(id: string) {
+  ++teamReadRevision;
+  await invoke("team_delete", {id});
+  const ws = workspaces.find((w) => w.teamId === id);
+  if (ws) {
+    if (ws.socket) retiredTeamSockets.add(ws.socket);
+    for (const sid of collectSids(ws.tree)) destroyPaneRuntime(sid, ws.socket);
+  }
+  teams = teams.filter((t) => t.id !== id);
+  teamSockets.delete(id);
+  workspaces = workspaces.filter((w) => w.teamId !== id);
+  activeWs = Math.max(0, Math.min(activeWs, workspaces.length - 1));
+  layoutWritable = true;
+  render();
+}
+function editTeam(team?: Team, suggestion?: string) {
+  return openTeamDialog({team, suggestion,
+    chooseFolder: () => invoke("team_pick_folder") as Promise<string | null>,
+    save: (values) => saveTeam(values, team?.id),
+    remove: team ? () => deleteTeam(team.id) : undefined});
+}
 
 // pane 식별 복합키 — 서로 다른 데몬이 같은 surface_id를 독립 발급하므로 (socket, sid)로 구분한다.
 const paneKey = (sid: number, socket?: string): string => `${socket ?? ""}#${sid}`;
@@ -1561,15 +1709,14 @@ function normalizeGroups(ws: Workspace[], gs: GroupMeta[]): GroupMeta[] {
 }
 
 function saveLayout() {
+  if (!layoutWritable || teamReadFailed) return;
   const norm = normalizeWorkspaces(workspaces);
   const normG = normalizeGroups(norm, groups); // 06: norm 기준으로 그룹 청소
   groups = normG; // 06: 멤버0 그룹을 모듈 상태에서도 즉시 해체(유령 누적 방지 · 적대검증 교정)
   const activeId = workspaces[activeWs]?.id;
   const a = Math.max(0, norm.findIndex((w) => w.id === activeId));
-  localStorage.setItem(
-    LAYOUT_KEY,
-    JSON.stringify({ workspaces: norm, groups: normG, active: a, counter: wsCounter, groupCounter }),
-  );
+  try { saveTeamLayout(localStorage, { workspaces: norm, groups: normG, active: a, counter: wsCounter, groupCounter }); }
+  catch { toast("health", "작업 공간을 저장하지 못했습니다", "저장 공간을 확인한 뒤 다시 시도해 주세요."); }
 }
 
 function collectSids(node: Node | null, out: number[] = []): number[] {
@@ -1646,10 +1793,13 @@ async function refreshPaneTitles() {
   refreshing = true;
   try {
     // 멀티마스터 F4: workspace별 소켓을 순회 — 각 데몬의 surface를 그 소켓 ws에만 귀속시킨다.
-    const sockets = [...new Set([undefined, ...workspaces.map((w) => w.socket)])];
+    await refreshTeamSockets().catch(() => {});
+    const sockets = [...new Set([undefined, ...workspaces.filter((w) => !w.teamId || w.socket).map((w) => w.socket)])];
     let adopted = false;
     let verifiedDefault = false;
     for (const sk of sockets) {
+      if (sk && retiredTeamSockets.has(sk)) continue;
+      const expectedTeamId = teamForSocket(sk)?.id;
       try {
         const org = (await invoke("org_status", { socket: sk }).catch(() => ({ surfaces: [] }))) as { surfaces?: { surface_id: number; status?: { task?: string | null } }[] };
         const tasks = new Map((org.surfaces || []).map((s) => [s.surface_id, s.status?.task ?? null]));
@@ -1665,6 +1815,7 @@ async function refreshPaneTitles() {
             usage?: ObservedUsage | null;
           }[];
         };
+        if ((sk && retiredTeamSockets.has(sk)) || (expectedTeamId && teamForSocket(sk)?.id !== expectedTeamId)) continue;
         if (sk === undefined) verifiedDefault = true;
         for (const s of r.surfaces) {
           surfaceTitles.set(paneKey(s.surface_id, sk), s.title);
@@ -1696,10 +1847,11 @@ async function refreshPaneTitles() {
         for (const s of [...r.surfaces].sort((a, b) => rolePri(a.role) - rolePri(b.role))) {
           if (s.exited || !(hierarchyEnabled ? shouldAdoptSurface(s) : s.role) || panes.has(paneKey(s.surface_id, sk))) continue;
           // !w.pending — 런칭 중 placeholder(socket 미정)에는 입양 금지(타 데몬 surface 오입양 차단).
-          const candidates = workspaces.filter((w) => !w.pending && (w.socket ?? undefined) === (sk ?? undefined));
-          const name = hierarchyEnabled ? adoptHqOf(s.title) : null;
-          let ws = name ? candidates.find((w) => w.name === name || sameHqPanelName(w.name, name)) : hierarchyEnabled
-            ? pickAdoptWs(candidates, current()) : candidates[0];
+          const managed = managedWorkspaceForSocket(sk);
+          const candidates = workspaces.filter((w) => !w.teamId && !w.pending && (w.socket ?? undefined) === (sk ?? undefined));
+          const name = !managed && hierarchyEnabled ? adoptHqOf(s.title) : null;
+          let ws = managed ?? (name ? candidates.find((w) => w.name === name || sameHqPanelName(w.name, name)) : hierarchyEnabled
+            ? pickAdoptWs(candidates, current()) : candidates[0]);
           if (!ws && name) {
             ws = { id: wsCounter++, name, tree: null, socket: sk };
             workspaces.push(ws);
@@ -1709,7 +1861,9 @@ async function refreshPaneTitles() {
             workspaces.push(ws); // 기본 탭이 0개여도 무본부 좌석을 숨기지 않는다.
           }
           if (!ws || collectSids(ws.tree).includes(s.surface_id)) continue;
-          setRoleDot((await makePane(s.surface_id, s.title, sk)).roleEl, s.role); // 입양 즉시 역할 점 채색(다음 틱 대기 없이)
+          const attached = await makePane(s.surface_id, s.title, sk);
+          if (!workspaces.includes(ws) || ws.socket !== sk || (ws.teamId && !teams.some((t) => t.id === ws.teamId))) { destroyPaneRuntime(s.surface_id, sk); continue; }
+          setRoleDot(attached.roleEl, s.role); // 입양 즉시 역할 점 채색(다음 틱 대기 없이)
           ws.tree = ws.tree
             ? { type: "split", dir: "row", a: ws.tree, b: { type: "pane", sid: s.surface_id } }
             : { type: "pane", sid: s.surface_id };
@@ -1719,10 +1873,10 @@ async function refreshPaneTitles() {
           if (s.exited || !panes.has(paneKey(s.surface_id, sk))) continue;
           const from = workspaces.find((w) => !w.pending && (w.socket ?? undefined) === (sk ?? undefined)
             && collectSids(w.tree).includes(s.surface_id));
-          if (!from) continue;
+          if (!from || from.teamId) continue;
           const name = paneRehomeTarget(from.name, s.title);
           if (!name) continue;
-          let to = workspaces.find((w) => !w.pending && (w.socket ?? undefined) === (sk ?? undefined)
+          let to = workspaces.find((w) => !w.teamId && !w.pending && (w.socket ?? undefined) === (sk ?? undefined)
             && (w.name === name || sameHqPanelName(w.name, name)));
           if (!to) { to = { id: wsCounter++, name, tree: null, socket: sk }; workspaces.push(to); }
           from.tree = from.tree ? replaceNode(from.tree, s.surface_id, () => null) : null;
@@ -1821,7 +1975,7 @@ async function makePane(sid: number, title: string, socket?: string): Promise<Pa
       if (!cancelled) {
         const name = (titleEl.textContent ?? "").trim();
         await commitPaneRename(
-          () => invoke("rename_surface", { socket, surfaceId: sid, title: name }),
+          async () => { await invoke("rename_surface", { socket, surfaceId: sid, title: name }); layoutWritable = true; },
           () => refreshPaneTitles(),
           (detail) => toast("health", "좌석 제목 변경 실패", detail),
         );
@@ -1859,6 +2013,7 @@ async function makePane(sid: number, title: string, socket?: string): Promise<Pa
       }, 2500);
       return;
     }
+    layoutWritable = true;
     await invoke("close_surface", { socket, surfaceId: sid }).catch(() => {});
     destroyPaneRuntime(sid, socket);
     const ws = current();
@@ -2215,7 +2370,7 @@ function startPaneDrag(e0: MouseEvent, sid: number) {
 function transferPaneToWs(sid: number, destWsId: number) {
   const src = current();
   const dest = workspaces.find((w) => w.id === destWsId);
-  if (!dest || dest === src || dest.pending) return;
+  if (!dest || dest === src || dest.pending || src.teamId || dest.teamId) return;
   if ((dest.socket ?? undefined) !== (src.socket ?? undefined)) {
     toast("watchdog", "좌석 이동 불가", "서로 다른 데몬의 좌석은 이 화면에서 이동할 수 없습니다.");
     return;
@@ -2228,6 +2383,7 @@ function transferPaneToWs(sid: number, destWsId: number) {
   if (!panes.has(paneKey(sid, src.socket))) return;
   const moved = transferTrees(src.tree, dest.tree, sid);
   if (!moved) return;
+  layoutWritable = true;
   src.tree = moved.src;
   dest.tree = moved.dest;
   if (focusedSid === sid) focusedSid = collectSids(src.tree)[0] ?? null;
@@ -2255,6 +2411,7 @@ function movePane(sid: number, targetSid: number, side: DropSide) {
       b: before ? old : moved,
     }));
   }
+  layoutWritable = true;
   ws.manual = true; // 사람이 옮긴 배치
   render();
   setFocus(sid);
@@ -2329,10 +2486,16 @@ function render() {
   if (ws && grid) ws.tree = keepManualTree(ws.manual, ws.tree, grid.tree as Node | null);
   const tree = ws?.tree;
   if (tree) root.appendChild(renderNode(tree));
+  else if (ws?.teamId) {
+    const empty = document.createElement("div"); empty.className = "team-empty";
+    const message = document.createElement("p"); message.textContent = "아직 직원이 없습니다";
+    const summon = document.createElement("button"); summon.textContent = "소환"; summon.disabled = true;
+    summon.title = "소환 기능은 다음 판에서 준비됩니다."; empty.append(message, summon); root.append(empty);
+  }
   else if (ws?.pending) root.appendChild(renderDeptPending()); // WP-10: 부서 준비 중 빈 pane 스피너·안내
   applyGridSize(grid);
   if (hierarchyEnabled) {
-    const assigned = autoAssignGroups(workspaces, groups, groupCounter);
+    const assigned = autoAssignGroups(workspaces.filter((w) => !w.teamId), groups, groupCounter);
     groups = assigned.groups;
     groupCounter = assigned.groupCounter;
   }
@@ -2416,7 +2579,7 @@ function attachDividerDrag(
       divider.classList.remove("dragging");
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", up);
-      if (moved) current().manual = true; // 사람이 끈 비율 — 자동 재배치가 덮지 않는다
+      if (moved) { layoutWritable = true; current().manual = true; } // 사람이 끈 비율 — 자동 재배치가 덮지 않는다
       saveLayout();
       for (const sid of collectSids(node)) {
         const rt = panes.get(paneKey(sid, current()?.socket));
@@ -2517,6 +2680,7 @@ function startWsDrag(e0: MouseEvent, srcId: number) {
       // activeWs는 인덱스 — 배열 변형 전 활성 ws의 id를 잡아 변형 후 재계산(엉뚱한 탭 활성화 방지).
       // reorderWorkspace는 새 배열(그룹 이동 시 src는 클론)을 돌려주므로 참조가 아닌 id로 찾는다.
       const actId = workspaces[activeWs]?.id;
+      layoutWritable = true;
       const next = reorderWorkspace(workspaces, srcId, drop.destGroupId, drop.anchorId, drop.before);
       workspaces.splice(0, workspaces.length, ...next); // 배열 identity 유지(코드베이스가 splice로 변형)
       activeWs = Math.max(0, workspaces.findIndex((w) => w.id === actId));
@@ -2563,6 +2727,7 @@ function startGroupDrag(e0: MouseEvent, srcId: number) {
     document.querySelector(`#ws-tabs .ws-group[data-group-id="${srcId}"]`)?.classList.remove("ws-dragging");
     if (dragging) suppressNextClick();
     if (dragging && drop) {
+      layoutWritable = true;
       groups = reorderGroup(groups, srcId, drop.anchorId, drop.before);
       render(); // 그룹 순서만 바뀌므로 activeWs 재계산 불요
     }
@@ -2618,6 +2783,7 @@ new ResizeObserver(() => {
 async function actionEqualize() {
   const ws = current();
   if (!ws?.tree) return;
+  layoutWritable = true;
   ws.manual = false; // 정렬 = 자동 배치로 복귀
   const live = collectSids(ws.tree).filter((sid) => panes.has(paneKey(sid, ws.socket))); // 죽은/placeholder 노드 제외 (F4 복합키)
   if (!live.length) return;
@@ -2639,7 +2805,7 @@ async function actionEqualize() {
 // org.status를 워크스페이스별 socket마다 1콜 조회해 노드 신호 맵에 캐싱한다(B3).
 // 응답 키: 노드배열=surfaces, 대기수=중첩 feed.pending (top-level pending 아님).
 async function refreshSidebarStatus() {
-  const sockets = new Set(workspaces.map((w) => w.socket));
+  const sockets = new Set(workspaces.filter((w) => !w.teamId || w.socket).map((w) => w.socket));
   let pend = 0;
   const pauseStatuses: PauseSocketStatus[] = [];
   for (const sock of sockets) {
@@ -2714,23 +2880,27 @@ function renderWsTabs() {
   // 06: 2계층 tier 정렬 — pinned 그룹 → unpinned 그룹 → ungrouped ws(배열 순서). 시각 순서≠배열 순서이므로
   // 탭 핸들러는 캡처 idx 대신 workspaces.indexOf(ws)로 활성 비교/전환(stale idx 회피, close 핸들러 패턴 일치).
   // 06: 멤버0 그룹은 렌더에서 제외(유령 헤더 차단 · 적대검증 교정 — saveLayout이 모듈 상태도 청소).
-  const hasMembers = (g: GroupMeta) => workspaces.some((w) => !w.pending && w.groupId === g.id);
+  for (const ws of workspaces.filter((w) => w.teamId)) bar.appendChild(buildTab(ws));
+  const legacy = document.createElement("div"); legacy.className = "ws-legacy-label"; legacy.textContent = "기존 작업 공간";
+  if (workspaces.some((w) => !w.teamId)) bar.appendChild(legacy);
+  const hasMembers = (g: GroupMeta) => workspaces.some((w) => !w.teamId && !w.pending && w.groupId === g.id);
   const pinnedG = groups.filter((g) => g.pinned && hasMembers(g));
   const unpinnedG = groups.filter((g) => !g.pinned && hasMembers(g));
   for (const g of [...pinnedG, ...unpinnedG]) bar.appendChild(buildGroupSection(g));
-  for (const ws of (hierarchyEnabled ? sortHqWorkspaces(workspaces.filter((w) => !w.pending && w.groupId == null))
-    : workspaces.filter((w) => !w.pending && w.groupId == null))) bar.appendChild(buildTab(ws));
+  for (const ws of (hierarchyEnabled ? sortHqWorkspaces(workspaces.filter((w) => !w.teamId && !w.pending && w.groupId == null))
+    : workspaces.filter((w) => !w.teamId && !w.pending && w.groupId == null))) bar.appendChild(buildTab(ws));
 }
 
 // 06: ws 1행 탭 DOM 생성(기존 renderWsTabs forEach 본문을 외과적으로 추출 — idx→workspaces.indexOf(ws)만 치환).
 function buildTab(ws: Workspace): HTMLElement {
   const color = WS_COLORS[ws.id % WS_COLORS.length];
   const sids = collectSids(ws.tree);
-  const spec = hierarchyEnabled ? sidebarTreeSpec({ name: ws.name, sids, collapsed: ws.collapsed, pending: ws.pending }) : null;
+  const spec = ws.teamId ? {hq: false, headerLabel: ws.name, count: sids.length, chevron: ws.collapsed ? "▸" : "▾", memberSids: ws.collapsed ? [] : sids} : hierarchyEnabled ? sidebarTreeSpec({ name: ws.name, sids, collapsed: ws.collapsed, pending: ws.pending }) : null;
   const shell = spec?.hq ? createHqTabShell(ws.name, hqColors, WS_COLORS, color, document as unknown as MiniDoc) : null;
   const tab = shell ? shell.tab as unknown as HTMLElement : document.createElement("div");
   tab.className = "ws-tab" + (workspaces.indexOf(ws) === activeWs ? " active" : "");
-  tab.dataset.wsId = String(ws.id); // 드래그 히트테스트용(startWsDrag)
+  tab.dataset.wsId = String(ws.id);
+  if (ws.teamId) tab.dataset.teamId = ws.teamId; // 드래그 히트테스트용(startWsDrag)
   if (!shell) tab.style.borderLeftColor = color;
   const titleRow = shell ? shell.titleRow as unknown as HTMLElement : document.createElement("div");
   if (!shell) titleRow.className = "ws-title-row";
@@ -2752,6 +2922,7 @@ function buildTab(ws: Workspace): HTMLElement {
     chevron.addEventListener("mousedown", (event) => event.stopPropagation());
     chevron.addEventListener("click", (event) => {
       event.stopPropagation();
+      layoutWritable = true;
       ws.collapsed = !ws.collapsed;
       render();
     });
@@ -2798,7 +2969,7 @@ function buildTab(ws: Workspace): HTMLElement {
     dot.className = "ws-dot " + (dead ? "error" : idleN ? "idle" : "working");
     sub.appendChild(dot);
     const txt = document.createElement("span");
-    const bits = [`${sids.length} pane`];
+    const bits = [ws.teamId ? `${sids.length}명` : `${sids.length} pane`];
     if (firstTitle) bits.push(firstTitle);
     if (worst >= 60) bits.push(`CTX ${worst}%`);
     if (idleN) bits.push(`💤${idleN}`);
@@ -2836,6 +3007,7 @@ function buildTab(ws: Workspace): HTMLElement {
     if (e.button !== 0 || e.target === close) return;
     if ((e.target as HTMLElement)?.isContentEditable) return; // rename 편집 중엔 전환·드래그 금지
     const i = workspaces.indexOf(ws); // 그룹 재배열로 시각 순서≠배열 순서 — 실시간 위치로 전환
+    layoutWritable = true;
     if (i !== activeWs) {
       activeWs = i;
       render();
@@ -2845,6 +3017,8 @@ function buildTab(ws: Workspace): HTMLElement {
     startWsDrag(e, ws.id); // 4px 임계 초과 시에만 재정렬 드래그(단순 클릭은 위 전환만)
   });
   const startRename = () => {
+    if (ws.teamId) { editTeam(teams.find((t) => t.id === ws.teamId)); return; }
+    layoutWritable = true;
     // WKWebView에서 prompt()는 무동작 — 인라인 편집
     label.textContent = ws.name; // 표시용 본부명·미분류명이 저장 이름을 덮지 않게 한다.
     label.contentEditable = "true";
@@ -2870,12 +3044,18 @@ function buildTab(ws: Workspace): HTMLElement {
   label.addEventListener("dblclick", startRename);
   tab.addEventListener("contextmenu", (e) => {
     e.preventDefault();
+    if (ws.teamId) {
+      showCtxMenu(e.clientX, e.clientY, [{label: "이름/폴더 변경", action: startRename},
+        {label: "팀 삭제", action: startRename}]); return;
+    }
     showCtxMenu(e.clientX, e.clientY, [
       { label: "이름 변경", action: startRename },
       ...wsGroupCtxItems(ws), // 06: 그룹 만들기/넣기/빼기
     ]);
   });
   close.addEventListener("click", async () => {
+    if (ws.teamId) { editTeam(teams.find((t) => t.id === ws.teamId)); return; }
+    layoutWritable = true;
     // ★완전 삭제 확인(오너 2026-07-15 — 발견 불가 UX 수리): 숨은 2-click 무장 패턴을 설명형
     // 확인 다이얼로그로 교체(WKWebView confirm() 무동작 → 기존 confirmModal 재사용). 초보자가
     // "무엇이 어떻게 삭제되는지" 읽고 결정한다. pane 개별 ×(저위험)는 종전 2-click 유지.
@@ -2944,6 +3124,7 @@ function buildGroupSection(g: GroupMeta): HTMLElement {
   chevron.textContent = g.collapsed ? "▸" : "▾";
   chevron.addEventListener("click", (e) => {
     e.stopPropagation();
+    layoutWritable = true;
     g.collapsed = !g.collapsed;
     render();
   });
@@ -2955,6 +3136,7 @@ function buildGroupSection(g: GroupMeta): HTMLElement {
   name.addEventListener("click", () => {
     const anchor = anchorWsOf(g) ?? workspaces.find((w) => w.groupId === g.id);
     if (anchor) {
+      layoutWritable = true;
       activeWs = workspaces.indexOf(anchor);
       render();
       const first = collectSids(anchor.tree)[0];
@@ -3016,7 +3198,8 @@ function wsGroupCtxItems(ws: Workspace): { label: string; action: () => void }[]
         const g: GroupMeta = { id: groupCounter++, name: ws.name || "그룹", collapsed: false, pinned: false };
         groups.push(g);
         ws.groupId = g.id;
-        render();
+        layoutWritable = true;
+    render();
       },
     });
     for (const g of groups) {
@@ -3024,7 +3207,8 @@ function wsGroupCtxItems(ws: Workspace): { label: string; action: () => void }[]
         label: `“${g.name}” 그룹에 넣기`,
         action: () => {
           ws.groupId = g.id;
-          render();
+          layoutWritable = true;
+    render();
         },
       });
     }
@@ -3033,7 +3217,8 @@ function wsGroupCtxItems(ws: Workspace): { label: string; action: () => void }[]
       label: "그룹에서 빼기",
       action: () => {
         ws.groupId = undefined;
-        render(); // normalizeGroups가 멤버0 그룹 자동 제거
+        layoutWritable = true;
+    render(); // normalizeGroups가 멤버0 그룹 자동 제거
       },
     });
   }
@@ -3048,14 +3233,16 @@ function groupCtxItems(g: GroupMeta): { label: string; action: () => void }[] {
       label: g.pinned ? "고정 해제" : "맨 위 고정",
       action: () => {
         g.pinned = !g.pinned;
-        render();
+        layoutWritable = true;
+    render();
       },
     },
     {
       label: "그룹 해제(워크스페이스 보존)", // Ungroup — 멤버 ws는 ungrouped로 잔존
       action: () => {
         for (const w of workspaces) if (w.groupId === g.id) w.groupId = undefined;
-        render(); // normalizeGroups가 멤버0 그룹 자동 제거
+        layoutWritable = true;
+    render(); // normalizeGroups가 멤버0 그룹 자동 제거
       },
     },
     { label: "그룹 삭제(워크스페이스 전부 닫기)", action: () => confirmDeleteGroup(g) }, // Delete(파괴적)
@@ -3085,6 +3272,7 @@ function startGroupRename(g: GroupMeta) {
     label.contentEditable = "false";
     const name = (label.textContent || "").trim();
     g.name = name || "그룹"; // 이름을 지우면 기본명으로 복귀
+    layoutWritable = true;
     render();
   };
   label.addEventListener("blur", commit, { once: true });
@@ -3428,6 +3616,7 @@ function openSettingsMenu(anchor: HTMLElement) {
 }
 
 async function addWorkspace(name = UNTITLED, socket?: string): Promise<Workspace> {
+  layoutWritable = true;
   const sid = await newSurface(null, socket);
   const ws: Workspace = { id: wsCounter++, name, tree: { type: "pane", sid }, socket };
   workspaces.push(ws);
@@ -3484,7 +3673,8 @@ async function addDeptWorkspace(catalogKey?: string): Promise<Workspace> {
       const pi = workspaces.indexOf(ws);
       if (pi >= 0) workspaces.splice(pi, 1); // indexOf -1 시 splice(-1,1)이 엉뚱한 ws 제거하는 것 방지
       activeWs = Math.max(0, workspaces.indexOf(dup));
-      render();
+      layoutWritable = true;
+    render();
       const firstSid = collectSids(dup.tree)[0];
       if (firstSid != null) setFocus(firstSid);
       return dup;
@@ -3495,6 +3685,7 @@ async function addDeptWorkspace(catalogKey?: string): Promise<Workspace> {
     // 탭이 await 중 닫혀도(close 핸들러가 socket 기준 데몬 teardown) 좀비 없음 — 별도 plain-셸 회수 불필요.
     ws.socket = info.socket;
     ws.pending = false;
+    layoutWritable = true;
     render();
     await refreshPaneTitles(); // 방금 띄운 master surface를 즉시 입양(3초 인터벌 대기 없이). 부팅 실패 시
     //                            tree:null로 남고 master 등장 시 인터벌이 재입양(start()의 비활성 부서 처리와 정합).
@@ -3506,6 +3697,7 @@ async function addDeptWorkspace(catalogKey?: string): Promise<Workspace> {
     if (activeWs >= workspaces.length) activeWs = Math.max(0, workspaces.length - 1);
     // newSurface가 데몬 spawn 후 실패하면 등록된 부서 데몬이 무탭 고아로 남는다 — socket 확정됐으면 회수.
     if (ws.socket) await invoke("stop_dept_daemon_by_socket", { socket: ws.socket }).catch(() => {});
+    layoutWritable = true;
     render();
     throw e;
   }
@@ -3526,6 +3718,8 @@ async function newSurface(cwd: string | null = null, socket?: string): Promise<n
 // 피닉스 복원 후에도 새 워크스페이스·pane은 항상 홈에서 시작. 첫 pane 경로 상속 폐기)
 
 async function actionNew() {
+  if (current()?.teamId) return;
+  layoutWritable = true;
   if (current()?.pending) return; // 부서 데몬 준비 중(빈 socket placeholder) — surface 생성 금지(기본 데몬 고아 차단)
   const sid = await newSurface(null, current().socket);
   const ws = current();
@@ -3537,6 +3731,8 @@ async function actionNew() {
 }
 
 async function actionSplit(dir: "row" | "col") {
+  if (current()?.teamId) return;
+  layoutWritable = true;
   const ws = current();
   // stale focusedSid 검증 — 트리에 없는 대상을 분할하면 replaceNode가 무음 no-op 되어
   // 보이지 않는 고아 surface(살아있는 PTY)가 생긴다
@@ -3564,6 +3760,7 @@ async function actionSplit(dir: "row" | "col") {
 }
 
 async function actionClose() {
+  layoutWritable = true;
   const ws = current();
   if (focusedSid == null || !ws.tree) return;
   const sid = focusedSid;
@@ -3587,7 +3784,7 @@ function removeDeadPane(sid: number, socket?: string) {
   for (const ws of workspaces) {
     if (sameSock(ws) && ws.tree != null && collectSids(ws.tree).includes(sid)) {
       ws.tree = replaceNode(ws.tree, sid, () => null);
-      if (shouldDropEmptyWorkspace(preserveEmptyWorkspace, ws.tree === null)) emptiedIds.add(ws.id);
+      if (!ws.teamId && shouldDropEmptyWorkspace(preserveEmptyWorkspace, ws.tree === null)) emptiedIds.add(ws.id);
     }
   }
   if (emptiedIds.size) {
@@ -4254,6 +4451,7 @@ function jumpToSurface(sid: number, socket?: string) {
     (w) => (w.socket ?? undefined) === (socket ?? undefined) && collectSids(w.tree).includes(sid),
   );
   if (wsIdx >= 0 && wsIdx !== activeWs) {
+    layoutWritable = true;
     activeWs = wsIdx;
     render();
   }
@@ -4675,6 +4873,228 @@ function onDaemonEvent(event: Record<string, unknown>) {
 
 // ---------- startup / session restore ----------
 
+async function restoreWorkspaces() {
+  // Session restore (멀티마스터 F4): 저장본 먼저 로드(ws.socket 포함) → 부서 데몬 확보를 list 대조보다
+  // 선행 → 소켓별 대조. 데몬 일시 미가동 ws는 보존(영구 삭제 방지, 검증 mustFix).
+  try {
+    const saved = loadTeamLayout(localStorage) as {workspaces?: Workspace[]; groups?: GroupMeta[]; active?: number; counter?: number; groupCounter?: number} | null;
+    if (saved && Array.isArray(saved.workspaces)) {
+      workspaces = saved.workspaces;
+      groups = Array.isArray(saved.groups) ? saved.groups : []; // 06: 하위호환 — 옛 저장본엔 groups 없음
+      activeWs = saved.active ?? 0;
+      wsCounter = saved.counter ?? 1;
+      groupCounter = saved.groupCounter ?? 1; // 06
+    }
+  } catch {
+    workspaces = [];
+    groups = []; // 06: 손상 저장본 폴백
+  }
+  await loadTeams();
+  for (const ws of workspaces) ws.socket = ws.socket ?? undefined; // 하위호환 마이그레이션(기본 데몬)
+  // 같은 socket의 여러 패널을 보존하고 id·좌석 중복만 정리한다.
+  workspaces = normalizeWorkspaces(workspaces);
+  // 카운터 보정: 신규 id/이름이 항상 기존 최댓값 초과하도록(중복·손상 저장본에도 강건)
+  wsCounter = Math.max(wsCounter, 0, ...workspaces.map((w) => w.id)) + 1;
+  // 06: 고아 그룹 청소 + groupCounter를 기존 최대 id+1로 보정(중복·손상 저장본에도 강건).
+  groups = normalizeGroups(workspaces, groups);
+  groupCounter = Math.max(groupCounter, 0, ...groups.map((g) => g.id)) + 1;
+
+  // (order 8) 레지스트리 진실원 대조 — 죽은 socket이면서 레지스트리 미등록인 부서 ws는 유령(옛 테스트
+  // 잔재·삭제된 부서)이므로 재-launch 안 하고 드롭. 조회 실패 시엔 보수적으로 전부 보존(기존 동작).
+  let registered: Set<string> | null = null;
+  // ＋부서 자동화(패치5·§E-4): socket→display_name 맵 — 복원 시 부서 탭 표시명 회복(rename=표시명 레이어).
+  const displayBySocket = new Map<string, string>();
+  try {
+    const reg = (await invoke("list_depts")) as {
+      depts?: Record<string, { socket?: string; display_name?: string }>;
+    };
+    registered = new Set(
+      Object.values(reg.depts ?? {})
+        .map((v) => v?.socket)
+        .filter((s): s is string => !!s),
+    );
+    for (const e of Object.values(reg.depts ?? {})) {
+      if (e?.socket && e.display_name) displayBySocket.set(e.socket, e.display_name);
+    }
+  } catch {
+    registered = null;
+  }
+  // ★WP-3 리바이버 게이트: base 데몬 dept 묘비 — 삭제-의도 부서 탭은 등재 여부와 무관하게 드롭
+  // (reg_remove 무음 실패로 등재가 잔존해도 부활 차단). 조회 실패=null(보수적 보존 — 현행 거동).
+  let deptTombs: Set<string> | null = null;
+  try {
+    deptTombs = new Set((await invoke("dept_tombstones")) as string[]);
+  } catch {
+    deptTombs = null;
+  }
+
+  // 부서 데몬 확보를 list 대조보다 선행 — 미가동이면 cys-dept launch. 실패해도(등록된) ws는 보존.
+  const ghosts = new Set<number>();
+  for (const ws of workspaces.filter((w) => !w.teamId && w.socket && layoutWritable)) {
+    // ★WP-3+R10: 묘비 검사를 생존 검사보다 **선행** — spawn_org_restore는 업데이트 후에만
+    // 실행되므로(적대검증 보조 관찰), teardown 실패로 살아남은 묘비 데몬의 수렴 주체는 매 시작
+    // 도는 이 루프다. 묘비+생존이면 탭 드롭+정리 시도(묘비가 부활을 차단하므로 best-effort).
+    // 재생성 레이스 안전: 재생성 경로(allocate/create/launch)가 묘비를 선해소하므로 오드롭 없음.
+    {
+      const dn = deptNameFromSocket(ws.socket);
+      if (deptTombs && dn && deptTombs.has(dn)) {
+        ghosts.add(ws.id);
+        invoke("stop_dept_daemon_by_socket", { socket: ws.socket }).catch(() => {});
+        continue;
+      }
+    }
+    let alive = false;
+    try {
+      await invoke("daemon_status", { socket: ws.socket });
+      alive = true;
+    } catch {
+      alive = false;
+    }
+    if (alive) continue;
+    // 죽은 socket + 레지스트리 미등록 → 유령 → 드롭(재-launch로 부활시키지 않음)
+    if (registered && ws.socket && !registered.has(ws.socket)) {
+      ghosts.add(ws.id);
+      continue;
+    }
+    // 등록된(또는 레지스트리 미조회) 부서 → 재-launch. ★시나리오4: rename으로 ws.name이 바뀌어도
+    // socket(진짜 정체·불변)에서 원래 부서명을 역산해 호출 — '다른 소켓 새 데몬'이 원래 데몬을 고아화하지 않게.
+    try {
+      const info = (await invoke("launch_dept_daemon", { name: deptNameFromSocket(ws.socket) ?? ws.name })) as { socket: string; socket_slug?: string };
+      if (info.socket_slug && info.socket) socketForSlug.set(info.socket_slug, info.socket);
+      if (info.socket) ws.socket = info.socket; // 재-launch된 실제 socket 반영(이후 집계·prune·병합 정합)
+    } catch {
+      /* 데몬 확보 실패 — 등록된 ws는 빈 채 보존(저장본 삭제 금지) */
+    }
+  }
+  if (ghosts.size) workspaces = workspaces.filter((w) => !ghosts.has(w.id));
+
+  // 소켓별 live 집계 — 데몬 미응답(ok=false) 소켓은 판정 보류(죽은 pane 제거 스킵, ws 보존).
+  const sockets = [...new Set([undefined, ...workspaces.filter((w) => !w.teamId || w.socket).map((w) => w.socket)])];
+  const liveBySock = new Map<
+    string | undefined,
+    { ids: Set<number>; ok: boolean; list: { surface_id: number; title: string }[] }
+  >();
+  for (const sk of sockets) {
+    if (sk && retiredTeamSockets.has(sk)) continue;
+    const expectedTeamId = teamForSocket(sk)?.id;
+    try {
+      const r = (await invoke("list_surfaces", { socket: sk })) as {
+        surfaces: { surface_id: number; title: string; exited: boolean }[];
+      };
+      if ((sk && retiredTeamSockets.has(sk)) || (expectedTeamId && teamForSocket(sk)?.id !== expectedTeamId)) continue;
+      const liveList = r.surfaces.filter((s) => !s.exited);
+      liveBySock.set(sk, { ids: new Set(liveList.map((s) => s.surface_id)), ok: true, list: liveList });
+    } catch {
+      liveBySock.set(sk, { ids: new Set(), ok: false, list: [] });
+    }
+  }
+
+  // 죽은 pane 제거 — 데몬 미응답 소켓의 ws는 건드리지 않는다(일시 미가동=영구삭제 방지).
+  const activeWsId = workspaces[activeWs]?.id;
+  for (const ws of workspaces) {
+    const lb = liveBySock.get(ws.socket);
+    if (!lb || !lb.ok) continue;
+    for (const sid of collectSids(ws.tree)) {
+      if (!lb.ids.has(sid)) ws.tree = ws.tree ? replaceNode(ws.tree, sid, () => null) : null;
+    }
+  }
+  // 안 A: 부서 ws는 tree:null(빈 셸 미생성)로 저장될 수 있다 — 데몬이 살아있고 입양할 live surface가
+  // 있으면(master 등) 드롭하지 말고 보존한다. 아래 입양 루프(병합)가 그 surface로 tree를 채운다.
+  // master 자동기동 제거 후: 비활성 부서가 재-launch로 surface 0개로 올라와도 데몬이 살아있으면(ok===true)
+  // 드롭하지 말고 보존한다 — 아래 빈-tree 충전 루프가 plain 셸로 채운다(비활성 부서 탭 소실 방지).
+  workspaces = workspaces.filter((ws) => {
+    if (ws.teamId || ws.tree !== null) return true;
+    const lb = liveBySock.get(ws.socket);
+    return shouldKeepEmptyWorkspaceOnRestore(lb?.ok);
+  });
+  // 구버전 자동 번호 이름("ws N")은 미정 표시로 이행
+  for (const ws of workspaces) {
+    if (ws.teamId) continue;
+    if (/^ws \d+$/.test(ws.name)) ws.name = UNTITLED;
+    // §E-4: 부서 탭 표시명 복원 — 표시명이 비었거나(미정·dept-N 번호) 레지스트리에 display_name 이 있으면
+    // 그 표시명으로 회복. 사용자가 의미있게 rename 한 이름(레지스트리와 다른 값)은 덮지 않는다.
+    if (ws.socket) {
+      const disp = displayBySocket.get(ws.socket);
+      if (disp && (ws.name === UNTITLED || ws.name === "…" || /^dept-\d+$/.test(ws.name))) {
+        ws.name = disp;
+      }
+    }
+  }
+  if (workspaces.length === 0) {
+    workspaces = [{ id: wsCounter++, name: UNTITLED, tree: null }];
+  }
+  const restoredIdx = workspaces.findIndex((ws) => ws.id === activeWsId);
+  activeWs = restoredIdx >= 0 ? restoredIdx : Math.min(activeWs, workspaces.length - 1);
+  coalesceHqPanels(); // 빈 중복을 먼저 합쳐야 같은 부서 소켓에 셸을 여러 개 만들지 않는다.
+
+  // 모든 ws의 소유권을 확인한 뒤에만 고아 surface를 같은 소켓의 대상 패널에 입양한다.
+  for (const sk of sockets) {
+    const lb = liveBySock.get(sk);
+    if (!lb || !lb.ok) continue;
+    for (const s of lb.list) {
+      surfaceTitles.set(paneKey(s.surface_id, sk), s.title);
+      const beforeAttach = managedWorkspaceForSocket(sk);
+      await makePane(s.surface_id, s.title, sk);
+      if ((beforeAttach && (!workspaces.includes(beforeAttach) || beforeAttach.socket !== sk)) || (sk && retiredTeamSockets.has(sk))) { destroyPaneRuntime(s.surface_id, sk); continue; }
+      if (socketOwnsSid(workspaces, sk, s.surface_id)) continue;
+      const managed = managedWorkspaceForSocket(sk);
+      const candidates = workspaces.filter((w) => !w.teamId && !w.pending && (w.socket ?? undefined) === (sk ?? undefined));
+      const name = !managed && hierarchyEnabled ? adoptHqOf(s.title) : null;
+      let ws = managed ?? (name ? candidates.find((w) => w.name === name || sameHqPanelName(w.name, name)) : hierarchyEnabled
+        ? pickAdoptWs(candidates, current()) : candidates[0]);
+      if (!ws && name) { ws = { id: wsCounter++, name, tree: null, socket: sk }; workspaces.push(ws); }
+      if (!ws && !name && sk === undefined) {
+        ws = { id: wsCounter++, name: UNTITLED, tree: null };
+        workspaces.push(ws);
+      }
+      if (ws) {
+        ws.tree = ws.tree
+          ? { type: "split", dir: "row", a: ws.tree, b: { type: "pane", sid: s.surface_id } }
+          : { type: "pane", sid: s.surface_id };
+      }
+    }
+  }
+  // master 자동기동 제거 후: 데몬은 살아있으나(ok===true) 입양할 surface가 0개인 부서 ws(비활성 부서가
+  // 재-launch된 경우)는 위 병합 루프가 못 채운다 — plain 셸 1개로 충전해 빈 탭 소실/고아 placeholder 방지.
+  for (const ws of workspaces) {
+    if (!layoutWritable || ws.teamId || ws.tree || ws.socket == null || liveBySock.get(ws.socket)?.ok !== true) continue;
+    const sid = await newSurface(null, ws.socket);
+    ws.tree = { type: "pane", sid };
+  }
+  // 첫 화면에서 저장된 13석 격자를 그대로 보여 주지 않도록, 이미 조회한 제목으로 렌더 전에 분리한다.
+  const activeSeat = collectSids(current()?.tree ?? null)[0];
+  const activeSocket = current()?.socket;
+  if (hierarchyEnabled) {
+    rehomeRestoredSeats(workspaces,
+      [...liveBySock].flatMap(([socket, lb]) => lb.ok ? lb.list.map((s) => ({ ...s, socket })) : []),
+      paneRehomeTarget, (name, socket) => ({ id: wsCounter++, name, tree: null, socket }), sameHqPanelName);
+    coalesceHqPanels();
+    if (liveBySock.get(undefined)?.ok === true) pruneEmptyHqPanels();
+    if (!current()?.tree && activeSeat != null) {
+      const destination = workspaces.findIndex((ws) => ws.socket === activeSocket && collectSids(ws.tree).includes(activeSeat));
+      if (destination >= 0) activeWs = destination;
+    }
+  }
+  if (layoutWritable && !current()?.tree && !current()?.teamId && workspaces.length) {
+    // 복원 시 current()가 미응답(ok===false) 부서 ws일 수 있다(필터의 ok===false 절로 보존·activeWs가 선택,
+    // 충전 루프는 ok!==true라 스킵) — 죽은 부서 socket에 newSurface하면 backend가 reject해 복원이 깨진다.
+    // 기본 데몬(socket undefined·상시 가용)으로 폴백해 빈 화면/미처리 rejection을 막는다(정상 경로 불변).
+    let sid: number;
+    try {
+      sid = await newSurface(null, current().socket);
+    } catch {
+      sid = await newSurface(null, undefined);
+    }
+    current().tree = { type: "pane", sid };
+  }
+  render();
+  const first = collectSids(current()?.tree ?? null)[0];
+  if (first != null) setFocus(first);
+  refreshFeed();
+  started = true; // 복원 완료 — 이 시점부터 인터벌 자동 입양 허용
+  refreshPaneTitles();
+}
+
 async function start() {
   const seenPreserved = new Set<string>();
   const showPreserved = (message: string) => {
@@ -4885,217 +5305,12 @@ async function start() {
     console.warn("[naming] 로컬 설정을 읽지 못해 기본 사이드바로 표시합니다", error);
   }
 
-  // Session restore (멀티마스터 F4): 저장본 먼저 로드(ws.socket 포함) → 부서 데몬 확보를 list 대조보다
-  // 선행 → 소켓별 대조. 데몬 일시 미가동 ws는 보존(영구 삭제 방지, 검증 mustFix).
-  try {
-    const saved = JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? "null");
-    if (saved && Array.isArray(saved.workspaces)) {
-      workspaces = saved.workspaces;
-      groups = Array.isArray(saved.groups) ? saved.groups : []; // 06: 하위호환 — 옛 저장본엔 groups 없음
-      activeWs = saved.active ?? 0;
-      wsCounter = saved.counter ?? 1;
-      groupCounter = saved.groupCounter ?? 1; // 06
-    }
-  } catch {
-    workspaces = [];
-    groups = []; // 06: 손상 저장본 폴백
-  }
-  for (const ws of workspaces) ws.socket = ws.socket ?? undefined; // 하위호환 마이그레이션(기본 데몬)
-  // 같은 socket의 여러 패널을 보존하고 id·좌석 중복만 정리한다.
-  workspaces = normalizeWorkspaces(workspaces);
-  // 카운터 보정: 신규 id/이름이 항상 기존 최댓값 초과하도록(중복·손상 저장본에도 강건)
-  wsCounter = Math.max(wsCounter, 0, ...workspaces.map((w) => w.id)) + 1;
-  // 06: 고아 그룹 청소 + groupCounter를 기존 최대 id+1로 보정(중복·손상 저장본에도 강건).
-  groups = normalizeGroups(workspaces, groups);
-  groupCounter = Math.max(groupCounter, 0, ...groups.map((g) => g.id)) + 1;
+  await watchTeams();
+  await restoreWorkspaces();
+  teamsReady = true;
+  if (teamChangePending) { await loadTeams(); render(); }
+  await offerTeamStarters();
 
-  // (order 8) 레지스트리 진실원 대조 — 죽은 socket이면서 레지스트리 미등록인 부서 ws는 유령(옛 테스트
-  // 잔재·삭제된 부서)이므로 재-launch 안 하고 드롭. 조회 실패 시엔 보수적으로 전부 보존(기존 동작).
-  let registered: Set<string> | null = null;
-  // ＋부서 자동화(패치5·§E-4): socket→display_name 맵 — 복원 시 부서 탭 표시명 회복(rename=표시명 레이어).
-  const displayBySocket = new Map<string, string>();
-  try {
-    const reg = (await invoke("list_depts")) as {
-      depts?: Record<string, { socket?: string; display_name?: string }>;
-    };
-    registered = new Set(
-      Object.values(reg.depts ?? {})
-        .map((v) => v?.socket)
-        .filter((s): s is string => !!s),
-    );
-    for (const e of Object.values(reg.depts ?? {})) {
-      if (e?.socket && e.display_name) displayBySocket.set(e.socket, e.display_name);
-    }
-  } catch {
-    registered = null;
-  }
-  // ★WP-3 리바이버 게이트: base 데몬 dept 묘비 — 삭제-의도 부서 탭은 등재 여부와 무관하게 드롭
-  // (reg_remove 무음 실패로 등재가 잔존해도 부활 차단). 조회 실패=null(보수적 보존 — 현행 거동).
-  let deptTombs: Set<string> | null = null;
-  try {
-    deptTombs = new Set((await invoke("dept_tombstones")) as string[]);
-  } catch {
-    deptTombs = null;
-  }
-
-  // 부서 데몬 확보를 list 대조보다 선행 — 미가동이면 cys-dept launch. 실패해도(등록된) ws는 보존.
-  const ghosts = new Set<number>();
-  for (const ws of workspaces.filter((w) => w.socket)) {
-    // ★WP-3+R10: 묘비 검사를 생존 검사보다 **선행** — spawn_org_restore는 업데이트 후에만
-    // 실행되므로(적대검증 보조 관찰), teardown 실패로 살아남은 묘비 데몬의 수렴 주체는 매 시작
-    // 도는 이 루프다. 묘비+생존이면 탭 드롭+정리 시도(묘비가 부활을 차단하므로 best-effort).
-    // 재생성 레이스 안전: 재생성 경로(allocate/create/launch)가 묘비를 선해소하므로 오드롭 없음.
-    {
-      const dn = deptNameFromSocket(ws.socket);
-      if (deptTombs && dn && deptTombs.has(dn)) {
-        ghosts.add(ws.id);
-        invoke("stop_dept_daemon_by_socket", { socket: ws.socket }).catch(() => {});
-        continue;
-      }
-    }
-    let alive = false;
-    try {
-      await invoke("daemon_status", { socket: ws.socket });
-      alive = true;
-    } catch {
-      alive = false;
-    }
-    if (alive) continue;
-    // 죽은 socket + 레지스트리 미등록 → 유령 → 드롭(재-launch로 부활시키지 않음)
-    if (registered && ws.socket && !registered.has(ws.socket)) {
-      ghosts.add(ws.id);
-      continue;
-    }
-    // 등록된(또는 레지스트리 미조회) 부서 → 재-launch. ★시나리오4: rename으로 ws.name이 바뀌어도
-    // socket(진짜 정체·불변)에서 원래 부서명을 역산해 호출 — '다른 소켓 새 데몬'이 원래 데몬을 고아화하지 않게.
-    try {
-      const info = (await invoke("launch_dept_daemon", { name: deptNameFromSocket(ws.socket) ?? ws.name })) as { socket: string; socket_slug?: string };
-      if (info.socket_slug && info.socket) socketForSlug.set(info.socket_slug, info.socket);
-      if (info.socket) ws.socket = info.socket; // 재-launch된 실제 socket 반영(이후 집계·prune·병합 정합)
-    } catch {
-      /* 데몬 확보 실패 — 등록된 ws는 빈 채 보존(저장본 삭제 금지) */
-    }
-  }
-  if (ghosts.size) workspaces = workspaces.filter((w) => !ghosts.has(w.id));
-
-  // 소켓별 live 집계 — 데몬 미응답(ok=false) 소켓은 판정 보류(죽은 pane 제거 스킵, ws 보존).
-  const sockets = [...new Set([undefined, ...workspaces.map((w) => w.socket)])];
-  const liveBySock = new Map<
-    string | undefined,
-    { ids: Set<number>; ok: boolean; list: { surface_id: number; title: string }[] }
-  >();
-  for (const sk of sockets) {
-    try {
-      const r = (await invoke("list_surfaces", { socket: sk })) as {
-        surfaces: { surface_id: number; title: string; exited: boolean }[];
-      };
-      const liveList = r.surfaces.filter((s) => !s.exited);
-      liveBySock.set(sk, { ids: new Set(liveList.map((s) => s.surface_id)), ok: true, list: liveList });
-    } catch {
-      liveBySock.set(sk, { ids: new Set(), ok: false, list: [] });
-    }
-  }
-
-  // 죽은 pane 제거 — 데몬 미응답 소켓의 ws는 건드리지 않는다(일시 미가동=영구삭제 방지).
-  const activeWsId = workspaces[activeWs]?.id;
-  for (const ws of workspaces) {
-    const lb = liveBySock.get(ws.socket);
-    if (!lb || !lb.ok) continue;
-    for (const sid of collectSids(ws.tree)) {
-      if (!lb.ids.has(sid)) ws.tree = ws.tree ? replaceNode(ws.tree, sid, () => null) : null;
-    }
-  }
-  // 안 A: 부서 ws는 tree:null(빈 셸 미생성)로 저장될 수 있다 — 데몬이 살아있고 입양할 live surface가
-  // 있으면(master 등) 드롭하지 말고 보존한다. 아래 입양 루프(병합)가 그 surface로 tree를 채운다.
-  // master 자동기동 제거 후: 비활성 부서가 재-launch로 surface 0개로 올라와도 데몬이 살아있으면(ok===true)
-  // 드롭하지 말고 보존한다 — 아래 빈-tree 충전 루프가 plain 셸로 채운다(비활성 부서 탭 소실 방지).
-  workspaces = workspaces.filter((ws) => {
-    if (ws.tree !== null) return true;
-    const lb = liveBySock.get(ws.socket);
-    return shouldKeepEmptyWorkspaceOnRestore(lb?.ok);
-  });
-  // 구버전 자동 번호 이름("ws N")은 미정 표시로 이행
-  for (const ws of workspaces) {
-    if (/^ws \d+$/.test(ws.name)) ws.name = UNTITLED;
-    // §E-4: 부서 탭 표시명 복원 — 표시명이 비었거나(미정·dept-N 번호) 레지스트리에 display_name 이 있으면
-    // 그 표시명으로 회복. 사용자가 의미있게 rename 한 이름(레지스트리와 다른 값)은 덮지 않는다.
-    if (ws.socket) {
-      const disp = displayBySocket.get(ws.socket);
-      if (disp && (ws.name === UNTITLED || ws.name === "…" || /^dept-\d+$/.test(ws.name))) {
-        ws.name = disp;
-      }
-    }
-  }
-  if (workspaces.length === 0) {
-    workspaces = [{ id: wsCounter++, name: UNTITLED, tree: null }];
-  }
-  const restoredIdx = workspaces.findIndex((ws) => ws.id === activeWsId);
-  activeWs = restoredIdx >= 0 ? restoredIdx : Math.min(activeWs, workspaces.length - 1);
-  coalesceHqPanels(); // 빈 중복을 먼저 합쳐야 같은 부서 소켓에 셸을 여러 개 만들지 않는다.
-
-  // 모든 ws의 소유권을 확인한 뒤에만 고아 surface를 같은 소켓의 대상 패널에 입양한다.
-  for (const sk of sockets) {
-    const lb = liveBySock.get(sk);
-    if (!lb || !lb.ok) continue;
-    for (const s of lb.list) {
-      surfaceTitles.set(paneKey(s.surface_id, sk), s.title);
-      await makePane(s.surface_id, s.title, sk);
-      if (socketOwnsSid(workspaces, sk, s.surface_id)) continue;
-      const candidates = workspaces.filter((w) => !w.pending && (w.socket ?? undefined) === (sk ?? undefined));
-      const name = hierarchyEnabled ? adoptHqOf(s.title) : null;
-      let ws = name ? candidates.find((w) => w.name === name || sameHqPanelName(w.name, name)) : hierarchyEnabled
-        ? pickAdoptWs(candidates, current()) : candidates[0];
-      if (!ws && name) { ws = { id: wsCounter++, name, tree: null, socket: sk }; workspaces.push(ws); }
-      if (!ws && !name && sk === undefined) {
-        ws = { id: wsCounter++, name: UNTITLED, tree: null };
-        workspaces.push(ws);
-      }
-      if (ws) {
-        ws.tree = ws.tree
-          ? { type: "split", dir: "row", a: ws.tree, b: { type: "pane", sid: s.surface_id } }
-          : { type: "pane", sid: s.surface_id };
-      }
-    }
-  }
-  // master 자동기동 제거 후: 데몬은 살아있으나(ok===true) 입양할 surface가 0개인 부서 ws(비활성 부서가
-  // 재-launch된 경우)는 위 병합 루프가 못 채운다 — plain 셸 1개로 충전해 빈 탭 소실/고아 placeholder 방지.
-  for (const ws of workspaces) {
-    if (ws.tree || ws.socket == null || liveBySock.get(ws.socket)?.ok !== true) continue;
-    const sid = await newSurface(null, ws.socket);
-    ws.tree = { type: "pane", sid };
-  }
-  // 첫 화면에서 저장된 13석 격자를 그대로 보여 주지 않도록, 이미 조회한 제목으로 렌더 전에 분리한다.
-  const activeSeat = collectSids(current().tree)[0];
-  const activeSocket = current().socket;
-  if (hierarchyEnabled) {
-    rehomeRestoredSeats(workspaces,
-      [...liveBySock].flatMap(([socket, lb]) => lb.ok ? lb.list.map((s) => ({ ...s, socket })) : []),
-      paneRehomeTarget, (name, socket) => ({ id: wsCounter++, name, tree: null, socket }), sameHqPanelName);
-    coalesceHqPanels();
-    if (liveBySock.get(undefined)?.ok === true) pruneEmptyHqPanels();
-    if (!current().tree && activeSeat != null) {
-      const destination = workspaces.findIndex((ws) => ws.socket === activeSocket && collectSids(ws.tree).includes(activeSeat));
-      if (destination >= 0) activeWs = destination;
-    }
-  }
-  if (!current().tree) {
-    // 복원 시 current()가 미응답(ok===false) 부서 ws일 수 있다(필터의 ok===false 절로 보존·activeWs가 선택,
-    // 충전 루프는 ok!==true라 스킵) — 죽은 부서 socket에 newSurface하면 backend가 reject해 복원이 깨진다.
-    // 기본 데몬(socket undefined·상시 가용)으로 폴백해 빈 화면/미처리 rejection을 막는다(정상 경로 불변).
-    let sid: number;
-    try {
-      sid = await newSurface(null, current().socket);
-    } catch {
-      sid = await newSurface(null, undefined);
-    }
-    current().tree = { type: "pane", sid };
-  }
-  render();
-  const first = collectSids(current().tree)[0];
-  if (first != null) setFocus(first);
-  refreshFeed();
-  started = true; // 복원 완료 — 이 시점부터 인터벌 자동 입양 허용
-  refreshPaneTitles();
   // 사이드바 노드 신호(B3): 시작 1회 + 10s idle 폴백(이벤트 구동은 onDaemonEvent에서). CC 5s 폴링보다 가벼움.
   refreshSidebarStatus();
   setInterval(refreshSidebarStatus, 10000);
@@ -5186,6 +5401,8 @@ applyBar();
 // (addWorkspace) — 부서가 아니다. 격리 부서 데몬 생성은 "+부서"(btn-ws-dept→addDeptWorkspace) 전담.
 // 새 ws를 master로 선언 시 공유 데몬 claim 충돌은 데몬 레벨 claim_denied(cysd handlers.rs·kill 없음)가
 // 비파괴 방어한다(생태계 죽지 않음·거부만). guard-master-claim(Fix2') 부트 자동발동 배선은 별건(헌법 토큰).
+document.getElementById("btn-team-suggestions")?.addEventListener("click", () => void offerTeamStarters(true));
+document.getElementById("btn-team-new")?.addEventListener("click", () => editTeam());
 document.getElementById("btn-ws-new")!.addEventListener("click", () => addWorkspace());
 
 // ★WP-1 결정 e(BOOTSTRAP_HARDENING v1.1): "마스터 시작" — cys launch-agent --role master 배선.
@@ -5212,6 +5429,7 @@ document.getElementById("btn-master-start")?.addEventListener("click", async () 
 });
 document.getElementById("btn-dept-master")?.addEventListener("click", async () => {
   const ws = workspaces[activeWs];
+  if (ws?.teamId) { toast("health", "소환 준비 중", "소환 기능은 다음 판에서 준비됩니다."); return; }
   if (!ws?.socket) {
     toast("health", "▶부서장은 부서 탭에서", "지금 보고 있는 탭이 본부입니다 — 부서 탭을 연 상태에서 누르세요(본부 마스터는 ▶CEO).");
     return;
@@ -5374,6 +5592,7 @@ window.addEventListener("keydown", (e) => {
   if ((e.target as HTMLElement)?.closest("#sidebar-help")) return;
   if (e.isComposing || e.keyCode === 229) return; // IME 조합 중 무시
   if (paletteOpen) return; // 07: 팔레트 열림 중 전역 단축키 누수 차단(검색 타이핑이 ⌘W/T/D/G 발화 방지 · 적대검증 교정)
+  if ((e.target as HTMLElement)?.closest(".team-dialog")) return;
   const mod = e.metaKey || e.ctrlKey;
   if (!mod) return;
   if (e.key === "k") {

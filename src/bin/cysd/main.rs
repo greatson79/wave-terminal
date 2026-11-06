@@ -16,6 +16,7 @@ mod classifier;
 mod cost;
 mod deadman;
 mod events;
+mod team_events;
 mod governance;
 mod handlers;
 mod hwmon;

@@ -22,6 +22,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// 팀을 저장·조회합니다. Team metadata only; starts no AI or daemon.
+    Team {
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: TeamAction,
+    },
     /// Ping the daemon
     Ping,
     /// Identify daemon + caller (uses AITERM_SURFACE_ID env when inside a surface)
@@ -943,6 +950,94 @@ enum FeedAction {
     },
 }
 
+#[derive(Subcommand)]
+enum TeamAction {
+    /// 팀을 저장합니다. AI나 데몬을 시작하지 않습니다.
+    Create {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        folder: String,
+    },
+    /// 저장된 팀을 봅니다.
+    List,
+    /// 팀 이름·폴더·색상을 바꿉니다.
+    Update {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        folder: Option<String>,
+        #[arg(long)]
+        color: Option<String>,
+    },
+    /// 팀 정보만 삭제합니다. 작업 폴더와 파일은 삭제되지 않습니다.
+    Delete {
+        #[arg(long)]
+        id: String,
+    },
+    /// 팀 저장 상태와 보관된 손상 파일을 확인합니다.
+    Status,
+}
+
+fn execute_team(action: TeamAction, store: &cys::teams::TeamStore) -> Result<Value, cys::teams::TeamError> {
+    match action {
+        TeamAction::Create { name, folder } => store.create(name, folder).map(|team| json!(team)),
+        TeamAction::List => store.list().map(|teams| json!(teams)),
+        TeamAction::Update { id, name, folder, color } => store.update(id, cys::teams::TeamPatch { name, folder, color }).map(|team| json!(team)),
+        TeamAction::Delete { id } => store.delete(id).map(|()| Value::Null),
+        TeamAction::Status => store.status().map(|status| json!(status)),
+    }
+}
+
+fn team_error_exit_code(code: &str) -> i32 {
+    if code.starts_with("invalid_") { 2 } else { 1 }
+}
+
+fn team_error_en(code: &str) -> &'static str {
+    match code {
+        "invalid_name" => "Enter a team name with 1–40 visible characters and no control characters.",
+        "invalid_folder" => "Choose an existing absolute work folder.",
+        "invalid_id" => "Select a valid team ID.",
+        "invalid_color" => "Choose a valid team color.",
+        "not_found" => "Team not found; refresh the team list.",
+        "unknown_version" => "Team data uses an unsupported version; the original was preserved.",
+        "corrupt_store" => "Team data could not be read; the original was preserved.",
+        "store_locked" => "Team data is busy; try again shortly.",
+        _ => "Team data could not be read or saved; check storage and folder permissions.",
+    }
+}
+
+fn publish_team_changed(socket: std::path::PathBuf) {
+    // A notification must never start a daemon or hold a successful save behind a stalled pipe.
+    let (sent, received) = std::sync::mpsc::channel();
+    if std::thread::Builder::new().spawn(move || {
+        let _ = request_on_timeout(&socket, "team.changed", json!({}), std::time::Duration::from_millis(200));
+        let _ = sent.send(());
+    }).is_ok() {
+        let _ = received.recv_timeout(std::time::Duration::from_millis(250));
+    }
+}
+
+fn run_team(action: TeamAction, json_output: bool) -> i32 {
+    let changed = matches!(&action, TeamAction::Create { .. } | TeamAction::Update { .. } | TeamAction::Delete { .. });
+    match execute_team(action, &cys::teams::learner_store()) {
+        Ok(value) => {
+            if changed { publish_team_changed(socket_path()); }
+            if !json_output {
+                if let Some(id) = value.get("id").and_then(Value::as_str) { println!("{id}"); return 0; }
+            }
+            println!("{}", serde_json::to_string_pretty(&value).unwrap());
+            0
+        }
+        Err(error) => {
+            eprintln!("{} / {} ({})", error.message, team_error_en(error.code), error.code);
+            team_error_exit_code(error.code)
+        }
+    }
+}
+
 fn main() {
     // 파이프(head 등)로 출력이 끊겨도 패닉하지 않도록 SIGPIPE 기본 동작 복원
     #[cfg(unix)]
@@ -951,6 +1046,10 @@ fn main() {
     }
     let cli = Cli::try_parse().unwrap_or_else(|e| {
         if e.kind() == clap::error::ErrorKind::DisplayHelp { e.exit(); }
+        if is_team_subcommand(std::env::args_os().skip(1)) {
+            eprintln!("팀 명령의 입력을 확인하세요. / Check the team command arguments. Use cys team --help.");
+            std::process::exit(2);
+        }
         if is_rename_subcommand(std::env::args_os().skip(1)) {
             eprintln!("{}", rename_parse_error_ko(&e));
             eprintln!("사용법: cys rename [--surface 창번호] [--clear] [이름]");
@@ -1008,6 +1107,15 @@ fn rename_parse_error_ko(e: &clap::Error) -> String {
             format!("cys rename 입력이 올바르지 않습니다: {reason}")
         }
     }
+}
+
+fn is_team_subcommand(mut args: impl Iterator<Item = std::ffi::OsString>) -> bool {
+    while let Some(arg) = args.next() {
+        if arg == "--socket" { let _ = args.next(); continue; }
+        if arg.to_string_lossy().starts_with("--socket=") { continue; }
+        return arg == "team";
+    }
+    false
 }
 
 fn is_rename_subcommand(mut args: impl Iterator<Item = std::ffi::OsString>) -> bool {
@@ -1492,6 +1600,7 @@ fn request(method: &str, params: Value) -> Result<Value, String> {
 
 fn run(command: Command) -> i32 {
     let result = match command {
+        Command::Team { action, json } => return run_team(action, json),
         Command::Ping => request("system.ping", json!({})).map(|r| println!("{}", r.as_str().unwrap_or("pong"))),
         Command::PhoenixIdentity => {
             // 데몬 접속 없이 이 바이너리 자신의 3필드를 출력(phoenix 폴백 identity 대조의 self-report 측).
@@ -8930,6 +9039,17 @@ extern "C" fn scoped_cleanup_handler(sig: libc::c_int) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn team_cli_contract_is_typed_and_in_help() {
+        use super::*;
+        use clap::CommandFactory;
+        assert!(Cli::try_parse_from(["cys", "team", "create", "--name", "기획팀", "--folder", "/tmp", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["cys", "team", "list", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["cys", "team", "status", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["cys", "team", "create", "--name", "기획팀"]).is_err());
+        assert!(Cli::command().render_long_help().to_string().contains("team"));
+    }
+
     #[test]
     fn drain_and_rollback_cli_contract() {
         use super::*;

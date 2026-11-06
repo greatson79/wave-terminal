@@ -454,6 +454,7 @@ fn spawn_bridge(
         c
     };
     cmd.env("CYS_CHANNEL_TOKEN", token)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
         .env("CYS_CHANNEL", channel)
         .env(cys::ENV_SOCKET, daemon.socket_path.to_string_lossy().as_ref());
     #[cfg(unix)]

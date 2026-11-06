@@ -574,6 +574,7 @@ async fn run_text_command(cmd: &str) -> Result<String, String> {
     // fire_command와 동일하게 command_shell()((cmd,/C) on windows) 사용으로 통일.
     let (sh, flag) = command_shell();
     let fut = tokio::process::Command::new(sh)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
         .arg(flag)
         .arg(cmd)
         .hide_console()
@@ -771,6 +772,7 @@ async fn fire_command(daemon: &Arc<Daemon>, job: &Job) -> Result<String, String>
     let out = tokio::time::timeout(
         Duration::from_secs(600),
         tokio::process::Command::new(shell)
+            .env("PYTHONDONTWRITEBYTECODE", "1")
             .arg(flag)
             .arg(command)
             .hide_console()

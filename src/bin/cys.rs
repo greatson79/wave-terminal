@@ -8388,6 +8388,7 @@ fn ai_three_way_merge(rel: &str, base: Option<&str>, ours: &str, theirs: &str) -
     // ★세션 env 스크럽(cysd scrub_claude_session_env 동형): claude 세션 안에서 실행하면 자식이
     // child-session 으로 강등·hang 하는 문제 차단. + 폴링 타임아웃(무한 대기 금지).
     let child = std::process::Command::new("claude")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
         .args(["-p", &prompt, "--output-format", "text"])
         .env_remove("CLAUDE_CODE_SESSION_ID")
         .env_remove("CLAUDE_CODE_CHILD_SESSION")
@@ -8474,6 +8475,7 @@ fn skillscan_warn(skill_dir: &std::path::Path) {
         return;
     }
     match std::process::Command::new("python3")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
         .arg(&scanner)
         .arg("scan")
         .arg(skill_dir)
@@ -8830,6 +8832,7 @@ fn run_scoped(surface: Option<String>, command: Vec<String>) -> Result<i32, Stri
         .or_else(|| cys::env_compat(ENV_SURFACE_ID).and_then(|s| parse_surface_ref(&s)));
 
     let mut cmd = std::process::Command::new(&command[0]);
+    cmd.env("PYTHONDONTWRITEBYTECODE", "1");
     cmd.args(&command[1..]);
     #[cfg(unix)]
     {

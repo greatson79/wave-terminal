@@ -1081,6 +1081,7 @@ fn parse_agy_cli_usage(v: &Value) -> Option<Vec<RateWindow>> {
 async fn collect_agy_cli(daemon: &Arc<Daemon>) {
     use crate::state::HideConsole;
     let mut cmd = tokio::process::Command::new("agy");
+    cmd.env("PYTHONDONTWRITEBYTECODE", "1");
     let fut = cmd.args(["-p", "/usage", "--output-format", "json", "--print-timeout", "10s"])
         .kill_on_drop(true).hide_console().output();
     let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(15), fut).await else { return };

@@ -38,10 +38,10 @@ class UpdaterConfigTests(unittest.TestCase):
 
     def test_release_workflow_publishes_space_free_name(self):
         y = (ROOT / '.github/workflows/release.yml').read_text(encoding='utf-8')
-        self.assertIn('sh scripts/make-update-manifest.sh "$VERSION"', y)
-        self.assertIn('rm -f "$BUNDLE/macos/$PRODUCT.app.tar.gz" "$BUNDLE/macos/$PRODUCT.app.tar.gz.sig"', y)
-        self.assertIn('gh release upload "${{ github.ref_name }}" dist-update/*.app.tar.gz', y)
-        self.assertIn('sh scripts/check-update-manifest.sh dist-update/latest.json', y)
+        self.assertIn('mv "$BUNDLE/macos/$PRODUCT.app.tar.gz" "dist-update/$(sh scripts/make-update-manifest.sh --asset-name "$VERSION" "$TRIPLE")"', y)
+        self.assertIn('--mac-tar "dist-update/$(sh scripts/make-update-manifest.sh --asset-name "$VERSION" "${{ matrix.target }}")"', y)
+        self.assertIn('uses: actions/upload-artifact@v4', y)
+        self.assertIn('            dist-update/*.app.tar.gz', y)
         b = (ROOT / 'scripts/build-macos-signed.sh').read_text(encoding='utf-8')
         self.assertIn('sh scripts/make-update-manifest.sh "$VERSION" greatson79 wave-terminal "$TARGET" "$APP.tar.gz.sig"', b)
 

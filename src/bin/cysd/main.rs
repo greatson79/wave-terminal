@@ -478,6 +478,7 @@ fn decide_auto_restore(
     // ★B1: 디스크 존재 게이트 제거 — 임베드본이 권위(디스크 부재여도 추출 실행). 이 경로는 폴백 후보다.
     let phoenix = pack_dir.join("bin").join("javis_phoenix.py");
     let mut env: Vec<(String, String)> = Vec::new();
+    env.push(("PYTHONDONTWRITEBYTECODE".to_string(), "1".to_string()));
     // PHOENIX_CYS: 데몬 exe 옆 동봉 cys 절대경로. 실존할 때만 주입한다(없으면 phoenix 의 which→표준경로
     // 폴백에 맡긴다 — 존재하지 않는 경로를 강제 주입해 재차 FileNotFoundError 를 만들지 않는다).
     let cys_name = if cfg!(windows) { "cys.exe" } else { "cys" };
@@ -542,6 +543,7 @@ fn spawn_office_bridge(state_dir: std::path::PathBuf) {
             }
             let mut cmd = tokio::process::Command::new(&python);
             cmd.arg(&script)
+                .env("PYTHONDONTWRITEBYTECODE", "1")
                 // 브리지의 cys 호출이 라이벌 데몬을 autostart하는 재귀 차단(auto-restore와 동일 계약).
                 .env("CYS_NO_AUTOSTART", "1")
                 // 런타임 상태는 팩 트리 밖으로(팩 본체 오염 0 — 팩 편입 계약 HUD_STATE_DIR).
@@ -772,6 +774,7 @@ fn phoenix_extract_should_fail() -> bool {
 fn phoenix_self_test(python: &str, script: &std::path::Path) -> bool {
     use crate::state::HideConsole;
     let out = std::process::Command::new(python)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
         .arg(script)
         .arg("--selftest")
         .env("CYS_NO_AUTOSTART", "1")

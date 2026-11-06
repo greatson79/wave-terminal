@@ -1688,6 +1688,7 @@ fn no_console(cmd: &mut std::process::Command) {
 /// 주입 수혜). cysd와 동일한 공용 로직(cys::runtime_prefixed_path) 사용 — 중복 구현 금지.
 /// 타 OS는 exe_dir만 얹혀 사실상 무영향(제거 없음).
 fn inject_runtime_path(cmd: &mut std::process::Command) {
+    cmd.env("PYTHONDONTWRITEBYTECODE", "1"); // Keep signed bundle resources unchanged, including shell descendants.
     if let Some(exe_dir) = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
@@ -2798,6 +2799,19 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "run through scripts/tests/test_bundle_python_seal.py with a copied runtime"]
+    fn bundled_python_launch_probe() {
+        let python = std::env::var_os("WAVE_TEST_PYTHON").expect("copied bundled Python required");
+        let mut cmd = std::process::Command::new(python);
+        cmd.env_remove("PYTHONDONTWRITEBYTECODE").env_remove("PYTHONPYCACHEPREFIX");
+        super::inject_runtime_path(&mut cmd);
+        let out = cmd.args(["-c", "import ssl, sqlite3, ctypes, venv, json, seal_fixture; print('bundle launch OK')"])
+            .output().expect("launch copied bundled Python");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("bundle launch OK"));
+    }
+
     #[test]
     fn drain_verify_distinguishes_unsupported_from_failed() {
         assert_eq!(super::drain_verify_failure(Some(2), "unknown argument"), "unsupported");

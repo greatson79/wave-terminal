@@ -418,9 +418,9 @@ pub fn spawn_custom_adapters(daemon: Arc<Daemon>) {
             loop {
                 // 플랫폼별 셸 위임 — Windows는 sh 부재(cmd /C). 실패는 무해(다음 주기 재시도).
                 let fut = if cfg!(windows) {
-                    tokio::process::Command::new("cmd").args(["/C", &cmd]).output()
+                    tokio::process::Command::new("cmd").env("PYTHONDONTWRITEBYTECODE", "1").args(["/C", &cmd]).output()
                 } else {
-                    tokio::process::Command::new("sh").args(["-c", &cmd]).output()
+                    tokio::process::Command::new("sh").env("PYTHONDONTWRITEBYTECODE", "1").args(["-c", &cmd]).output()
                 };
                 if let Ok(Ok(out)) =
                     tokio::time::timeout(std::time::Duration::from_secs(10), fut).await

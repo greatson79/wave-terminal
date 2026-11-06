@@ -17,6 +17,7 @@ interface SavedWorkspace {
   id: number;
   name: string;
   socket?: string;
+  teamId?: string;
   pending?: boolean;
   groupId?: number;
   collapsed?: boolean;
@@ -34,7 +35,8 @@ export function normalizeWorkspaces<T extends SavedWorkspace>(list: T[]): T[] {
     out.push(w);
   }
   const seenBySock = new Map<string, Set<number>>();
-  for (const w of out) {
+  // A cached legacy duplicate must not steal a managed socket's seat.
+  for (const w of [...out.filter((w) => w.teamId), ...out.filter((w) => !w.teamId)]) {
     const key = w.socket ?? "";
     let seen = seenBySock.get(key);
     if (!seen) { seen = new Set(); seenBySock.set(key, seen); }
@@ -50,15 +52,16 @@ export function coalesceHqWorkspaces<T extends SavedWorkspace>(
 ): Map<number, number> {
   const removed = new Map<number, number>();
   for (let i = 0; i < workspaces.length; i++) {
+    if (workspaces[i].teamId) continue;
     if (!workspaces[i].tree) {
-      const occupied = workspaces.findIndex((ws, j) => j > i && ws.tree && !ws.pending
+      const occupied = workspaces.findIndex((ws, j) => j > i && !ws.teamId && ws.tree && !ws.pending
         && ws.socket === workspaces[i].socket && samePanel(ws.name, workspaces[i].name));
       if (occupied >= 0) [workspaces[i], workspaces[occupied]] = [workspaces[occupied], workspaces[i]];
     }
     const keep = workspaces[i];
     for (let j = i + 1; j < workspaces.length;) {
       const extra = workspaces[j];
-      if (keep.pending || extra.pending || keep.socket !== extra.socket || !samePanel(keep.name, extra.name)) { j++; continue; }
+      if (extra.teamId || keep.pending || extra.pending || keep.socket !== extra.socket || !samePanel(keep.name, extra.name)) { j++; continue; }
       if (extra.tree) keep.tree = dedupeTree(keep.tree
         ? { type: "split", dir: "row", a: keep.tree, b: extra.tree }
         : extra.tree);
@@ -78,7 +81,7 @@ export function pruneEmptyHqWorkspaces<T extends SavedWorkspace>(
   const removed: number[] = [];
   for (let i = workspaces.length - 1; i >= 0 && workspaces.length > 1; i--) {
     const ws = workspaces[i];
-    if (ws.tree || ws.pending || ws.socket !== undefined || !isHqPanel(ws.name)) continue;
+    if (ws.teamId || ws.tree || ws.pending || ws.socket !== undefined || !isHqPanel(ws.name)) continue;
     removed.push(ws.id);
     workspaces.splice(i, 1);
   }
@@ -95,10 +98,10 @@ export function rehomeRestoredSeats<T extends SavedWorkspace>(
 ): void {
   for (const seat of live) {
     const from = workspaces.find((ws) => ws.socket === seat.socket && treeSids(ws.tree).includes(seat.surface_id));
-    if (!from) continue;
+    if (!from || from.teamId) continue;
     const name = target(from.name, seat.title);
     if (!name) continue;
-    let to = workspaces.find((ws) => ws.socket === seat.socket && (ws.name === name || samePanel(ws.name, name)));
+    let to = workspaces.find((ws) => !ws.teamId && ws.socket === seat.socket && (ws.name === name || samePanel(ws.name, name)));
     const moved = transferTrees(from.tree, to?.tree ?? null, seat.surface_id);
     if (!moved) continue;
     if (!to) { to = makeWorkspace(name, seat.socket); workspaces.push(to); }

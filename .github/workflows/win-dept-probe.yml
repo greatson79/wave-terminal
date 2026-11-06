@@ -2,6 +2,9 @@ name: Shipped Windows department probe
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ci/win-dept-probe]
+    paths: ['.github/workflows/win-dept-probe.yml']
 
 permissions:
   contents: read
@@ -50,6 +53,42 @@ jobs:
             Assert ($p.ExitCode -eq $expected) "Unexpected exit $($p.ExitCode), expected $expected from $exe"
             return $stdout
           }
+          # Verbatim: wave-install 419cf078688e8d4a0d374cd4a868ecf148298ad0/bootstrap.ps1:696-730.
+          function Say($message) { Write-Host $message }
+          function Update-ClaudePath {
+            $bin = Join-Path $env:USERPROFILE '.local\bin'
+            $userKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+            try {
+              foreach ($scope in @('User', 'Process')) {
+                $current = if ($scope -eq 'User') {
+                  [string]$userKey.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                } else { $env:Path }
+                $entries = @()
+                $found = $false
+                if ($current) {
+                  foreach ($entry in $current.Split(';')) {
+                    $normalized = [Environment]::ExpandEnvironmentVariables($entry.Trim().Trim('"')).TrimEnd('\')
+                    if ($normalized -eq $bin) {
+                      if ($found) { continue }
+                      $found = $true
+                      if ($scope -eq 'Process') { $entry = $bin }
+                    }
+                    $entries += $entry
+                  }
+                }
+                if (-not $found) { $entries += $bin }
+                $updated = $entries -join ';'
+                if ($updated -cne $current) {
+                  if ($scope -eq 'User') {
+                    $kind = if ($userKey.GetValueNames() -contains 'Path') { $userKey.GetValueKind('Path') } else { [Microsoft.Win32.RegistryValueKind]::ExpandString }
+                    [Environment]::SetEnvironmentVariable('Path', $updated, 'User')
+                    $userKey.SetValue('Path', $updated, $kind)
+                  } else { $env:Path = $updated }
+                }
+              }
+            } finally { $userKey.Dispose() }
+            Say 'Claude 명령 경로를 등록했습니다. 다른 터미널에서도 쓰려면 터미널을 닫고 새로 열어 주세요.'
+          }
           function OwnedProcesses {
             @(Get-CimInstance Win32_Process | Where-Object {
               $_.ExecutablePath -and $_.ExecutablePath.StartsWith($install + '\', [StringComparison]::OrdinalIgnoreCase)
@@ -78,7 +117,13 @@ jobs:
           $probeHome = Join-Path $probeRoot '최형석'
           $team = Join-Path $probeHome '내 팀 폴더'
           $install = Join-Path $probeHome 'Wave Terminal'
-          $originalUserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          $pathKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')
+          try {
+            $originalUserPathExists = $pathKey -and ($pathKey.GetValueNames() -contains 'Path')
+            $originalUserPath = if ($originalUserPathExists) { $pathKey.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } else { $null }
+            $originalUserPathKind = if ($originalUserPathExists) { $pathKey.GetValueKind('Path') } else { $null }
+          } finally { if ($pathKey) { $pathKey.Dispose() } }
+          $originalProcessPath = $env:PATH
           $registryPathChanged = $false
           $env:USERPROFILE = $probeHome
           $env:HOME = $probeHome
@@ -129,12 +174,24 @@ jobs:
               $env:PATH = ($prefix -join ';') + ';' + $env:PATH
               $localBin = Join-Path $probeHome '.local\bin'
               New-Item -ItemType Directory -Force -Path $localBin | Out-Null
-              [IO.File]::WriteAllText((Join-Path $localBin 'cc-path-proof.cmd'), "@echo off`r`necho CC_PATH_OK`r`n", [Text.Encoding]::ASCII)
               if ($PathContext -eq 'user-path-fix') {
-                [Environment]::SetEnvironmentVariable('Path', "$localBin;$originalUserPath", 'User')
                 $registryPathChanged = $true
-                $env:PATH += ";$localBin"
+                Update-ClaudePath
+                $pathAfterFirst = $env:PATH
+                Update-ClaudePath
+                Assert ($env:PATH -ceq $pathAfterFirst) 'Repeated PATH fix changed process PATH'
+                $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')
+                try {
+                  $rawPath = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                  $kind = $key.GetValueKind('Path')
+                  $expectedKind = if ($originalUserPathExists) { $originalUserPathKind } else { [Microsoft.Win32.RegistryValueKind]::ExpandString }
+                  Assert ($kind -eq $expectedKind) 'PATH fix changed registry value kind'
+                  Assert (@($rawPath.Split(';') | Where-Object { [Environment]::ExpandEnvironmentVariables($_.Trim().Trim('"')).TrimEnd('\') -eq $localBin }).Count -eq 1) 'User PATH must contain Korean local bin exactly once'
+                  Assert (@($env:PATH.Split(';') | Where-Object { $_ -eq $localBin }).Count -eq 1) 'Process PATH must contain Korean local bin exactly once'
+                  Write-Host "user-path-kind=$kind local-bin-count=1 process-local-bin-count=1"
+                } finally { $key.Dispose() }
               }
+              Assert (@(Get-ChildItem -LiteralPath $localBin -Force).Count -eq 0) 'Korean .local/bin must stay empty (no Claude or stub)'
               Write-Host "runtime-prefix=$($prefix -join ';') local-bin-in-parent=$($env:PATH.Split(';') -contains $localBin)"
               $null = Native $cys @('--version')
               $null = Native $cys @('init-pack','--no-install-hook')
@@ -181,7 +238,7 @@ jobs:
                 . Step "$entry launch exactly one plain worker shell and read actual cwd" {
                   $proof = Join-Path $team "$entry-proof.json"
                   $payload = Join-Path $team "$entry-cwd.ps1"
-                  $body = '$ErrorActionPreference="Stop"; $d=@{cwd=(Get-Location).Path; path_command=(Get-Command cc-path-proof.cmd -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source)}; [IO.File]::WriteAllText(' + "'$proof.tmp'" + ',($d|ConvertTo-Json),[Text.Encoding]::UTF8); Move-Item -LiteralPath ' + "'$proof.tmp' -Destination '$proof'"
+                  $body = '$ErrorActionPreference="Stop"; $d=@{cwd=(Get-Location).Path; path=$env:PATH; cys_command=(Get-Command cys.exe -ErrorAction Stop | Select-Object -First 1 -ExpandProperty Source)}; [IO.File]::WriteAllText(' + "'$proof.tmp'" + ',($d|ConvertTo-Json),[Text.Encoding]::UTF8); Move-Item -LiteralPath ' + "'$proof.tmp' -Destination '$proof'"
                   [IO.File]::WriteAllText($payload, $body, (New-Object Text.UTF8Encoding($true)))
                   $command = "& '$payload'; while (`$true) { Start-Sleep -Seconds 1 }"
                   $worker = (Native $cys @('new-surface','--role','worker','--cwd',$team,'--cmd',$command)).Trim()
@@ -198,7 +255,9 @@ jobs:
                   Assert (Test-Path -LiteralPath $proof) 'Shell did not execute cwd readback'
                   $readback = Get-Content -LiteralPath $proof -Raw -Encoding UTF8 | ConvertFrom-Json
                   Assert ($readback.cwd -eq $team) "Actual shell cwd mismatch: $($readback.cwd)"
-                  if ($PathContext -eq 'user-path-fix') { Assert ($readback.path_command -eq (Join-Path $localBin 'cc-path-proof.cmd')) 'User-PATH fix not visible inside shell' }
+                  Assert ($readback.cys_command -eq $cys) 'Worker shell does not resolve installed cys.exe'
+                  if ($PathContext -eq 'user-path-fix') { Assert ($readback.path.Split(';') -contains $localBin) 'Korean local bin not present in worker shell PATH' }
+                  Assert (@(Get-ChildItem -LiteralPath $localBin -Force).Count -eq 0) 'Korean local bin gained files'
                   Write-Host ($readback | ConvertTo-Json)
                   $null = Native $cys @('read-screen','--surface',$worker)
                   $list = Native $cys @('list')
@@ -245,7 +304,22 @@ jobs:
               AssertGone $runtimeTree
             }
             } finally {
-              if ($registryPathChanged) { [Environment]::SetEnvironmentVariable('Path', $originalUserPath, 'User') }
+              . Step 'Restore original raw HKCU PATH and value kind' {
+                if ($registryPathChanged) {
+                  $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+                  try {
+                    if ($originalUserPathExists) {
+                      $key.SetValue('Path', $originalUserPath, $originalUserPathKind)
+                      Assert ($key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) -ceq $originalUserPath) 'Original raw user PATH not restored'
+                      Assert ($key.GetValueKind('Path') -eq $originalUserPathKind) 'Original user PATH kind not restored'
+                    } else {
+                      $key.DeleteValue('Path', $false)
+                      Assert (-not ($key.GetValueNames() -contains 'Path')) 'Originally absent user PATH was not removed'
+                    }
+                  } finally { $key.Dispose() }
+                }
+                $env:PATH = $originalProcessPath
+              }
             }
           }
           Write-Host ("{0:o} CC_PROBE_PASS shell={1} context={2} entrypoints=allocate,create" -f (Get-Date), $ProbeShell, $PathContext)

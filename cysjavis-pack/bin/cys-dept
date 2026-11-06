@@ -19,6 +19,25 @@ set -euo pipefail
 # 그 아래 사용자가 실행하는 claude)이 상속하도록 단일 지점에서 로그인 셸 표준 경로를 prepend.
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin${PATH:+:$PATH}"
 
+# HOTFIX-PYTHON-BOUNDARY-BEGIN
+# Native Windows Python cannot open MSYS /c paths; convert argv, never Python source text.
+dept_windows=0
+case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) dept_windows=1 ;; esac
+native_path(){
+  if [ "$dept_windows" = 1 ] && [[ "$1" == /* ]]; then cygpath -m "$1"
+  else printf '%s\n' "$1"; fi
+}
+python3(){
+  if [ "$dept_windows" != 1 ]; then command python3 "$@"; return; fi
+  local value converted=()
+  for value in "$@"; do
+    if [[ "$value" == /* ]]; then value="$(native_path "$value")" || return; fi
+    converted+=("$value")
+  done
+  MSYS2_ARG_CONV_EXCL='*' command python3 "${converted[@]}"
+}
+# HOTFIX-PYTHON-BOUNDARY-END
+
 REG="${CYS_DEPTS_JSON:-$HOME/.cys/depts.json}"
 PACK_DEFAULT="$HOME/.cys/pack"
 # RC-6: 폴백 경로 가드 — command -v 우선(Windows는 RC-5 runtime PATH로 cysd.exe/cys.exe 해소).
@@ -27,7 +46,9 @@ CYSD="$(command -v cysd || { [ -x /opt/homebrew/bin/cysd ] && echo /opt/homebrew
 CYS="$(command -v cys || { [ -x /opt/homebrew/bin/cys ] && echo /opt/homebrew/bin/cys; } || echo cys)"
 # RC-6(codex R3.1 nit): 인라인 python heredoc이 cys를 literal이 아니라 **해소된 경로**로 실행하도록
 # CYS_BIN을 env로 전파(heredoc은 프로세스 env 상속). dept_classify_idle·alive_sock 등 subprocess가 사용.
-export CYS_BIN="$CYS"
+export CYS_BIN="$(native_path "$CYS")"
+if [ -n "${CYS_PACK_DIR:-}" ]; then export CYS_PACK_DIR="$(native_path "$CYS_PACK_DIR")"; fi
+if [ -n "${CYS_DEPTS_JSON:-}" ]; then export CYS_DEPTS_JSON="$(native_path "$CYS_DEPTS_JSON")"; fi
 # RC-6(T3 발견): Windows 번들 embeddable Python은 open() 기본 인코딩이 cp1252(charmap)라 UTF-8(한글)
 # agents.json·directives 읽기가 UnicodeDecodeError로 크래시(부서 seed 실패 등). PYTHONUTF8=1로 전 python
 # heredoc·자식 python을 UTF-8 기본으로 강제(unix 무영향). 개별 open(encoding=) 누락도 이걸로 방어.
@@ -102,8 +123,8 @@ graceful_kill(){
 }
 
 reg_init(){ [ -f "$REG" ] || { mkdir -p "$(dirname "$REG")"; printf '{"depts":{}}\n' > "$REG"; }; }
-reg_count(){ reg_init; python3 -c "import json;print(len(json.load(open('$REG'))['depts']))"; }
-reg_names(){ reg_init; python3 -c "import json;[print(k) for k in json.load(open('$REG'))['depts']]"; }
+reg_count(){ reg_init; python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["depts"]))' "$REG"; }
+reg_names(){ reg_init; python3 -c 'import json,sys;[print(k) for k in json.load(open(sys.argv[1]))["depts"]]' "$REG"; }
 # reg_upsert/reg_remove: 동시 부서 운용 시 lost-update 방지 — fcntl.flock으로 RMW 직렬화 +
 # temp+os.replace 원자 교체(읽는 쪽이 부분 파일을 보지 않음). macOS엔 flock(1) CLI가 없어 python fcntl 사용.
 reg_upsert(){ reg_init; python3 - "$REG" "$1" "$2" "$3" <<'PY'

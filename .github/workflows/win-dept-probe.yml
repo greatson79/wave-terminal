@@ -24,7 +24,7 @@ jobs:
         shell: pwsh
         run: |
           $script = @'
-          param([string]$ProbeShell, [string]$PathContext, [ValidateSet('allocate','create')][string]$Entry)
+          param([string]$ProbeShell, [string]$PathContext, [ValidateSet('allocate','create')][string]$Entry, [Parameter(Mandatory=$true)][string]$ExpectedSid)
           $ErrorActionPreference = 'Stop'
           Set-StrictMode -Version Latest
           [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
@@ -37,13 +37,17 @@ jobs:
           }
           function Assert($condition, $message) { if (-not $condition) { throw $message } }
           function Native($exe, [string[]]$argv, [Nullable[int]]$expected = 0) {
-            $quoted = @($argv | ForEach-Object { '"' + (($_ -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"' })
+            $quoted = @($argv | ForEach-Object {
+              if ($_ -ne '' -and $_ -notmatch '[\s"]') { $_ }
+              else { '"' + (($_ -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"' }
+            })
             $timer = [Diagnostics.Stopwatch]::StartNew()
             Write-Host ("{0:o} EXEC {1} {2}" -f (Get-Date), $exe, ($argv -join ' | '))
             # Own the Process from Start through ExitCode; PS5 Start-Process -PassThru lost fast-exit status.
             $p = New-Object Diagnostics.Process
             $p.StartInfo.FileName = $exe
             $p.StartInfo.Arguments = $quoted -join ' '
+            Write-Host ("RAW_ARGUMENTS=<{0}>" -f $p.StartInfo.Arguments)
             $p.StartInfo.UseShellExecute = $false
             $p.StartInfo.RedirectStandardOutput = $true
             $p.StartInfo.RedirectStandardError = $true
@@ -149,8 +153,29 @@ jobs:
             }
             return $pending
           }
-          $probeRoot = Join-Path $env:RUNNER_TEMP ('cc-' + [guid]::NewGuid().ToString())
-          $probeHome = Join-Path $probeRoot '최형석'
+          $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+          Assert ($identity.User.Value -eq $ExpectedSid) 'Probe did not run as the newly created Korean account'
+          $bootstrapHome = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+          Assert (-not [string]::IsNullOrWhiteSpace($bootstrapHome)) 'Loaded account has no native user profile'
+          # PS5 Add-Type uses TEMP; an inherited runner TEMP may be inaccessible to the new account.
+          $env:TEMP = Join-Path $bootstrapHome 'AppData\Local\Temp'
+          $env:TMP = $env:TEMP
+          New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
+          Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class CCProfile { [DllImport("shell32.dll")] public static extern int SHGetKnownFolderPath(ref Guid id, uint flags, IntPtr token, out IntPtr path); }'
+          $folderId = [guid]'5E6C858F-0E22-4760-9AFE-EA3317B67173'
+          $pointer = [IntPtr]::Zero
+          try {
+            $hr = [CCProfile]::SHGetKnownFolderPath([ref]$folderId, 0, [IntPtr]::Zero, [ref]$pointer)
+            Assert ($hr -eq 0) "SHGetKnownFolderPath failed: $hr"
+            $probeHome = [Runtime.InteropServices.Marshal]::PtrToStringUni($pointer)
+          } finally { if ($pointer -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::FreeCoTaskMem($pointer) } }
+          Assert ($probeHome -eq $bootstrapHome) 'Native profile APIs disagree'
+          $registeredProfile = [Environment]::ExpandEnvironmentVariables((Get-ItemProperty -LiteralPath ("HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\" + $ExpectedSid)).ProfileImagePath)
+          Assert ($registeredProfile -eq $probeHome) 'Profile registry does not match the process token native profile'
+          Write-Host "PROFILE_REGISTRY sid=$ExpectedSid ProfileImagePath=$registeredProfile"
+          Assert ((Split-Path -Leaf $probeHome) -eq '최형석') "Actual native profile is not the Korean account: $probeHome"
+          Write-Host "REAL_ACCOUNT name=$($identity.Name) sid=$($identity.User.Value) SHGetKnownFolderPath_Profile=$probeHome inherited_USERPROFILE=$env:USERPROFILE inherited_HOME=$env:HOME"
+          $probeRoot = Join-Path $probeHome ('cc-' + [guid]::NewGuid().ToString())
           $team = Join-Path $probeHome '내 팀 폴더'
           $install = Join-Path $probeHome 'Wave Terminal'
           $pathKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')
@@ -166,25 +191,27 @@ jobs:
           $env:LOCALAPPDATA = Join-Path $probeHome 'AppData\Local'
           $env:APPDATA = Join-Path $probeHome 'AppData\Roaming'
           $registryPath = Join-Path $probeHome '.cys\depts.json'
-          $env:CYS_PACK_DIR = Join-Path $probeHome '.cys\pack'
+          $packRoot = Join-Path $probeHome '.cys\pack'
           $env:PYTHONUTF8 = '1'
           $env:PYTHONIOENCODING = 'utf-8'
           $env:PYTHONDONTWRITEBYTECODE = '1'
           $env:CYS_SHELL = (Get-Command $ProbeShell -CommandType Application).Source
-          foreach ($key in @('CYS_ROLE','CYS_SURFACE_ID','CYS_SOCKET','CYS_ACCOUNT_DIR','CYS_DEPT_NO_MASTER','CYS_DEPT_DEFAULT_ACCOUNT','CYS_DEPTS_JSON')) {
+          foreach ($key in @('CYS_ROLE','CYS_SURFACE_ID','CYS_SOCKET','CYS_ACCOUNT_DIR','CYS_DEPT_NO_MASTER','CYS_DEPT_DEFAULT_ACCOUNT','CYS_DEPTS_JSON','CYS_PACK_DIR')) {
             [Environment]::SetEnvironmentVariable($key, $null, 'Process')
           }
           try {
             . Step 'Native exit-capture self-check (before any product evidence)' {
-              $cmd = Join-Path $env:WINDIR 'System32\cmd.exe'
-              $null = Native $cmd @('/d','/c','exit 0')
-              $null = Native $cmd @('/d','/c','exit 7') 7
+              # CMD has command-string parsing, not CRT argv; use the actual selected shell's encoded script.
+              $exit0 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('exit 0'))
+              $exit7 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('exit 7'))
+              $null = Native $env:CYS_SHELL @('-NoProfile','-NonInteractive','-EncodedCommand',$exit0)
+              $null = Native $env:CYS_SHELL @('-NoProfile','-NonInteractive','-EncodedCommand',$exit7) 7
               $rejected = $false
-              try { $null = Native $cmd @('/d','/c','exit 7') } catch { $rejected = $_.Exception.Message -match 'Unexpected exit 7' }
+              try { $null = Native $env:CYS_SHELL @('-NoProfile','-NonInteractive','-EncodedCommand',$exit7) } catch { $rejected = $_.Exception.Message -match 'Unexpected exit 7' }
               Assert $rejected 'Native helper accepted a nonzero exit as success'
             }
             . Step 'Isolated Korean profile and Windows shell' {
-              New-Item -ItemType Directory -Force -Path $team,$env:LOCALAPPDATA,$env:APPDATA | Out-Null
+              New-Item -ItemType Directory -Force -Path $probeRoot,$team,$env:LOCALAPPDATA,$env:APPDATA | Out-Null
               Write-Host "PS=$($PSVersionTable.PSVersion) profile=$probeHome team=$team context=$PathContext"
               Assert (@(Get-Process cys,cysd,cys-app -ErrorAction SilentlyContinue).Count -eq 0) 'Runner already has Wave processes; refuse shared runtime'
             }
@@ -215,7 +242,7 @@ jobs:
             }
             $cys = Join-Path $install 'cys.exe'
             $bash = Join-Path $install 'runtime\git\usr\bin\bash.exe'
-            $dept = Join-Path $env:CYS_PACK_DIR 'bin\cys-dept'
+            $dept = Join-Path $packRoot 'bin\cys-dept'
             . Step 'GUI runtime PATH and optional current user-PATH fix' {
               # Same prefix order as runtime_prefixed_path / inject_runtime_path at v0.3.1.
               $prefix = @($install) + @('runtime\python','runtime\git\cmd','runtime\git\usr\bin','runtime\node' | ForEach-Object { Join-Path $install $_ })
@@ -244,6 +271,7 @@ jobs:
               $null = Native $cys @('--version')
               $null = Native $cys @('init-pack','--no-install-hook')
               Assert (Test-Path -LiteralPath $dept) 'init-pack did not seed shipped department tool'
+              Write-Host "APP_HOME_PROOF cys-init-pack-default=$packRoot native-profile=$probeHome"
               Write-Host "cys-dept sha256=$((Get-FileHash -LiteralPath $dept -Algorithm SHA256).Hash)"
             }
             . Step 'Observed reg_count Windows-literal error (diagnostic, not a runtime patch)' {
@@ -380,6 +408,105 @@ jobs:
           Write-Host ("{0:o} CC_PROBE_PASS shell={1} context={2} entrypoint={3}" -f (Get-Date), $ProbeShell, $PathContext, $Entry)
           '@
           [IO.File]::WriteAllText((Join-Path $env:RUNNER_TEMP 'cc-dept-probe.ps1'), $script, (New-Object Text.UTF8Encoding($true)))
+          $launcher = @'
+          param([ValidateSet('pwsh','powershell')][string]$ProbeShell, [string]$PathContext, [ValidateSet('allocate','create')][string]$Entry)
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          $account = $null
+          $password = $null
+          $process = $null
+          $stdout = $null
+          $stderr = $null
+          $outputWritten = $false
+          $name = '최형석'
+          function AccountProcesses($sid) {
+            @(Get-CimInstance Win32_Process | ForEach-Object {
+              $owner = Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid -ErrorAction SilentlyContinue
+              if ($owner -and $owner.ReturnValue -eq 0 -and $owner.Sid -eq $sid) { $_ }
+            })
+          }
+          try {
+            if (Get-LocalUser -Name $name -ErrorAction SilentlyContinue) { throw 'Korean test account already exists; refuse reuse' }
+            # Password stays in memory; never pass it in command-line arguments or log it.
+            $password = ConvertTo-SecureString ([guid]::NewGuid().ToString('N') + 'aA1!') -AsPlainText -Force
+            $account = New-LocalUser -Name $name -Password $password -Description 'Disposable CC department probe' -PasswordNeverExpires
+            Add-LocalGroupMember -Group (Get-LocalGroup -SID 'S-1-5-32-545') -Member $account
+            $sid = $account.SID.Value
+            Write-Host ("{0:o} ACCOUNT_CREATED name={1} sid={2}" -f (Get-Date), $name, $sid)
+            Start-Service seclogon
+            $shared = Join-Path $env:PUBLIC ('cc-dept-' + [guid]::NewGuid().ToString())
+            New-Item -ItemType Directory -Path $shared | Out-Null
+            $childScript = Join-Path $shared 'cc-dept-probe.ps1'
+            Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'cc-dept-probe.ps1') -Destination $childScript
+            & (Join-Path $env:WINDIR 'System32\icacls.exe') $shared /grant "*$($sid):(OI)(CI)RX" | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot grant the test user script access' }
+            $scratch = Join-Path $shared 'temp'
+            New-Item -ItemType Directory -Path $scratch | Out-Null
+            & (Join-Path $env:WINDIR 'System32\icacls.exe') $scratch /grant "*$($sid):(OI)(CI)F" | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot grant the test user temporary-file access' }
+            $process = New-Object Diagnostics.Process
+            $process.StartInfo.FileName = (Get-Command $ProbeShell -CommandType Application).Source
+            $process.StartInfo.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $childScript + '" -ProbeShell ' + $ProbeShell + ' -PathContext ' + $PathContext + ' -Entry ' + $Entry + ' -ExpectedSid ' + $sid
+            $process.StartInfo.WorkingDirectory = $shared
+            $process.StartInfo.UserName = $name
+            $process.StartInfo.Domain = $env:COMPUTERNAME
+            $process.StartInfo.Password = $password
+            $process.StartInfo.LoadUserProfile = $true
+            $process.StartInfo.EnvironmentVariables['TEMP'] = $scratch
+            $process.StartInfo.EnvironmentVariables['TMP'] = $scratch
+            $process.StartInfo.UseShellExecute = $false
+            $process.StartInfo.RedirectStandardOutput = $true
+            $process.StartInfo.RedirectStandardError = $true
+            $process.StartInfo.StandardOutputEncoding = [Text.Encoding]::UTF8
+            $process.StartInfo.StandardErrorEncoding = [Text.Encoding]::UTF8
+            if (-not $process.Start()) { throw 'Cannot start the real-account probe' }
+            $stdout = $process.StandardOutput.ReadToEndAsync()
+            $stderr = $process.StandardError.ReadToEndAsync()
+            if (-not $process.WaitForExit(1080000)) { throw 'Real-account probe exceeded 18 minutes' }
+            Write-Host $stdout.GetAwaiter().GetResult()
+            Write-Host $stderr.GetAwaiter().GetResult()
+            $outputWritten = $true
+            Write-Host ("{0:o} REAL_ACCOUNT_PROBE_EXIT code={1}" -f (Get-Date), $process.ExitCode)
+            if ($process.ExitCode -ne 0) { throw "Real-account probe failed: $($process.ExitCode)" }
+          } finally {
+            try {
+              if ($account) {
+                # This unique account belongs only to this job; recheck SID before each final cleanup kill.
+                foreach ($owned in @(AccountProcesses $account.SID.Value)) {
+                  $current = Get-CimInstance Win32_Process -Filter "ProcessId=$($owned.ProcessId)"
+                  if ($current -and $current.CreationDate -eq $owned.CreationDate) {
+                    $owner = Invoke-CimMethod -InputObject $current -MethodName GetOwnerSid
+                    if ($owner.ReturnValue -eq 0 -and $owner.Sid -eq $account.SID.Value) {
+                      Write-Host "ACCOUNT_CLEANUP pid=$($current.ProcessId) command=$($current.CommandLine)"
+                      & (Join-Path $env:WINDIR 'System32\taskkill.exe') /PID $current.ProcessId /T /F | Out-Host
+                      Write-Host "ACCOUNT_CLEANUP taskkill_exit=$LASTEXITCODE"
+                    }
+                  }
+                }
+                Start-Sleep -Seconds 1
+                if (@(AccountProcesses $account.SID.Value).Count -ne 0) { throw 'Korean account processes survived final cleanup' }
+              }
+            } finally {
+              try {
+                if (-not $outputWritten) {
+                  foreach ($stream in @($stdout,$stderr)) {
+                    if ($stream -and $stream.IsCompleted -and -not $stream.IsFaulted -and -not $stream.IsCanceled) { Write-Host $stream.GetAwaiter().GetResult() }
+                    elseif ($stream) { Write-Host 'CHILD_OUTPUT_INCOMPLETE after cleanup (timeout/failure remains FAIL)' }
+                  }
+                }
+              } finally {
+                if ($account) {
+                  Remove-LocalUser -SID $account.SID
+                  if (Get-LocalUser -SID $account.SID -ErrorAction SilentlyContinue) { throw 'Korean test account removal failed' }
+                  Write-Host ("{0:o} ACCOUNT_REMOVED sid={1}" -f (Get-Date), $account.SID.Value)
+                }
+                if ($process) { $process.Dispose() }
+                if ($password) { $password.Dispose() }
+              }
+            }
+          }
+          '@
+          [IO.File]::WriteAllText((Join-Path $env:RUNNER_TEMP 'cc-korean-account.ps1'), $launcher, (New-Object Text.UTF8Encoding($true)))
 
       - name: Probe under PowerShell 7
         if: matrix.shell == 'pwsh'
@@ -387,7 +514,7 @@ jobs:
         env:
           PROBE_PATH_CONTEXT: ${{ matrix.path_context }}
           PROBE_ENTRY: ${{ matrix.entry }}
-        run: '& "$env:RUNNER_TEMP\cc-dept-probe.ps1" -ProbeShell pwsh -PathContext $env:PROBE_PATH_CONTEXT -Entry $env:PROBE_ENTRY'
+        run: '& "$env:RUNNER_TEMP\cc-korean-account.ps1" -ProbeShell pwsh -PathContext $env:PROBE_PATH_CONTEXT -Entry $env:PROBE_ENTRY'
 
       - name: Probe under Windows PowerShell 5.1
         if: matrix.shell == 'powershell'
@@ -395,4 +522,4 @@ jobs:
         env:
           PROBE_PATH_CONTEXT: ${{ matrix.path_context }}
           PROBE_ENTRY: ${{ matrix.entry }}
-        run: '& "$env:RUNNER_TEMP\cc-dept-probe.ps1" -ProbeShell powershell -PathContext $env:PROBE_PATH_CONTEXT -Entry $env:PROBE_ENTRY'
+        run: '& "$env:RUNNER_TEMP\cc-korean-account.ps1" -ProbeShell powershell -PathContext $env:PROBE_PATH_CONTEXT -Entry $env:PROBE_ENTRY'

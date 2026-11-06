@@ -523,3 +523,27 @@ jobs:
           PROBE_PATH_CONTEXT: ${{ matrix.path_context }}
           PROBE_ENTRY: ${{ matrix.entry }}
         run: '& "$env:RUNNER_TEMP\cc-korean-account.ps1" -ProbeShell powershell -PathContext $env:PROBE_PATH_CONTEXT -Entry $env:PROBE_ENTRY'
+
+      - name: Assert Korean test account is gone
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $name = '최형석'
+          $account = Get-LocalUser -Name $name -ErrorAction SilentlyContinue
+          if ($account) {
+            $sid = $account.SID.Value
+            Remove-LocalUser -SID $account.SID
+            Write-Host "ACCOUNT_REMOVED_BY_GUARD sid=$sid"
+            if (Get-LocalUser -Name $name -ErrorAction SilentlyContinue) {
+              throw "Korean test account survived final guard: $sid"
+            }
+            $profileKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid"
+            if (Test-Path -LiteralPath $profileKey) {
+              $path = (Get-ItemProperty -LiteralPath $profileKey).ProfileImagePath
+              Write-Host "PROFILE_LEFT sid=$sid path=$path"
+              throw "Korean test profile remains registered: $sid"
+            }
+          } else {
+            Write-Host "ACCOUNT_ABSENT name=$name"
+          }

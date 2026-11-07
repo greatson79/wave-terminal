@@ -1918,11 +1918,7 @@ async fn stop_dept_daemon(name: String) -> Result<(), String> {
 /// 무비판 재-launch하지 않게 한다(옛 테스트 잔재·삭제된 부서 차단). 부재 시 빈 depts.
 #[tauri::command]
 fn list_depts() -> Result<Value, String> {
-    let reg = std::env::var("CYS_DEPTS_JSON")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            cys::home_dir().join(".cys/depts.json")
-        });
+    let reg = cys::depts_json_path();
     match std::fs::read_to_string(&reg) {
         Ok(s) => serde_json::from_str::<Value>(&s).map_err(|e| e.to_string()),
         Err(_) => Ok(json!({ "depts": {} })),
@@ -1932,11 +1928,7 @@ fn list_depts() -> Result<Value, String> {
 /// 부서 레지스트리(depts.json)에서 표시명 조회 — cys-dept reg_set_meta 가 기록한 display_name.
 /// create stdout 은 name only 이므로 표시명의 진실원은 레지스트리다. 부재/오류 시 None(=name 폴백).
 fn dept_display_name(name: &str) -> Option<String> {
-    let reg = std::env::var("CYS_DEPTS_JSON")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            cys::home_dir().join(".cys/depts.json")
-        });
+    let reg = cys::depts_json_path();
     let s = std::fs::read_to_string(&reg).ok()?;
     let v: Value = serde_json::from_str(&s).ok()?;
     v.get("depts")?

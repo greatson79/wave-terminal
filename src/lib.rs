@@ -635,11 +635,14 @@ mod tests {
         assert!(got.starts_with("/opt/cysapp/bin"), "exe_dir 선두 주입: {got}");
         #[cfg(windows)]
         {
-            assert!(got.ends_with(&cur), "기존 PATH 보존(제거 없음): {got}");
-            // 이미 PATH에 있으면(중복) 얹지 않는다 → None(무변경). (windows는 runtime 하위 dir가
-            // 실재하면 Some일 수 있으나 이 합성 경로엔 없음.)
-            let already = format!("/opt/cysapp/bin{sep}/usr/bin");
-            assert_eq!(runtime_prefixed_path(exe, &already), None, "중복이면 무변경");
+            // Windows appends fresh registry/user bins after the preserved process entries.
+            let parts: Vec<_> = std::env::split_paths(&got).collect();
+            let expected: Vec<_> = std::iter::once(exe.to_path_buf())
+                .chain(std::env::split_paths(&cur)).collect();
+            assert!(parts.starts_with(&expected), "exe_dir then current PATH in order: {got}");
+            assert_eq!(parts.iter().filter(|p| p.as_path() == exe).count(), 1, "exe_dir deduplicated: {got}");
+            // Once all discovered entries are present, recomposition must be unchanged.
+            assert_eq!(runtime_prefixed_path(exe, &got), None, "complete PATH is idempotent");
         }
         #[cfg(not(windows))]
         {
@@ -1041,11 +1044,7 @@ mod tests {
         );
         // (b) 빈 문자열 = 미설정 취급 → 기본 $HOME/.cys/claude
         let def = resolve_claude_config_dir_with(Some(String::new()));
-        assert!(def.ends_with("/.cys/claude"), "기본 해소: {def}");
-        assert!(
-            def.starts_with(&home_dir().to_string_lossy().into_owned()),
-            "HOME 기반: {def}"
-        );
+        assert_eq!(Path::new(&def), home_dir().join(".cys").join("claude"), "HOME-based default");
         // (c) 미설정도 동일 기본
         assert_eq!(resolve_claude_config_dir_with(None), def);
     }

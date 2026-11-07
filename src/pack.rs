@@ -2112,8 +2112,8 @@ mod tests {
 
     /// 빈 임시 dir에서 디스크 산출물을 핑거프린트(rel → sha256)로 채집한다 —
     /// install vs install_from_iter 등가성 비교용. 매니페스트·pack-version도 포함.
-    fn fingerprint_dir(root: &Path) -> std::collections::BTreeMap<String, String> {
-        fn walk(base: &Path, dir: &Path, out: &mut std::collections::BTreeMap<String, String>) {
+    fn fingerprint_dir(root: &Path) -> std::collections::BTreeMap<PathBuf, String> {
+        fn walk(base: &Path, dir: &Path, out: &mut std::collections::BTreeMap<PathBuf, String>) {
             if let Ok(rd) = std::fs::read_dir(dir) {
                 for e in rd.flatten() {
                     let p = e.path();
@@ -2121,7 +2121,7 @@ mod tests {
                         walk(base, &p, out);
                     } else if let Ok(bytes) = std::fs::read(&p) {
                         use sha2::{Digest, Sha256};
-                        let rel = p.strip_prefix(base).unwrap().to_string_lossy().into_owned();
+                        let rel = p.strip_prefix(base).unwrap().to_path_buf();
                         out.insert(rel, format!("{:x}", Sha256::digest(&bytes)));
                     }
                 }
@@ -2174,7 +2174,7 @@ mod tests {
             PACK_VERSION_FILE,
             INSTALL_MANIFEST,
         ] {
-            assert!(fp_a.contains_key(probe), "A 산출물에 {probe} 부재");
+            assert!(fp_a.contains_key(Path::new(probe)), "A 산출물에 {probe} 부재");
         }
         assert_eq!(fp_a, fp_b, "install vs install_from_iter 디스크 산출물 불일치");
     }

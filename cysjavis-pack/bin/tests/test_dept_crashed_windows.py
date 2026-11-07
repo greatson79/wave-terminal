@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -34,7 +35,7 @@ def run(pipe, alive_pids=(), recorded=None, windows=True, scan="", proc_start=No
             source = re.sub(r"^dept_proc_start\(\)\{.*?^\}\n", "dept_proc_start(){ printf '%s\\r\\n' " + proc_start + "; }\n", source, flags=re.S | re.M)
         if not windows:
             _stub(bin_dir / "uname", "#!/bin/sh\nprintf 'Linux\\n'\n")
-        script = home / "cys-dept"; script.write_text(source, encoding="utf-8")
+        script = home / "cys-dept"; script.write_bytes(source.replace("\r\n", "\n").encode("utf-8"))  # LF only
         reg = home / ".cys/depts.json"; reg.parent.mkdir()
         entry = {"socket": SOCK}
         if recorded is not None: entry["pids"] = recorded
@@ -120,10 +121,14 @@ class ScanBoundaryTests(unittest.TestCase):
         body = re.search(r"dept_scan_procs\(\)\{.*?<<'PY_SCAN'\n(.*?)^PY_SCAN\n", source, re.S | re.M).group(1)
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = Path(tmp)
-            (bin_dir / "powershell.exe").write_text("#!/bin/sh\ncat <<'EOF'\n" + "".join(r + "\n" for r in rows) + "EOF\n")
-            (bin_dir / "powershell.exe").chmod(0o700)
-            r = subprocess.run(["python3", "-c", body] + keys, capture_output=True, text=True, encoding="utf-8", timeout=20,
-                               env={**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"]})
+            # A PATH-stubbed powershell.exe cannot run on Windows (CreateProcess ignores shebangs), so the
+            # command list is redirected to a Python one-liner that prints the same CIM-style rows.
+            rows_file = bin_dir / "rows.txt"
+            rows_file.write_bytes("".join(r + "\n" for r in rows).encode("utf-8"))
+            literal = "['powershell.exe','-NoProfile','-NonInteractive','-Command',ps]"
+            self.assertIn(literal, body)
+            body = body.replace(literal, "[sys.executable,'-c','import sys;sys.stdout.write(open(sys.argv[1],encoding=\"utf-8\").read())',%r]" % str(rows_file))
+            r = subprocess.run([sys.executable, "-c", body] + keys, capture_output=True, text=True, encoding="utf-8", timeout=20)
             self.assertEqual(r.returncode, 0, r.stderr)
             return r.stdout.splitlines()
 

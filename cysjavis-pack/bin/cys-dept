@@ -110,6 +110,31 @@ dept_logdir(){
   esac
 }
 
+# Windows 크래시 부서 정리용 "이미 종료" 검증(fail-closed: 판정 불가는 전부 '살아 있음'으로 본다).
+# 파이프는 이름 목록으로만 본다(연결 시도 없음). 레지스트리 엔트리에 기록된 pid(pids 목록)가 있으면 tasklist로 생존 확인.
+dept_pipe_present(){
+  python3 - "$1" <<'PY_PIPE'
+import os,sys
+name=sys.argv[1].replace('/','\\').rsplit('\\',1)[-1]
+try: print('present' if name in os.listdir('\\\\.\\pipe\\') else 'absent')
+except Exception: print('present')
+PY_PIPE
+}
+dept_recorded_pid_alive(){
+  local pid
+  for pid in $(python3 - "$(native_path "$REG")" "$1" <<'PY_PIDS'
+import json,sys
+try: e=json.load(open(sys.argv[1])).get('depts',{}).get(sys.argv[2],{})
+except Exception: print('x'); sys.exit(0)
+for v in e.get('pids',[]): print(v if isinstance(v,int) else 'x')
+PY_PIDS
+); do
+    pid="${pid%$'\r'}"
+    case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+    tasklist /FI "PID eq $pid" /FO CSV /NH 2>/dev/null | grep -q "\"$pid\"" && return 0
+  done
+  return 1
+}
 daemon_identity(){
   if [ "$dept_windows" = 1 ]; then
     python3 - "$1" <<'PY_IDENTITY'
@@ -1019,8 +1044,12 @@ PY
     if [ -n "${pid:-}" ]; then
       stop_receipt="$(graceful_kill "$pid" "${started_at:-}")"
     elif [ "$dept_windows" = 1 ]; then
-      echo "[cys-dept] 부서 프로세스를 확인하지 못했습니다. 팀 정보를 유지합니다." >&2
-      exit 9
+      # 신원 불명: 파이프가 없고 기록된 pid도 없을 때만 "이미 종료"(크래시 부서)로 정리. 그 외 = 기존 거부(exit 9).
+      if [ "$(dept_pipe_present "$sock" | tr -d '\r')" != absent ] || { [ -n "$name" ] && dept_recorded_pid_alive "$name"; }; then
+        echo "[cys-dept] 부서 프로세스를 확인하지 못했습니다. 팀 정보를 유지합니다." >&2
+        exit 9
+      fi
+      echo "[cys-dept] 부서가 이미 종료되어 있어 정리했습니다 (등록 정보와 묘비만 정리, 팀 폴더는 그대로 둡니다)" >&2
     fi
     rm -f "$sock" "$sock.lock" 2>/dev/null || true
     # ★R7: 묘비 선기록(순서 통일 — down verb·GUI 제1행위와 동일 축)

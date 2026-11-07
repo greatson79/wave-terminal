@@ -120,19 +120,80 @@ try: print('present' if name in os.listdir('\\\\.\\pipe\\') else 'absent')
 except Exception: print('present')
 PY_PIPE
 }
+# 프로세스 생성 시각(epoch 초) | none(그 pid 없음) | unknown(판정 불가=살아 있음 취급). Windows 전용(크래시 부서 검증).
+dept_proc_start(){
+  python3 - "$1" <<'PY_PROC'
+import ctypes,sys
+from ctypes import wintypes
+try:
+    k=ctypes.WinDLL('kernel32',use_last_error=True)
+    k.OpenProcess.restype=wintypes.HANDLE
+    h=k.OpenProcess(0x1000,False,int(sys.argv[1]))   # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        print('none' if ctypes.get_last_error()==87 else 'unknown'); sys.exit(0)   # 87=ERROR_INVALID_PARAMETER(없는 pid)
+    code=wintypes.DWORD(); c=wintypes.FILETIME(); e=wintypes.FILETIME(); a=wintypes.FILETIME(); b=wintypes.FILETIME()
+    ok=k.GetExitCodeProcess(h,ctypes.byref(code)) and k.GetProcessTimes(h,ctypes.byref(c),ctypes.byref(e),ctypes.byref(a),ctypes.byref(b))
+    k.CloseHandle(h)
+    if not ok: print('unknown')
+    elif code.value!=259: print('none')           # STILL_ACTIVE 아님 = 종료됨
+    else: print(((c.dwHighDateTime<<32|c.dwLowDateTime)//10000000)-11644473600)
+except Exception: print('unknown')
+PY_PROC
+}
+# 레지스트리에 기록된 pid(pids: [{pid,start}] 신형 · [정수] 구형)가 "우리 것으로 살아 있으면" 0. 판정 불가=살아 있음(fail-closed).
+# 신형: 같은 pid여도 생성 시각이 다르면(pid 재사용) 우리 것이 아님=죽음. 구형(start 없음): pid가 살아 있으면 거부. 절대 kill 안 함.
+DEPT_PID_START_SLACK=30
+# PID 기록 없는(0.3.2 이전) 부서 전용 추가 가드 — 감지 전용(절대 kill 안 함). 레지스트리에 pids가 있으면 "yes".
+dept_has_pids(){
+  python3 - "$(native_path "$REG")" "$1" <<'PY_HAS'
+import json,sys
+try: print('yes' if json.load(open(sys.argv[1])).get('depts',{}).get(sys.argv[2],{}).get('pids') else 'no')
+except Exception: print('yes')   # 읽기 실패는 기록 있음으로 취급 → 이 가드를 쓰지 않고 pid 검사로 fail-closed
+PY_HAS
+}
+# 명령줄에 부서 런타임 키(cys-dept-<name>)나 부서 폴더가 들어 있는 살아 있는 프로세스를 "pid<TAB>이미지명"으로 출력(감지만).
+# 자기 자신(cys-dept 스크립트·스캔용 powershell)은 제외. 스캔 실패는 "unknown" 한 줄(=발견으로 취급·fail-closed).
+dept_scan_procs(){
+  python3 - "$@" <<'PY_SCAN'
+import csv,io,subprocess,sys
+keys=[k.lower() for k in sys.argv[1:] if k]
+ps='Get-CimInstance Win32_Process | ForEach-Object { "{0}`t{1}`t{2}" -f $_.ProcessId,$_.Name,$_.CommandLine }'
+try:
+    out=subprocess.run(['powershell.exe','-NoProfile','-NonInteractive','-Command',ps],capture_output=True,text=True,
+                       encoding='utf-8',errors='replace',timeout=30,stdin=subprocess.DEVNULL)
+    if out.returncode: raise RuntimeError
+except Exception:
+    print('unknown\t'); sys.exit(0)
+for line in out.stdout.splitlines():
+    f=line.rstrip('\r').split('\t',2)
+    if len(f)<3: continue
+    cl=f[2].lower().replace('\\','/')
+    if 'bin/cys-dept' in cl or 'get-ciminstance win32_process' in cl: continue
+    if any(k.replace('\\','/') in cl for k in keys): print('%s\t%s'%(f[0],f[1]))
+PY_SCAN
+}
 dept_recorded_pid_alive(){
-  local pid
-  for pid in $(python3 - "$(native_path "$REG")" "$1" <<'PY_PIDS'
+  local pid start cur
+  while IFS=$'\t' read -r pid start; do
+    pid="${pid%$'\r'}"; start="${start%$'\r'}"
+    case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+    if [ -z "$start" ]; then
+      tasklist /FI "PID eq $pid" /FO CSV /NH 2>/dev/null | grep -q "\"$pid\"" && return 0
+      continue
+    fi
+    cur="$(dept_proc_start "$pid" | tr -d '\r')"
+    case "$cur" in none) continue ;; ''|*[!0-9]*) return 0 ;; esac
+    [ "$(( cur > start ? cur - start : start - cur ))" -le "$DEPT_PID_START_SLACK" ] && return 0
+  done < <(python3 - "$(native_path "$REG")" "$1" <<'PY_PIDS'
 import json,sys
 try: e=json.load(open(sys.argv[1])).get('depts',{}).get(sys.argv[2],{})
-except Exception: print('x'); sys.exit(0)
-for v in e.get('pids',[]): print(v if isinstance(v,int) else 'x')
+except Exception: print('x\t'); sys.exit(0)
+for v in e.get('pids',[]):
+    if isinstance(v,dict) and isinstance(v.get('pid'),int) and isinstance(v.get('start'),int): print('%d\t%d'%(v['pid'],v['start']))
+    elif isinstance(v,int): print('%d\t'%v)
+    else: print('x\t')
 PY_PIDS
-); do
-    pid="${pid%$'\r'}"
-    case "$pid" in ''|*[!0-9]*) return 0 ;; esac
-    tasklist /FI "PID eq $pid" /FO CSV /NH 2>/dev/null | grep -q "\"$pid\"" && return 0
-  done
+)
   return 1
 }
 daemon_identity(){
@@ -475,6 +536,31 @@ try:
 finally: _ulk(lf)
 PY
 }
+# reg_set_pids: 가동 확인된 부서 데몬의 pid+프로세스 시작 시각을 엔트리에 기록(크래시 부서 정리 검증용). best-effort.
+reg_set_pids(){
+  local pid started_at
+  IFS=$'\t' read -r pid started_at <<<"$(daemon_identity "$2" 2>/dev/null || true)" || true; started_at="${started_at%$'\r'}"
+  case "$pid$started_at" in ''|*[!0-9]*) echo "[cys-dept] WARN: $1 데몬 pid 기록 실패(신원 미확인)" >&2; return 0 ;; esac
+  reg_init; python3 - "$(native_path "$REG")" "$1" "$pid" "$started_at" <<'PY'
+import json,sys,os
+try:
+    import fcntl
+    def _lk(f): fcntl.flock(f, fcntl.LOCK_EX)
+except ImportError:
+    import msvcrt
+    def _lk(f):
+        try: msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+        except OSError: pass
+p,n,pid,start=sys.argv[1:5]
+lf=open(p+'.lock','w'); _lk(lf)
+d=json.load(open(p)); e=d.get('depts',{}).get(n)
+if e is not None:
+    e['pids']=[{'pid':int(pid),'start':int(start)}]
+    tmp=p+'.tmp.%d'%os.getpid()
+    with open(tmp,'w') as f: json.dump(d,f,ensure_ascii=False,indent=2); f.flush(); os.fsync(f.fileno())
+    os.replace(tmp,p)
+PY
+}
 
 # 부서 데몬 ACL 시드 — external(CEO·오너셸)→worker 차단. fail-closed: 없으면 격리 붕괴이므로 항상 시드.
 seed_acl(){
@@ -746,6 +832,7 @@ PY
       # 기동 실패 시 reg_upsert 롤백 — 유령 부서(데몬 없는 레지스트리 항목) 잔류 방지
       ready "$sock" || { reg_remove "$name"; echo "[cys-dept] ERROR: $name 데몬 기동 실패"; exit 1; }
     fi
+    reg_set_pids "$name" "$sock"
     seed_schedule "$pack"   # owner-progress-report 제거(부서는 최상위 보고 안 함) — 데몬 30초 핫리로드로 반영
     ceo_promote
     dept_tombstone_remove "$name"   # WP-3·R6ⓒ: 재기동 성공 = 재생성 의도 확정 → 묘비 해소(rotate는 내부 가드로 no-op)
@@ -826,6 +913,7 @@ PY
       disown
       ready "$sock" || { reg_remove "$name"; echo "[cys-dept] ERROR: $name 데몬 기동 실패" >&2; exit 1; }
     fi
+    reg_set_pids "$name" "$sock"
     # ★데몬 up 확정 후 실패 trap을 풀teardown(kill+소켓+reg)으로 업그레이드 — 이후 단계 set -e 종료 시 orphan 0.
     trap '"$0" down "$name" >/dev/null 2>&1 || true' EXIT
     seed_schedule "$pack"
@@ -965,6 +1053,7 @@ PY
       disown
       ready "$sock" || { if [ "$verb" = "NEW" ]; then reg_remove "$name"; fi; echo "[cys-dept] ERROR: $name 데몬 기동 실패" >&2; exit 1; }
     fi
+    reg_set_pids "$name" "$sock"
     # ★R3.1(CSO·codex R3-REG-SET-META-ORPHAN): 데몬 up 확정 후 실패 trap을 풀teardown(down=kill+소켓+reg)으로 업그레이드.
     #   이후 reg_set_meta fail-closed/시드/각성에서 set -e 종료해도 이미 뜬 데몬 orphan 0. NEW·REUSE_DEAD 공통.
     trap '"$0" down "$name" >/dev/null 2>&1 || true' EXIT
@@ -1048,6 +1137,13 @@ PY
       if [ "$(dept_pipe_present "$sock" | tr -d '\r')" != absent ] || { [ -n "$name" ] && dept_recorded_pid_alive "$name"; }; then
         echo "[cys-dept] 부서 프로세스를 확인하지 못했습니다. 팀 정보를 유지합니다." >&2
         exit 9
+      fi
+      if [ "$(dept_has_pids "$name" | tr -d '\r')" = no ]; then
+        alive_procs="$(dept_scan_procs "cys-dept-$name" "$(native_path "$(dept_pack "$name")")" | tr -d '\r' | head -3 | tr '\t\n' ' :')"
+        if [ -n "$alive_procs" ]; then
+          echo "[cys-dept] 부서와 관련된 프로세스가 아직 살아 있습니다(pid ${alive_procs}). 팀 정보를 유지합니다." >&2
+          exit 9
+        fi
       fi
       echo "[cys-dept] 부서가 이미 종료되어 있어 정리했습니다 (등록 정보와 묘비만 정리, 팀 폴더는 그대로 둡니다)" >&2
     fi

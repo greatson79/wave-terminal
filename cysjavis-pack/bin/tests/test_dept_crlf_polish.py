@@ -27,7 +27,7 @@ class CrlfTests(unittest.TestCase):
 
     def test_daemon_identity_started_at_has_no_trailing_cr(self):
         lines = re.findall(r"^ *IFS=\$'\\t' read -r pid started_at <<<.*$", SOURCE, re.M)
-        self.assertEqual(len(lines), 3)
+        self.assertEqual(len(lines), 4)
         for line in lines:
             with self.subTest(line=line.strip()[:60]):
                 program = ("daemon_identity(){ printf '101\\t1793966400\\r\\n'; }\nsock=s\n" + line +

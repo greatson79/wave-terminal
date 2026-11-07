@@ -121,7 +121,7 @@ pub(super) fn capture(cli: &Path, daemon: &Path) -> Result<Value, String> {
     if (old_loaded && old_xml.is_none()) || (new_loaded && new_xml.is_none()) {
         return Err("실행 중인 자동 시작 등록의 원본 파일이 없어 이관을 보류합니다.".into());
     }
-    let links = capture_links(base)?;
+    let links = capture_links(base, None)?;
     let mut nonce = [0u8; 16];
     getrandom::getrandom(&mut nonce).map_err(|e| format!("이관 식별자 생성 실패: {e}"))?;
     let attempt_id: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
@@ -146,26 +146,43 @@ fn bin_directories() -> Result<[PathBuf; 2], String> {
     #[cfg(not(test))] { Ok(["/opt/homebrew/bin".into(), "/usr/local/bin".into()]) }
 }
 
-fn capture_links(base: &Path) -> Result<Vec<Value>, String> {
+/// Design §40: a bin directory is managed only when it exists and already links to this bundle. Migration adds
+/// only the missing canonical names there and never creates a directory; the explicit menu install (`requested`)
+/// may create its directory and all four names. A foreign entry blocks only where a link would be created.
+fn capture_links(base: &Path, requested: Option<&Path>) -> Result<Vec<Value>, String> {
+    enum Entry { Missing, Ours(PathBuf), Foreign(&'static str) }
     let mut links = Vec::new();
     for directory in bin_directories()? {
+        let requested_here = requested == Some(directory.as_path());
+        let mut entries = Vec::new();
         for name in ["cys", "cysd", "wave", "waved"] {
             let path = directory.join(name);
-            let previous = match path.symlink_metadata() {
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            let entry = match path.symlink_metadata() {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Entry::Missing,
                 Ok(meta) if meta.file_type().is_symlink() => {
                     let target = std::fs::read_link(&path).map_err(|e| format!("명령 연결 확인 실패: {e}"))?;
                     let same_kind = if ["cys", "wave"].contains(&name) { ["cys", "wave"] } else { ["cysd", "waved"] };
-                    if !same_kind.iter().any(|n| target == base.join(n)) {
-                        return Err(format!("사용자 명령 연결을 유지하기 위해 이관을 보류합니다: {}", path.display()));
-                    }
-                    Some(target)
+                    if same_kind.iter().any(|n| target == base.join(n)) { Entry::Ours(target) }
+                    else { Entry::Foreign("사용자 명령 연결을 유지하기 위해 이관을 보류합니다") }
                 }
-                Ok(_) => return Err(format!("기존 일반 파일을 덮어쓰지 않습니다: {}", path.display())),
+                Ok(_) => Entry::Foreign("기존 일반 파일을 덮어쓰지 않습니다"),
                 Err(e) => return Err(format!("명령 연결 확인 실패: {e}")),
             };
-            let after = previous.clone().unwrap_or_else(|| base.join(name));
-            links.push(json!({"path":path,"before":previous,"after":after}));
+            entries.push((name, path, entry));
+        }
+        if !requested_here && !entries.iter().any(|(_, _, e)| matches!(e, Entry::Ours(_))) { continue; }
+        for (name, path, entry) in entries {
+            let create = requested_here || ["wave", "waved"].contains(&name);
+            match entry {
+                Entry::Ours(target) => links.push(json!({"path":path,"before":target,"after":target})),
+                Entry::Missing if create => {
+                    let mut link = json!({"path":path,"before":null,"after":base.join(name)});
+                    if !directory.exists() { link["create_directory"] = json!(true); }
+                    links.push(link);
+                }
+                Entry::Foreign(reason) if create => return Err(format!("{reason}: {}", path.display())),
+                Entry::Missing | Entry::Foreign(_) => {}
+            }
         }
     }
     Ok(links)
@@ -184,7 +201,8 @@ pub(super) fn repair_cli_links(cli: &Path, daemon: &Path) -> Result<(), String> 
         || daemon.file_name().and_then(|n| n.to_str()) != Some("waved") {
         return Err("동일 앱의 정식 wave/waved 경로가 필요합니다.".into());
     }
-    let captured = capture_links(base)?;
+    let requested = bin_directories()?[1].clone();
+    let captured = capture_links(base, Some(&requested))?;
     if captured.iter().all(|link| !link["before"].is_null()) { return Ok(()); }
     let mut nonce = [0u8; 16];
     getrandom::getrandom(&mut nonce).map_err(|e| format!("명령 연결 식별자 생성 실패: {e}"))?;
@@ -235,8 +253,9 @@ fn link_script(snapshot: &Value, action: &str) -> Result<String, String> {
         }
         let directory = Path::new(path).parent().unwrap().to_str().ok_or("명령 폴더 경로 오류")?;
         if action == "stage" {
-            script.push_str(&format!("[ ! -e {p} ] && [ ! -L {p} ] || exit 1\n/bin/mkdir -p {d}\nq=$(/usr/bin/mktemp -d {template})\n/bin/chmod 700 \"$q\"\n/bin/ln -s {v} \"$q/entry\"\nr=$(/usr/bin/stat -f '%d:%i' \"$q/entry\")\nprintf '%s{{\"index\":{index},\"stage\":\"%s/entry\",\"inode\":\"%s\"}}' \"$comma\" \"$q\" \"$r\"\ncomma=','\n",
-                d=quote(directory), template=quote(&format!("{directory}/.wave-stage-{attempt}.XXXXXXXX"))));
+            let mkdir = if link["create_directory"] == true { format!("/bin/mkdir -p {}\n", quote(directory)) } else { String::new() };
+            script.push_str(&format!("[ ! -e {p} ] && [ ! -L {p} ] || exit 1\n{mkdir}q=$(/usr/bin/mktemp -d {template})\n/bin/chmod 700 \"$q\"\n/bin/ln -s {v} \"$q/entry\"\nr=$(/usr/bin/stat -f '%d:%i' \"$q/entry\")\nprintf '%s{{\"index\":{index},\"stage\":\"%s/entry\",\"inode\":\"%s\"}}' \"$comma\" \"$q\" \"$r\"\ncomma=','\n",
+                template=quote(&format!("{directory}/.wave-stage-{attempt}.XXXXXXXX"))));
             continue;
         }
         let Some(stage) = link["stage"].as_str() else {
@@ -271,10 +290,23 @@ fn link_script(snapshot: &Value, action: &str) -> Result<String, String> {
 }
 
 fn links(snapshot: &Value, action: &str) -> Result<String, String> {
+    // Design §40 / G3: nothing to create → never ask for the administrator password; re-verify in-process.
+    let entries = snapshot["links"].as_array().ok_or("명령 연결 기록이 없습니다.")?;
+    if entries.iter().all(|link| !link["before"].is_null()) {
+        for link in entries {
+            let path = Path::new(link["path"].as_str().ok_or("명령 연결 경로 오류")?);
+            let before = link["before"].as_str().ok_or("명령 연결 기록 오류")?;
+            if link["after"].as_str() != Some(before) || std::fs::read_link(path).ok().as_deref() != Some(Path::new(before)) {
+                return Err(format!("명령 연결이 확인 중 바뀌어 기존 연결을 유지합니다: {}", path.display()));
+            }
+        }
+        return Ok("[]".into());
+    }
     #[cfg(test)] {
         let _ = action;
         return TEST_SANDBOX.with(|sandbox| {
             if sandbox.borrow().is_none() { return Err("explicit validated sandbox root required".into()); }
+            sandbox.borrow_mut().as_mut().unwrap().privileged_calls += 1;
             if !snapshot["links"].as_array().is_some_and(|links| links.is_empty()) {
                 return Err("테스트에서는 실제 명령 연결 도구를 실행하지 않습니다.".into());
             }
@@ -634,6 +666,8 @@ struct Sandbox {
     active_handover: bool,
     /// Test seam: another actor loads the canonical label right after this attempt publishes its plist.
     foreign_load_after_publish: bool,
+    /// Calls that would run the administrator-privileged link tool (counted, never executed in tests).
+    privileged_calls: usize,
 }
 
 #[cfg(test)]
@@ -705,14 +739,17 @@ mod tests {
     struct LinkFixture(PathBuf);
     impl LinkFixture {
         fn new() -> Self {
-            let root = validated_sandbox_root(std::env::var_os("WAVE_TEST_ROOT")).expect("reviewed explicit private root required");
+            Self::try_new(std::env::var_os("WAVE_TEST_ROOT")).expect("reviewed explicit private root required")
+        }
+        fn try_new(raw: Option<std::ffi::OsString>) -> Result<Self, String> {
+            let root = validated_sandbox_root(raw)?;
             let fixture = private_directory(&root).unwrap();
             TEST_SANDBOX.with(|sandbox| *sandbox.borrow_mut() = Some(Sandbox {
                 root:fixture.clone(), jobs:std::collections::HashMap::new(), commands:vec![],
-                owners:0, peak_owners:0, active_handover:false, foreign_load_after_publish:false,
+                owners:0, peak_owners:0, active_handover:false, foreign_load_after_publish:false, privileged_calls:0,
             }));
             for directory in bin_directories().unwrap() { std::fs::create_dir(directory).unwrap(); }
-            Self(fixture)
+            Ok(Self(fixture))
         }
     }
     impl Drop for LinkFixture {
@@ -720,6 +757,145 @@ mod tests {
             TEST_SANDBOX.with(|s| *s.borrow_mut() = None);
             std::fs::remove_dir_all(&self.0).unwrap();
         }
+    }
+
+    // ---- Q1 (design §40): C9 controls first, then policy tests ----
+    #[test]
+    fn link_fixture_refuses_unset_and_real_bin_directories_before_io() {
+        let real = [["/opt/homebrew", "/bin"].concat(), ["/usr/local", "/bin"].concat(), "/Applications".to_string()];
+        assert!(LinkFixture::try_new(None).is_err());
+        for raw in real { assert!(LinkFixture::try_new(Some(raw.into())).is_err()); }
+        TEST_SANDBOX.with(|s| assert!(s.borrow().is_none(), "a refused root installs no sandbox"));
+    }
+
+    #[test]
+    fn test_module_names_real_bin_directories_only_in_refusal_lists() {
+        let src = include_str!("rename_migration_macos.rs");
+        let tests = &src[src.find("#[cfg(test)]\nmod tests {").expect("test module")..];
+        let (brew, local) = (["/opt/homebrew", "/bin"].concat(), ["/usr/local", "/bin"].concat());
+        for line in tests.lines().filter(|l| l.contains(&brew) || l.contains(&local)) {
+            assert!(line.contains("for path in ["), "real bin directory outside a refusal list: {line}");
+        }
+    }
+
+    fn planned(links: &[Value]) -> Vec<String> {
+        let mut names: Vec<String> = links.iter().filter(|l| l["before"].is_null()).map(|l| {
+            let p = Path::new(l["path"].as_str().unwrap());
+            format!("{}/{}", p.parent().unwrap().file_name().unwrap().to_str().unwrap(), p.file_name().unwrap().to_str().unwrap())
+        }).collect();
+        names.sort();
+        names
+    }
+
+    fn privileged_calls() -> usize { TEST_SANDBOX.with(|s| s.borrow().as_ref().unwrap().privileged_calls) }
+
+    #[test]
+    fn capture_skips_a_bin_directory_without_managed_links() {
+        let fixture = LinkFixture::new();
+        let base = fixture.0.join("bundle");
+        let [a, b] = bin_directories().unwrap();
+        std::os::unix::fs::symlink(base.join("cys"), a.join("cys")).unwrap();
+        let links = capture_links(&base, None).unwrap();
+        assert_eq!(planned(&links), ["bin-a/wave", "bin-a/waved"]);
+        assert!(links.iter().all(|l| Path::new(l["path"].as_str().unwrap()).parent() != Some(b.as_path())));
+        assert_eq!(std::fs::read_dir(&b).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn capture_never_plans_into_a_missing_directory_and_migration_never_mkdirs() {
+        let fixture = LinkFixture::new();
+        let base = fixture.0.join("bundle");
+        let [a, b] = bin_directories().unwrap();
+        std::fs::remove_dir(&b).unwrap();
+        std::os::unix::fs::symlink(base.join("cys"), a.join("cys")).unwrap();
+        let links = capture_links(&base, None).unwrap();
+        assert_eq!(planned(&links), ["bin-a/wave", "bin-a/waved"]);
+        let snapshot = json!({"daemon":base.join("waved"), "attempt_id":"0123456789abcdef0123456789abcdef", "links":links});
+        assert!(!link_script(&snapshot, "stage").unwrap().contains("/bin/mkdir"));
+        assert!(!b.exists());
+    }
+
+    #[test]
+    fn no_managed_links_means_no_plan_and_no_privileged_call() {
+        let fixture = LinkFixture::new();
+        let base = fixture.0.join("bundle");
+        let links = capture_links(&base, None).unwrap();
+        assert!(links.is_empty(), "{links:?}");
+        let mut snapshot = json!({"daemon":base.join("waved"), "attempt_id":"0123456789abcdef0123456789abcdef", "links":links});
+        prepare_links(&mut snapshot, &mut |_| Ok(())).unwrap();
+        assert_eq!(privileged_calls(), 0, "nothing to create must not ask for the administrator password");
+    }
+
+    #[test]
+    fn all_links_present_are_verified_without_privilege() {
+        let fixture = LinkFixture::new();
+        let base = fixture.0.join("bundle");
+        for directory in bin_directories().unwrap() {
+            for name in ["cys", "cysd", "wave", "waved"] { std::os::unix::fs::symlink(base.join(name), directory.join(name)).unwrap(); }
+        }
+        let links = capture_links(&base, None).unwrap();
+        assert!(planned(&links).is_empty());
+        let mut snapshot = json!({"daemon":base.join("waved"), "attempt_id":"0123456789abcdef0123456789abcdef", "links":links});
+        prepare_links(&mut snapshot, &mut |_| Ok(())).unwrap();
+        assert_eq!(privileged_calls(), 0);
+        // A link changed after capture is a visible conflict, still without the privileged tool.
+        let changed = bin_directories().unwrap()[0].join("wave");
+        std::fs::remove_file(&changed).unwrap();
+        std::os::unix::fs::symlink(fixture.0.join("foreign/wave"), &changed).unwrap();
+        let mut snapshot = json!({"daemon":base.join("waved"), "attempt_id":"0123456789abcdef0123456789abcdef", "links":capture_links_unchecked(&base)});
+        assert!(prepare_links(&mut snapshot, &mut |_| Ok(())).is_err());
+        assert_eq!(privileged_calls(), 0);
+    }
+
+    fn capture_links_unchecked(base: &Path) -> Vec<Value> {
+        let mut links = Vec::new();
+        for directory in bin_directories().unwrap() {
+            for name in ["cys", "cysd", "wave", "waved"] {
+                links.push(json!({"path":directory.join(name),"before":base.join(name),"after":base.join(name)}));
+            }
+        }
+        links
+    }
+
+    #[test]
+    fn managed_directory_adds_only_canonical_names() {
+        let fixture = LinkFixture::new();
+        let base = fixture.0.join("bundle");
+        let [a, b] = bin_directories().unwrap();
+        for name in ["cys", "cysd"] { std::os::unix::fs::symlink(base.join(name), a.join(name)).unwrap(); }
+        std::os::unix::fs::symlink(base.join("wave"), b.join("wave")).unwrap();
+        assert_eq!(planned(&capture_links(&base, None).unwrap()), ["bin-a/wave", "bin-a/waved", "bin-b/waved"]);
+    }
+
+    #[test]
+    fn foreign_entry_blocks_only_where_a_link_would_be_created() {
+        let fixture = LinkFixture::new();
+        let base = fixture.0.join("bundle");
+        let [a, b] = bin_directories().unwrap();
+        std::os::unix::fs::symlink(base.join("cys"), a.join("cys")).unwrap();
+        std::fs::write(b.join("wave"), "another tool").unwrap(); // unmanaged directory: never touched, never blocks
+        assert_eq!(planned(&capture_links(&base, None).unwrap()), ["bin-a/wave", "bin-a/waved"]);
+        assert_eq!(std::fs::read_to_string(b.join("wave")).unwrap(), "another tool");
+        std::fs::write(a.join("wave"), "user command").unwrap(); // managed directory + planned name: visible conflict
+        let inode = inode_at(&a.join("wave")).unwrap();
+        assert!(capture_links(&base, None).unwrap_err().contains("일반 파일"));
+        assert_eq!(inode_at(&a.join("wave")).unwrap(), inode);
+        assert_eq!(privileged_calls(), 0);
+    }
+
+    #[test]
+    fn menu_install_creates_all_four_names_in_the_requested_directory_only() {
+        let fixture = LinkFixture::new();
+        let base = fixture.0.join("bundle");
+        let [_, b] = bin_directories().unwrap();
+        let links = capture_links(&base, Some(&b)).unwrap();
+        assert_eq!(planned(&links), ["bin-b/cys", "bin-b/cysd", "bin-b/wave", "bin-b/waved"]);
+        std::fs::remove_dir(&b).unwrap(); // requested and missing: only the menu path may create it
+        let links = capture_links(&base, Some(&b)).unwrap();
+        let snapshot = json!({"daemon":base.join("waved"), "attempt_id":"0123456789abcdef0123456789abcdef", "links":links});
+        let script = link_script(&snapshot, "stage").unwrap();
+        assert!(script.contains(&format!("/bin/mkdir -p {}", quote(b.to_str().unwrap()))));
+        assert_eq!(script.matches("/bin/mkdir").count(), 4);
     }
 
     #[test]
@@ -749,11 +925,11 @@ mod tests {
         let existing = bin_directories().unwrap()[0].join("cys");
         std::os::unix::fs::symlink(base.join("wave"), &existing).unwrap();
         let before = existing.symlink_metadata().unwrap().ino();
-        let links = capture_links(&base).unwrap();
-        assert_eq!(links.len(), 8);
+        let links = capture_links(&base, None).unwrap();
+        assert_eq!(links.len(), 3); // design §40: kept cys + missing canonical wave, waved in the managed directory only
         let kept = links.iter().find(|link| link["path"].as_str() == existing.to_str()).unwrap();
         assert_eq!(kept["before"], kept["after"]);
-        assert_eq!(links.iter().filter(|link| link["before"].is_null()).count(), 7);
+        assert_eq!(links.iter().filter(|link| link["before"].is_null()).count(), 2);
         assert_eq!(existing.symlink_metadata().unwrap().ino(), before);
         assert_eq!(std::fs::read_link(existing).unwrap(), base.join("wave"));
         let snapshot = json!({"daemon":base.join("waved"), "attempt_id":"0123456789abcdef0123456789abcdef", "links":links});
@@ -765,7 +941,7 @@ mod tests {
     fn standalone_cli_link_repair_refuses_handover_and_preserves_foreign_file() {
         let fixture = LinkFixture::new();
         let base = fixture.0.join("bundle");
-        let file = bin_directories().unwrap()[0].join("wave");
+        let file = bin_directories().unwrap()[1].join("wave"); // the menu's requested directory
         std::fs::write(&file, "user command").unwrap();
         let inode = inode_at(&file).unwrap();
         TEST_SANDBOX.with(|sandbox| sandbox.borrow_mut().as_mut().unwrap().active_handover = true);
@@ -856,7 +1032,7 @@ mod tests {
         TEST_SANDBOX.with(|sandbox| *sandbox.borrow_mut() = Some(Sandbox {
             root:fixture.clone(), jobs:std::collections::HashMap::from([
                 (cys::launchd::LEGACY_LAUNCHD_LABEL.into(), json!({"kind":"idle","definition":"sandbox-old"}))]),
-            commands:vec![], owners:0, peak_owners:0, active_handover:false, foreign_load_after_publish:false,
+            commands:vec![], owners:0, peak_owners:0, active_handover:false, foreign_load_after_publish:false, privileged_calls:0,
         }));
         let (old, new) = paths();
         std::fs::write(&old, "captured-old-registration").unwrap();
@@ -911,7 +1087,7 @@ mod tests {
             TEST_SANDBOX.with(|sandbox| *sandbox.borrow_mut() = Some(Sandbox {
                 root:fixture.clone(), jobs:std::collections::HashMap::from([
                     (cys::launchd::LEGACY_LAUNCHD_LABEL.into(), json!({"kind":"idle","definition":"sandbox-old"}))]),
-                commands:vec![], owners:0, peak_owners:0, active_handover:false, foreign_load_after_publish,
+                commands:vec![], owners:0, peak_owners:0, active_handover:false, foreign_load_after_publish, privileged_calls:0,
             }));
             let (old, _) = paths();
             std::fs::write(&old, "captured-old-registration").unwrap();

@@ -15,7 +15,8 @@ BASH = os.environ.get("CYS_TEST_BASH", "bash")
 class DepartmentPathTests(unittest.TestCase):
     def test_registry_readers_keep_windows_escape_sequences_as_data(self):
         source = DEPT.read_text(encoding="utf-8")
-        definitions = "\n".join(re.findall(r"^reg_(?:count|names)\(\).*", source, re.M))
+        boundary = source.split("# HOTFIX-PYTHON-BOUNDARY-BEGIN", 1)[1].split("# HOTFIX-PYTHON-BOUNDARY-END", 1)[0]
+        definitions = boundary + "\n" + "\n".join(re.findall(r"^reg_(?:count|names)\(\).*", source, re.M))
         for path in [r"C:\Users\최형석\내 팀\depts.json", r"D:\a\최형석\depts.json", "registry ' quoted.json"]:
             with self.subTest(path=path), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
@@ -44,11 +45,28 @@ class DepartmentPathTests(unittest.TestCase):
             (root / "python3").write_text("#!/bin/sh\nprintf '%s\\n' \"$MSYS2_ARG_CONV_EXCL\" \"$@\"\n", encoding="utf-8")
             for executable in root.iterdir(): executable.chmod(0o700)
             code = "import json; print('not a /c/path')"
-            program = boundary + '\npython3 -c "$TEST_CODE" /c/Users/최형석/내\\ 팀/depts.json "\\\\\\\\.\\\\pipe\\\\cys-dept-dept-1"\n'
+            program = boundary + '\npython3 -c "$TEST_CODE" "$(native_path "/c/Users/최형석/내 팀/depts.json")" "\\\\\\\\.\\\\pipe\\\\cys-dept-dept-1"\n'
             result = subprocess.run([BASH, "-c", program], env={**os.environ, "PATH": str(root)+os.pathsep+os.environ.get("PATH", ""), "TEST_CODE":code},
                                     text=True, encoding="utf-8", capture_output=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.splitlines(), ["*", "-c", code, "C:/Users/최형석/내 팀/depts.json", r"\\.\pipe\cys-dept-dept-1"])
+
+    def test_non_path_slash_arguments_are_not_converted_on_windows(self):
+        # RED guard: a '/'-leading argument that is not a path (regex, option value, display name)
+        # must reach native Python untouched; only callers that pass a path convert it explicitly.
+        source = DEPT.read_text(encoding="utf-8")
+        boundary = source.split("# HOTFIX-PYTHON-BOUNDARY-BEGIN", 1)[1].split("# HOTFIX-PYTHON-BOUNDARY-END", 1)[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "uname").write_text("#!/bin/sh\nprintf 'MINGW64_NT\\n'\n", encoding="utf-8")
+            (root / "cygpath").write_text("#!/bin/sh\nprintf 'C:/%s\\n' \"${2#/c/}\"\n", encoding="utf-8")
+            (root / "python3").write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n", encoding="utf-8")
+            for executable in root.iterdir(): executable.chmod(0o700)
+            program = boundary + '\npython3 /x /regex/i --opt=/y "/Team Name" "$(native_path /c/Users/a/depts.json)"\n'
+            result = subprocess.run([BASH, "-c", program], env={**os.environ, "PATH": str(root)+os.pathsep+os.environ.get("PATH", "")},
+                                    text=True, encoding="utf-8", capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.splitlines(), ["/x", "/regex/i", "--opt=/y", "/Team Name", "C:/Users/a/depts.json"])
 
 
 if __name__ == "__main__":

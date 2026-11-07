@@ -27,14 +27,11 @@ native_path(){
   if [ "$dept_windows" = 1 ] && [[ "$1" == /* ]]; then cygpath -m "$1"
   else printf '%s\n' "$1"; fi
 }
+# Arguments pass through untouched (MSYS2_ARG_CONV_EXCL stops MSYS from guessing which '/x' is a path);
+# call sites convert the path arguments they own with native_path.
 python3(){
   if [ "$dept_windows" != 1 ]; then command python3 "$@"; return; fi
-  local value converted=()
-  for value in "$@"; do
-    if [[ "$value" == /* ]]; then value="$(native_path "$value")" || return; fi
-    converted+=("$value")
-  done
-  MSYS2_ARG_CONV_EXCL='*' command python3 "${converted[@]}"
+  MSYS2_ARG_CONV_EXCL='*' command python3 "$@"
 }
 # HOTFIX-PYTHON-BOUNDARY-END
 
@@ -76,7 +73,7 @@ dept_tombstone(){
   env -u CYS_SOCKET "$CYS" tombstone "$1" --dept >/dev/null 2>&1 || true
   ph="${CYS_PACK_DIR:-$PACK_DEFAULT}/bin/javis_phoenix.py"
   [ -f "$ph" ] || return 0
-  python3 "$ph" tombstone "$1" --dept >/dev/null 2>&1 || true
+  python3 "$(native_path "$ph")" tombstone "$1" --dept >/dev/null 2>&1 || true
 }
 # ★재생성 묘비 해소(BOOTSTRAP_HARDENING WP-3·R6ⓒ): 삭제된 동명 부서를 다시 만들면 묘비를 해제해야
 # 새 부서가 피닉스 보호집합에 재편입된다(미해소=삭제→재생성 부서가 보호 영구 제외되는 역전 결함).
@@ -93,7 +90,7 @@ dept_tombstone_remove(){
     || echo "[cys-dept] WARN: 데몬 묘비 해소 미확정($1 — base 미도달) — 재시도 필요(잔존 시 재시작에서 부서 reap 위험)" >&2
   ph="${CYS_PACK_DIR:-$PACK_DEFAULT}/bin/javis_phoenix.py"
   [ -f "$ph" ] || return 0
-  python3 "$ph" tombstone "$1" --dept --remove >/dev/null 2>&1 || true
+  python3 "$(native_path "$ph")" tombstone "$1" --dept --remove >/dev/null 2>&1 || true
 }
 
 # RC-15(D7): 부서 로그·상태 디렉토리 — Windows named pipe 소켓(\\.\pipe\...)은 dirname/디렉토리 개념이
@@ -123,11 +120,11 @@ graceful_kill(){
 }
 
 reg_init(){ [ -f "$REG" ] || { mkdir -p "$(dirname "$REG")"; printf '{"depts":{}}\n' > "$REG"; }; }
-reg_count(){ reg_init; python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["depts"]))' "$REG"; }
-reg_names(){ reg_init; python3 -c 'import json,sys;[print(k) for k in json.load(open(sys.argv[1]))["depts"]]' "$REG"; }
+reg_count(){ reg_init; python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["depts"]))' "$(native_path "$REG")"; }
+reg_names(){ reg_init; python3 -c 'import json,sys;[print(k) for k in json.load(open(sys.argv[1]))["depts"]]' "$(native_path "$REG")"; }
 # reg_upsert/reg_remove: 동시 부서 운용 시 lost-update 방지 — fcntl.flock으로 RMW 직렬화 +
 # temp+os.replace 원자 교체(읽는 쪽이 부분 파일을 보지 않음). macOS엔 flock(1) CLI가 없어 python fcntl 사용.
-reg_upsert(){ reg_init; python3 - "$REG" "$1" "$2" "$3" <<'PY'
+reg_upsert(){ reg_init; python3 - "$(native_path "$REG")" "$1" "$2" "$3" <<'PY'
 import json,sys,os
 try:
     import fcntl
@@ -154,7 +151,7 @@ try:
 finally: _ulk(lf)
 PY
 }
-reg_remove(){ reg_init; python3 - "$REG" "$1" <<'PY'
+reg_remove(){ reg_init; python3 - "$(native_path "$REG")" "$1" <<'PY'
 import json,sys,os
 try:
     import fcntl
@@ -180,7 +177,7 @@ PY
 }
 # reg_set_meta: 기존 엔트리에 display_name·account·mission_key 를 merge(socket/pack_dir/role 보존).
 # reg_upsert 시그니처 불변(launch 회귀0) — ＋부서 자동화(cys-dept create)용 신설. flock RMW·원자교체.
-reg_set_meta(){ reg_init; python3 - "$REG" "$1" "$2" "$3" <<'PY'
+reg_set_meta(){ reg_init; python3 - "$(native_path "$REG")" "$1" "$2" "$3" <<'PY'
 import json,sys,os
 try:
     import fcntl
@@ -232,7 +229,7 @@ seed_agents_account(){
   local pk="$1" acct_dir="$2"
   local src="${CYS_PACK_DIR:-$HOME/.cys/pack}/agents.json"
   mkdir -p "$pk"
-  python3 - "$src" "$pk/agents.json" "$acct_dir" <<'PY'
+  python3 - "$(native_path "$src")" "$(native_path "$pk/agents.json")" "$(native_path "$acct_dir")" <<'PY'
 import json,sys,os,re
 src,dst,acct=sys.argv[1:4]
 d=json.load(open(src,encoding="utf-8"))                 # RC-6(T3): Windows cp1252 기본 회피(한글 UTF-8)
@@ -272,7 +269,7 @@ ready(){ local s="$1" i; for i in $(seq 1 120); do CYS_SOCKET="$s" "$CYS" ping >
 resolve_default_base(){
   local acct="$1" cat="${CYS_DEPT_CATALOG:-$HOME/.cys/dept-catalog.json}" b
   if [ -f "$cat" ]; then
-    b="$(python3 - "$cat" "$acct" <<'PY'
+    b="$(python3 - "$(native_path "$cat")" "$acct" <<'PY'
 import json,sys,os
 cat,acct=sys.argv[1:3]
 try: d=json.load(open(cat))
@@ -443,7 +440,7 @@ case "$cmd" in
 esac
 case "$cmd" in
   statusline-all)
-    python3 "${CYS_PACK_DIR:-$PACK_DEFAULT}/bin/javis_preflight.py" --statusline-depts
+    python3 "$(native_path "${CYS_PACK_DIR:-$PACK_DEFAULT}/bin/javis_preflight.py")" --statusline-depts
     if [ -f "$REG" ]; then
       base="$(resolve_default_base "${CYS_DEPT_DEFAULT_ACCOUNT:-default}")" || exit 5
       failed=0
@@ -452,8 +449,8 @@ case "$cmd" in
         case "$name" in ''|*[!a-zA-Z0-9_-]*) continue ;; esac
         target="${base%/}-$name"
         [ -d "$target" ] || continue
-        python3 "${CYS_PACK_DIR:-$PACK_DEFAULT}/bin/javis_preflight.py" --statusline-account "$target" || failed=1
-      done < <(python3 - "$REG" <<'PY'
+        python3 "$(native_path "${CYS_PACK_DIR:-$PACK_DEFAULT}/bin/javis_preflight.py")" --statusline-account "$(native_path "$target")" || failed=1
+      done < <(python3 - "$(native_path "$REG")" <<'PY'
 import json, sys
 for name, meta in json.load(open(sys.argv[1], encoding='utf-8')).get('depts', {}).items():
     if isinstance(meta, dict) and not meta.get('account_dir'):
@@ -485,7 +482,7 @@ PY
   allocate)
     # 번호계산+예약을 단일 flock 블록에 묶어 TOCTOU 제거 — lowest-unused dept-N을 발급·예약(원자).
     # 시나리오2: 레지스트리엔 빠졌어도 소켓을 점유 중인(죽어가는) 데몬 번호는 alive() probe로 skip.
-    name=$(reg_init; python3 - "$REG" <<'PY'
+    name=$(reg_init; python3 - "$(native_path "$REG")" <<'PY'
 import json,sys,os,re,socket as S
 try:
     import fcntl
@@ -590,7 +587,7 @@ PY
     MISS="${CYS_DEPT_MISSIONS:-$HOME/.cys/dept-missions}"
     [ -f "$CAT" ] || { echo "[cys-dept] 카탈로그 부재: $CAT (GUI=레거시 allocate fallback)" >&2; exit 3; }  # fail-closed
     # 카탈로그 조회 + account dir 해석($HOME 전개). 파싱실패/키부재=fail-closed.
-    IFS=$'\t' read -r disp acctkey acctdir mkey cwd < <(python3 - "$CAT" "$key" <<'PY'
+    IFS=$'\t' read -r disp acctkey acctdir mkey cwd < <(python3 - "$(native_path "$CAT")" "$key" <<'PY'
 import json,sys,os
 cat,key=sys.argv[1:3]
 d=json.load(open(cat))                                   # 파싱실패=예외=비0=fail-closed
@@ -609,7 +606,7 @@ PY
     # F3(codex): 멱등검사+예약을 단일 flock 원자. ★같은 mission_key 엔트리=청구됨 → REUSE(데몬 생사 무관·
     #   호출부가 ensure-ready). 신규는 lowest-unused 예약 + ★엔트리에 mission_key 기록(동시/부팅중 다른
     #   create가 즉시 발견 — codex: NEW 엔트리에 mission_key 누락 TOCTOU 해소).
-    res=$(reg_init; CYS_GRACE="${CYS_DEPT_RESERVE_GRACE:-25}" python3 - "$REG" "$mkey" "$cwd" "$acctdir" <<'PY'
+    res=$(reg_init; CYS_GRACE="${CYS_DEPT_RESERVE_GRACE:-25}" python3 - "$(native_path "$REG")" "$mkey" "$(native_path "$cwd")" "$(native_path "$acctdir")" <<'PY'
 import json,sys,os,re,time,socket as S
 try:
     import fcntl
@@ -705,7 +702,7 @@ PY
       "$0" down "$name" >/dev/null 2>&1 || true
       exit 6
     fi
-    if ! python3 "${CYS_PACK_DIR:-$PACK_DEFAULT}/bin/javis_preflight.py" --statusline-account "$acctdir"; then
+    if ! python3 "$(native_path "${CYS_PACK_DIR:-$PACK_DEFAULT}/bin/javis_preflight.py")" --statusline-account "$(native_path "$acctdir")"; then
       echo "[cys-dept] WARN: 사용량 상태줄 등록 실패 — 부서 생성은 계속" >&2
     fi
     trap - EXIT   # 격리 확정 — 이후 빈 셸 생성
@@ -747,7 +744,7 @@ PY
   down-sock)
     # socket 기준 teardown — ws rename으로 name↔socket이 끊겨도 정확히 종료(레지스트리 역인덱스).
     sock="${2:?usage: cys-dept down-sock <socket>}"
-    name=$(reg_init; python3 - "$REG" "$sock" <<'PY'
+    name=$(reg_init; python3 - "$(native_path "$REG")" "$sock" <<'PY'
 import json,sys
 p,s=sys.argv[1:3]
 d=json.load(open(p)).get('depts',{})
@@ -830,7 +827,7 @@ PY
     dry=0; [ "${2:-}" = "--dry" ] && dry=1
     reg_init
     # Phase 1 — flock 직렬화 스냅샷: 레지스트리(name·socket·reserved_at) 일관 덤프(read-only·짧은 락).
-    snap=$(python3 - "$REG" <<'PY'
+    snap=$(python3 - "$(native_path "$REG")" <<'PY'
 import json,sys
 try:
     import fcntl

@@ -55,6 +55,13 @@ jobs:
         run: |
           set -euo pipefail
           export CYS_PACK_DIR="$(mktemp -d)"
+          # C9: tests refuse to run without an injected private root (fail closed) — provision it, never relax it.
+          WAVE_TEST_ROOT="$(mktemp -d /private/tmp/wave-test-XXXXXX)"
+          chmod 700 "$WAVE_TEST_ROOT"
+          export WAVE_TEST_ROOT
+          CYS_DEPT_TEST_ROOT="$(mktemp -d /private/tmp/dept-test-XXXXXX)"
+          printf 'owned-dept-fixture\n' > "$CYS_DEPT_TEST_ROOT/.cys-dept-test-root"
+          export CYS_DEPT_TEST_ROOT
           sh scripts/bundle-prep.sh
           cargo test --workspace -- --test-threads=1 --skip hwmon:: 2>&1 | tee "$RUNNER_TEMP/w3-macos-evidence/cargo-tests.log"
       - name: Measurement and runtime regression tests

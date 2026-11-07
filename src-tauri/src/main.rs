@@ -14,6 +14,7 @@ use tauri_plugin_updater::UpdaterExt;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 mod user_settings;
+mod dept_teardown;
 
 type Stream = Box<dyn AsyncReadWrite>;
 trait AsyncReadWrite: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -1173,23 +1174,9 @@ fn spawn_org_restore(app: AppHandle) {
                     if tombs.contains(name.as_str()) {
                         let mut detail = "삭제-의도 묘비 — 재기동 제외".to_string();
                         if alive {
-                            let _ = stop_dept_daemon_by_socket(
-                                sock.to_string_lossy().to_string(),
-                            )
-                            .await;
-                            // ★R4(D-IMPL-4): teardown 함수는 실패를 삼키므로(무조건 Ok) 재프로브로
-                            // 결과를 가시화 — 여전히 생존이면 WARN 라벨(차회 부팅 재시도가 수렴 경로).
-                            let still = tokio::time::timeout(
-                                std::time::Duration::from_secs(2),
-                                rpc_oneshot(&sock, "system.identify", json!({})),
-                            )
-                            .await
-                            .map(|r| r.is_ok())
-                            .unwrap_or(false);
-                            detail = if still {
-                                "삭제-의도 묘비 — teardown 미확정(WARN·차회 시작 시 재시도)".into()
-                            } else {
-                                "삭제-의도 묘비 — 잔존 데몬 정리 완료".into()
+                            detail = match stop_dept_daemon_by_socket(sock.to_string_lossy().to_string()).await {
+                                Ok(()) => "삭제-의도 묘비 — 잔존 데몬 정리 완료".into(),
+                                Err(error) => format!("삭제-의도 묘비 — 종료 확인 실패(재시도 필요): {error}"),
                             };
                         }
                         let _ = app.emit(
@@ -1923,16 +1910,8 @@ async fn allocate_dept_daemon(app: AppHandle, catalog_key: Option<String>) -> Re
 /// 부서 workspace 닫기 = 부서 데몬 teardown. cys-dept down에 일임(SIGTERM·소켓 정리·레지스트리·CEO 강등).
 #[tauri::command]
 async fn stop_dept_daemon(name: String) -> Result<(), String> {
-    let tool = dept_tool();
-    let _ = tokio::task::spawn_blocking(move || {
-        let mut cmd = std::process::Command::new("bash");
-        inject_runtime_path(&mut cmd); // RC-5: 동봉 runtime(bash.exe) PATH 주입
-        cmd.arg(&tool).arg("down").arg(&name);
-        no_console(&mut cmd);
-        cmd.output()
-    })
-    .await;
-    Ok(())
+    let socket = dept_socket_path(&name);
+    stop_dept_with_proof("down", name, socket).await
 }
 
 /// 부서 레지스트리(depts.json) 조회 — restore가 등록된 부서(진실원)와 대조해 죽은 socket의 유령 ws를
@@ -2102,16 +2081,32 @@ async fn start_dept_master(socket: String) -> Result<(), String> {
 /// cys-dept down-sock에 일임(레지스트리 역인덱스로 부서명 해석 후 teardown).
 #[tauri::command]
 async fn stop_dept_daemon_by_socket(socket: String) -> Result<(), String> {
-    let tool = dept_tool();
-    let _ = tokio::task::spawn_blocking(move || {
-        let mut cmd = std::process::Command::new("bash");
-        inject_runtime_path(&mut cmd); // RC-5: 동봉 runtime(bash.exe) PATH 주입
-        cmd.arg(&tool).arg("down-sock").arg(&socket);
-        no_console(&mut cmd);
-        cmd.output()
-    })
-    .await;
-    Ok(())
+    let path = std::path::PathBuf::from(&socket);
+    stop_dept_with_proof("down-sock", socket, path).await
+}
+
+async fn stop_dept_with_proof(verb: &'static str, target: String, socket: std::path::PathBuf) -> Result<(), String> {
+    use tokio::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let identity = tokio::time::timeout_at(
+        deadline.min(Instant::now() + Duration::from_secs(2)),
+        rpc_oneshot(&socket, "system.identify", json!({"caller":"ui"})),
+    ).await.map_err(|_| "부서 정보를 확인하는 시간이 초과됐습니다. 잠시 후 다시 시도하세요.".to_string())?
+        .map_err(|e| format!("부서 종료에 필요한 정보를 확인하지 못했습니다: {e}"))?;
+    let surfaces = tokio::time::timeout_at(
+        deadline.min(Instant::now() + Duration::from_secs(2)),
+        rpc_oneshot(&socket, "surface.list", json!({})),
+    ).await.map_err(|_| "부서 직원 목록을 확인하는 시간이 초과됐습니다. 잠시 후 다시 시도하세요.".to_string())?
+        .map_err(|e| format!("부서 직원 목록을 확인하지 못했습니다: {e}"))?;
+    let pids = dept_teardown::process_ids(&identity, &surfaces)?;
+    let tree = tokio::time::timeout_at(deadline, tokio::task::spawn_blocking(move || dept_teardown::ProcessTree::capture(&pids))).await
+        .map_err(|_| "부서 종료 확인 시간이 초과됐습니다. 잠시 후 다시 시도하세요.".to_string())?
+        .map_err(|e| format!("부서 종료 확인 작업에 실패했습니다: {e}"))??;
+    let mut command = std::process::Command::new("bash");
+    inject_runtime_path(&mut command);
+    command.arg(dept_tool()).arg(verb).arg(target);
+    no_console(&mut command);
+    dept_teardown::run(command, tree, deadline).await
 }
 
 /// A안(2026-07-11 오너 승인): 교대·설치 게이트가 세는 "지킬 세션" = **role 또는 agent 가 붙은

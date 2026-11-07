@@ -61,16 +61,20 @@ export function remapPrimarySurfaceIds<T extends SavedWorkspace>(
     targets.add(next);
   }
   const seen = new Set<number>();
+  // Native restores every live seat, so an unmapped old SID had no live seat: detach it (its split collapses)
+  // instead of keeping a bare integer that could collide with, or attach to, a new seat.
   const remap = (node: LayoutNode | null): LayoutNode | null => {
     if (!node) return null;
     if (node.type === "pane") {
-      const sid = ids.get(node.sid) ?? node.sid;
+      const sid = ids.get(node.sid);
+      if (sid === undefined) return null;
       if (seen.has(sid)) throw new Error("업데이트 좌석 ID가 겹칩니다. 저장된 레이아웃을 유지합니다.");
       seen.add(sid);
       return sid === node.sid ? node : { ...node, sid };
     }
-    const a = remap(node.a)!;
-    const b = remap(node.b)!;
+    const a = remap(node.a);
+    const b = remap(node.b);
+    if (!a || !b) return a ?? b;
     return a === node.a && b === node.b ? node : { ...node, a, b };
   };
   return workspaces.map((ws) => {
@@ -114,7 +118,8 @@ export function prepareRenameLayout<T extends { workspaces: SavedWorkspace[]; re
     throw new Error("기존 복원 방식인데 좌석 대응표가 있습니다. 저장된 레이아웃을 유지합니다.");
   }
   if (saved.renameRevision === handover.revision) return saved;
-  const workspaces = handover.fallback ? detachPrimarySurfaceIds(saved.workspaces)
+  // No map entries (fallback, or no live seat at capture): every saved primary SID is from the old generation.
+  const workspaces = handover.fallback || !Object.keys(handover.map).length ? detachPrimarySurfaceIds(saved.workspaces)
     : remapPrimarySurfaceIds(saved.workspaces, handover.map);
   return { ...saved, workspaces, renameRevision: handover.revision };
 }

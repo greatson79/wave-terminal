@@ -140,12 +140,13 @@ test("rename remaps primary leaves while preserving panels, groups and split lay
     { id: 6, name: "department", socket: "dept", tree: { type: "pane" as const, sid: 1 } },
   ];
   const restored = remapPrimarySurfaceIds(saved, { "1": 11, "2": 12 });
+  // Unmapped 9 had no live seat (Native restores every live seat): detached, its split collapses.
   expect(restored[0]).toEqual({ ...saved[0], tree: { ...tree,
-    a: { type: "pane", sid: 11 }, b: { ...tree.b, a: { type: "pane", sid: 12 } } } });
+    a: { type: "pane", sid: 11 }, b: { type: "pane", sid: 12 } } });
   expect(restored[1]).toBe(saved[1]);
   expect(restored[2]).toBe(saved[2]);
   expect(treeSids(saved[0].tree)).toEqual([1, 2, 9]);
-  expect(treeSids(restored[0].tree)).toEqual([11, 12, 9]);
+  expect(treeSids(restored[0].tree)).toEqual([11, 12]);
 });
 
 test("absent rename map leaves saved layout unchanged", () => {
@@ -170,10 +171,12 @@ test("rename collisions or invalid IDs reject atomically without changing saved 
     { id: 1, name: "one", tree: { type: "pane" as const, sid: 1 } },
     { id: 2, name: "two", tree: { type: "pane" as const, sid: 2 } },
   ];
-  for (const map of [{ "1": 2 }, { "1": 3, "2": 3 }, { "1": -1 }, { "01": 3 }, { "1": NaN }]) {
+  for (const map of [{ "1": 3, "2": 3 }, { "1": -1 }, { "01": 3 }, { "1": NaN }]) {
     expect(() => remapPrimarySurfaceIds(saved, map)).toThrow();
     expect(saved.map((ws) => treeSids(ws.tree))).toEqual([[1], [2]]);
   }
+  // Unmapped 2 had no live seat: detached, so 1→2 no longer collides (was a reject before the C8 fix).
+  expect(remapPrimarySurfaceIds(saved, { "1": 2 }).map((ws) => treeSids(ws.tree))).toEqual([[2], []]);
 });
 
 
@@ -232,7 +235,7 @@ test("corrupt or colliding handover keeps the saved layout, drops the ack and ex
   const saved = fallbackSaved();
   saved.workspaces[0].tree = { type: "split", dir: "row", a: { type: "pane", sid: 1 }, b: { type: "pane", sid: 5 } } as never;
   const before = JSON.stringify(saved);
-  for (const bad of [{ revision: "r1", map: [] }, { revision: 3, map: {} }, { revision: "r1", map: { "1": 5 } },
+  for (const bad of [{ revision: "r1", map: [] }, { revision: 3, map: {} },
     { revision: "", map: { "1": 2 } }, { revision: "r1", map: { "x": 2 } }]) {
     const result = applyRenameLayoutSafely(saved, bad as never);
     expect(result.layout).toBe(saved);
@@ -311,4 +314,62 @@ test("a normal handover without the fallback flag keeps today's remap", () => {
   const saved = { workspaces: [{ id: 1, name: "ops", tree: { type: "pane" as const, sid: 3 } }] };
   const result = applyRenameLayoutSafely(saved, { revision: "n-1", map: { "3": 30 }, fallback: false });
   expect(treeSids(result.layout.workspaces[0].tree)).toEqual([30]);
+});
+
+// Normal-path unmapped SIDs (Zen carry1-r2 advisory → C8 defect): Native restores every live seat, so a primary
+// pane whose old SID is not in the map had no live seat. It is detached instead of kept as a bare integer.
+test("normal handover: a stale unmapped SID equal to a remap target no longer blocks the remap", () => {
+  const saved = { workspaces: [{ id: 1, name: "ops", tree: { type: "split" as const, dir: "row" as const,
+    a: { type: "pane" as const, sid: 1 }, b: { type: "split" as const, dir: "row" as const,
+      a: { type: "pane" as const, sid: 2 }, b: { type: "pane" as const, sid: 3 } } } }] };
+  const before = JSON.stringify(saved);
+  const handover = { revision: "n-1", map: { "1": 3, "2": 4 } };
+  const result = applyRenameLayoutSafely(saved, handover);
+  expect(result.notice).toBeUndefined();
+  expect(result.handover).toBe(handover);           // acknowledged → the backend clears the marker
+  expect(treeSids(result.layout.workspaces[0].tree)).toEqual([3, 4]);
+  expect(result.backup).toBe(before);
+  expect(result.layout.renameRevision).toBe("n-1");
+});
+
+test("normal handover: stale unmapped SIDs are detached and their split collapses", () => {
+  const inner = { type: "split" as const, dir: "col" as const, ratio: 0.7, a: { type: "pane" as const, sid: 2 }, b: { type: "pane" as const, sid: 9 } };
+  const saved = { workspaces: [{ id: 1, name: "ops", groupId: 3, tree: { type: "split" as const, dir: "row" as const, ratio: 0.35,
+    a: { type: "pane" as const, sid: 1 }, b: inner } }] };
+  const result = applyRenameLayoutSafely(saved, { revision: "n-2", map: { "1": 11, "2": 12 } });
+  expect(result.layout.workspaces[0].tree).toEqual({ type: "split", dir: "row", ratio: 0.35,
+    a: { type: "pane", sid: 11 }, b: { type: "pane", sid: 12 } });
+  expect(result.layout.workspaces[0].groupId).toBe(3);
+});
+
+test("normal handover: a panel whose panes were all unmapped keeps the panel with tree null", () => {
+  const saved = { workspaces: [
+    { id: 1, name: "old", groupId: 4, tree: { type: "split" as const, dir: "row" as const, a: { type: "pane" as const, sid: 7 }, b: { type: "pane" as const, sid: 8 } } },
+    { id: 2, name: "live", tree: { type: "pane" as const, sid: 1 } },
+  ] };
+  const result = applyRenameLayoutSafely(saved, { revision: "n-3", map: { "1": 5 } });
+  expect(result.layout.workspaces[0].tree).toBeNull();
+  expect(result.layout.workspaces[0].groupId).toBe(4);
+  expect(treeSids(result.layout.workspaces[1].tree)).toEqual([5]);
+});
+
+test("normal handover with an empty map (no live seats) detaches every primary pane", () => {
+  const saved = { workspaces: [{ id: 1, name: "ops", tree: { type: "pane" as const, sid: 2 } },
+    { id: 2, name: "dept", socket: "dept", tree: { type: "pane" as const, sid: 2 } }] };
+  const result = applyRenameLayoutSafely(saved, { revision: "n-4", map: {} });
+  expect(result.handover).not.toBeNull();
+  expect(result.layout.workspaces[0].tree).toBeNull();
+  expect(result.layout.workspaces[1]).toBe(saved.workspaces[1]);
+});
+
+test("normal handover never touches department sockets and replays as a no-op", () => {
+  const saved = { workspaces: [{ id: 1, name: "ops", tree: { type: "pane" as const, sid: 1 } },
+    { id: 2, name: "dept", socket: "dept", tree: { type: "pane" as const, sid: 9 } }] };
+  const handover = { revision: "n-5", map: { "1": 6 } };
+  const result = applyRenameLayoutSafely(saved, handover);
+  expect(result.layout.workspaces[1]).toBe(saved.workspaces[1]);
+  expect(prepareRenameLayout(result.layout, handover)).toBe(result.layout);
+  for (const bad of [{ revision: "n-6", map: { "1": 6, "2": 6 } }, { revision: "n-7", map: { "x": 2 } }]) {
+    expect(applyRenameLayoutSafely(saved, bad as never).handover).toBeNull(); // an invalid map still refuses
+  }
 });

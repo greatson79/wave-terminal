@@ -17,7 +17,7 @@ def _stub(path, body):
     path.write_bytes(body.encode("utf-8"))  # LF only: no CR in the shebang on Windows
 
 
-def run(pipe, alive_pids=(), recorded=None, windows=True):
+def run(pipe, alive_pids=(), recorded=None, windows=True, scan="", proc_start=None):
     """Run the real down-sock verb; only the OS probes (pipe list, tasklist) and identity are stubbed."""
     with tempfile.TemporaryDirectory(prefix="dept-crash-") as tmp:
         home = Path(tmp); bin_dir = home / ".local/bin"; bin_dir.mkdir(parents=True)
@@ -29,6 +29,9 @@ def run(pipe, alive_pids=(), recorded=None, windows=True):
         for f in bin_dir.iterdir(): f.chmod(0o700)
         source = DEPT.read_text(encoding="utf-8")
         source = re.sub(r"^dept_pipe_present\(\)\{.*?^\}\n", "dept_pipe_present(){ printf '%s\\r\\n' " + pipe + "; }\n", source, flags=re.S | re.M)
+        source = re.sub(r"^dept_scan_procs\(\)\{.*?^\}\n", "dept_scan_procs(){ printf '%s' '" + scan + "'; }\n", source, flags=re.S | re.M)
+        if proc_start is not None:
+            source = re.sub(r"^dept_proc_start\(\)\{.*?^\}\n", "dept_proc_start(){ printf '%s\\r\\n' " + proc_start + "; }\n", source, flags=re.S | re.M)
         if not windows:
             _stub(bin_dir / "uname", "#!/bin/sh\nprintf 'Linux\\n'\n")
         script = home / "cys-dept"; script.write_text(source, encoding="utf-8")
@@ -76,6 +79,62 @@ class CrashedDeptTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("이미 종료", r.stderr)
         self.assertEqual(depts, {})
+
+    def test_pidless_dept_with_live_runtime_key_process_is_refused_and_named(self):
+        r, depts, _ = run("absent", scan="777\\tnode.exe\\n")
+        self.assertEqual(r.returncode, 9)
+        self.assertIn("node.exe", r.stderr)
+        self.assertIn("팀 정보를 유지합니다", r.stderr)
+        self.assertIn("dept-1", depts)
+
+    def test_pidless_dept_with_unknown_scan_is_refused(self):
+        r, depts, _ = run("absent", scan="unknown\\t")
+        self.assertEqual(r.returncode, 9)
+        self.assertIn("dept-1", depts)
+
+    def test_scan_guard_is_only_for_pidless_depts(self):
+        r, depts, _ = run("absent", recorded=[{"pid": 4242, "start": 1000}], proc_start="none", scan="777\\tnode.exe\\n")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(depts, {})
+
+    def test_same_pid_same_start_is_ours_and_refused(self):
+        r, depts, _ = run("absent", recorded=[{"pid": 4242, "start": 1000}], proc_start="1010")
+        self.assertEqual(r.returncode, 9)
+        self.assertIn("dept-1", depts)
+
+    def test_reused_pid_with_different_start_is_not_ours(self):
+        r, depts, _ = run("absent", recorded=[{"pid": 4242, "start": 1000}], proc_start="90000")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(depts, {})
+
+    def test_unknown_process_start_is_refused(self):
+        r, depts, _ = run("absent", recorded=[{"pid": 4242, "start": 1000}], proc_start="unknown")
+        self.assertEqual(r.returncode, 9)
+        self.assertIn("dept-1", depts)
+
+
+class PidWriterTests(unittest.TestCase):
+    def test_reg_set_pids_records_pid_and_start_and_warns_on_bad_identity(self):
+        source = DEPT.read_text(encoding="utf-8")
+        fn = re.search(r"^reg_set_pids\(\)\{.*?^\}\n", source, re.S | re.M).group(0)
+        for identity, expect in [("4242\t1793966400", [{"pid": 4242, "start": 1793966400}]), ("", None)]:
+            with self.subTest(identity=identity), tempfile.TemporaryDirectory() as tmp:
+                reg = Path(tmp) / "depts.json"
+                reg.write_text(json.dumps({"depts": {"dept-1": {"socket": "s"}}}))
+                program = ("REG=" + str(reg) + "\nnative_path(){ printf '%s\\n' \"$1\"; }\nreg_init(){ :; }\n"
+                           "daemon_identity(){ printf '%s\\r\\n' '" + identity + "'; }\n") + fn + "\nreg_set_pids dept-1 sock\n"
+                r = subprocess.run([BASH, "-c", program], capture_output=True, text=True, encoding="utf-8", timeout=10)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(json.loads(reg.read_text())["depts"]["dept-1"].get("pids"), expect)
+                if expect is None: self.assertIn("pid 기록 실패", r.stderr)
+
+    def test_every_spawn_site_records_pids_after_the_daemon_is_up(self):
+        source = DEPT.read_text(encoding="utf-8")
+        spawns = [m.start() for m in re.finditer(r'nohup "\$CYSD"', source)]
+        self.assertEqual(len(spawns), 3)
+        for at in spawns:
+            tail = source[at:at + 1200]
+            self.assertLess(tail.index('ready "$sock"'), tail.index('reg_set_pids "$name" "$sock"'))
 
 
 if __name__ == "__main__":

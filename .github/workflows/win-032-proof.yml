@@ -1,22 +1,27 @@
 name: Windows 0.3.2 proof (dept sidebar + teardown + lib tests)
 
 # Derived from CC's proven probe (ci/win-dept-probe @ 79c1183); every probe assertion is kept.
-# workflow_dispatch only. Tests THIS commit's NSIS build (artifact of a windows-build run bound to the same sha).
+# Triggers: push to release/0.3.2-proof (GitHub only dispatches workflows present on the default branch)
+# with the inputs committed in .github/proof-inputs-032.json; workflow_dispatch inputs override the file.
+# Binding (job `inputs`): expected_sha = the APP commit windows-build built. This run's commit may differ from it ONLY
+# in the proof harness files (workflow + inputs file); the build run head_sha must equal expected_sha.
 on:
+  push:
+    branches: [release/0.3.2-proof]
+    paths: ['.github/proof-inputs-032.json', '.github/workflows/win-032-proof.yml']
   workflow_dispatch:
     inputs:
       build_run_id:
-        description: 'windows-build run id (same commit) that produced artifact cys-windows-x64-nsis'
-        required: true
+        description: 'Override: windows-build run id'
+        required: false
         type: string
       expected_sha:
-        description: 'Full commit sha under test (must equal this workflow run sha AND the build run head_sha)'
-        required: true
+        description: 'Override: full app commit sha the build run built'
+        required: false
         type: string
       expected_version:
-        description: 'Product version the installer and daemon must report'
-        required: true
-        default: '0.3.2'
+        description: 'Override: product version'
+        required: false
         type: string
 
 permissions:
@@ -24,7 +29,46 @@ permissions:
   actions: read
 
 jobs:
+  inputs:
+    name: Read and bind proof inputs
+    runs-on: ubuntu-latest
+    outputs:
+      build_run_id: ${{ steps.read.outputs.build_run_id }}
+      expected_sha: ${{ steps.read.outputs.expected_sha }}
+      expected_version: ${{ steps.read.outputs.expected_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Read inputs file, apply overrides, bind to this commit
+        id: read
+        env:
+          O_RUN: ${{ github.event.inputs.build_run_id }}
+          O_SHA: ${{ github.event.inputs.expected_sha }}
+          O_VER: ${{ github.event.inputs.expected_version }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess, sys
+          d = json.load(open(".github/proof-inputs-032.json", encoding="utf-8"))
+          run = os.environ["O_RUN"] or str(d["build_run_id"])
+          sha = (os.environ["O_SHA"] or d["expected_sha"]).lower()
+          ver = os.environ["O_VER"] or d["expected_version"]
+          if not re.fullmatch(r"\d+", run): sys.exit("build_run_id must be digits")
+          if not re.fullmatch(r"[0-9a-f]{40}", sha): sys.exit("expected_sha must be a full 40-hex sha")
+          if not re.fullmatch(r"\d+\.\d+\.\d+", ver): sys.exit("expected_version must be x.y.z")
+          head = os.environ["GITHUB_SHA"]
+          subprocess.run(["git", "cat-file", "-e", sha + "^{commit}"], check=True)
+          allowed = {".github/proof-inputs-032.json", ".github/workflows/win-032-proof.yml"}
+          changed = set(subprocess.run(["git", "diff", "--name-only", sha, head], check=True, capture_output=True, text=True).stdout.split())
+          extra = changed - allowed
+          if extra: sys.exit("Run commit differs from the built app commit beyond the proof harness: %s" % sorted(extra))
+          print("BOUND app=%s run_commit=%s harness_only_diff=%s" % (sha, head, sorted(changed)))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("build_run_id=%s\nexpected_sha=%s\nexpected_version=%s\n" % (run, sha, ver))
+          PY
+
   department:
+    needs: inputs
     name: Required PS5.1 dept proof / ${{ matrix.path_context }} / ${{ matrix.entry }}
     runs-on: windows-latest
     timeout-minutes: 20
@@ -40,11 +84,10 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          BUILD_RUN_ID: ${{ inputs.build_run_id }}
-          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          BUILD_RUN_ID: ${{ needs.inputs.outputs.build_run_id }}
+          EXPECTED_SHA: ${{ needs.inputs.outputs.expected_sha }}
         run: |
           $ErrorActionPreference = 'Stop'
-          if ($env:GITHUB_SHA -ne $env:EXPECTED_SHA) { throw "Proof run sha $env:GITHUB_SHA != expected_sha $env:EXPECTED_SHA" }
           $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:BUILD_RUN_ID" | ConvertFrom-Json
           if ($run.conclusion -ne 'success') { throw "Build run $env:BUILD_RUN_ID conclusion=$($run.conclusion)" }
           if ($run.head_sha -ne $env:EXPECTED_SHA) { throw "Build run head_sha $($run.head_sha) != expected_sha $env:EXPECTED_SHA" }
@@ -54,7 +97,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: cys-windows-x64-nsis
-          run-id: ${{ inputs.build_run_id }}
+          run-id: ${{ needs.inputs.outputs.build_run_id }}
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}\nsis
 
@@ -630,7 +673,7 @@ jobs:
         env:
           PROBE_PATH_CONTEXT: ${{ matrix.path_context }}
           PROBE_ENTRY: ${{ matrix.entry }}
-          PROOF_VERSION: ${{ inputs.expected_version }}
+          PROOF_VERSION: ${{ needs.inputs.outputs.expected_version }}
         run: |
           if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1) { throw 'Required Windows PowerShell 5.1 did not execute' }
           & "$env:RUNNER_TEMP\cc-korean-account.ps1" -ProbeShell powershell -PathContext $env:PROBE_PATH_CONTEXT -Entry $env:PROBE_ENTRY -NsisDir "$env:RUNNER_TEMP\nsis" -ExpectedVersion $env:PROOF_VERSION
@@ -641,7 +684,7 @@ jobs:
         env:
           PROBE_PATH_CONTEXT: ${{ matrix.path_context }}
           PROBE_ENTRY: ${{ matrix.entry }}
-          PROOF_VERSION: ${{ inputs.expected_version }}
+          PROOF_VERSION: ${{ needs.inputs.outputs.expected_version }}
         run: '& "$env:RUNNER_TEMP\cc-korean-account.ps1" -ProbeShell pwsh -PathContext $env:PROBE_PATH_CONTEXT -Entry $env:PROBE_ENTRY -NsisDir "$env:RUNNER_TEMP\nsis" -ExpectedVersion $env:PROOF_VERSION'
 
       - name: Fail unless the required PS5.1 probe executed successfully
@@ -678,8 +721,8 @@ jobs:
 
   secondary-ps7:
     name: Secondary PS7 dept proof / ${{ matrix.path_context }} / ${{ matrix.entry }}
-    needs: department
-    if: always()
+    needs: [inputs, department]
+    if: always() && needs.inputs.result == 'success'
     runs-on: windows-latest
     timeout-minutes: 20
     strategy:
@@ -693,20 +736,25 @@ jobs:
   # C3: the Rust library tests + cys-dept Python tests on Windows, under PS 5.1 (required) and PS7 (secondary).
   # No skip / ignore / cfg-out: the three known tests are run by exact name and the full run must report 0 ignored.
   lib-ps51:
+    needs: inputs
     name: Required PS5.1 Windows lib + dept tests
     runs-on: windows-latest
     timeout-minutes: 60
     steps: &lib-test-steps
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Bind the checkout to the expected commit
         shell: pwsh
         env:
-          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          EXPECTED_SHA: ${{ needs.inputs.outputs.expected_sha }}
         run: |
           $head = (git rev-parse HEAD).Trim()
-          if ($head -ne $env:EXPECTED_SHA) { throw "Checkout $head != expected_sha $env:EXPECTED_SHA" }
-          Write-Host "LIB_TESTS_COMMIT $head"
+          $changed = @(git diff --name-only $env:EXPECTED_SHA $head)
+          $extra = @($changed | Where-Object { $_ -notin @('.github/proof-inputs-032.json','.github/workflows/win-032-proof.yml') })
+          if ($extra.Count -ne 0) { throw "Checkout differs from the built app commit beyond the proof harness: $($extra -join ', ')" }
+          Write-Host "LIB_TESTS_COMMIT head=$head app=$env:EXPECTED_SHA harness_only_diff=$($changed -join ',')"
 
       - name: Setup Rust (x86_64-pc-windows-msvc)
         uses: dtolnay/rust-toolchain@stable
@@ -788,8 +836,8 @@ jobs:
 
   lib-ps7:
     name: Secondary PS7 Windows lib + dept tests
-    needs: lib-ps51
-    if: always()
+    needs: [inputs, lib-ps51]
+    if: always() && needs.inputs.result == 'success'
     runs-on: windows-latest
     timeout-minutes: 60
     strategy:
@@ -801,7 +849,7 @@ jobs:
   # Single verdict: every dept scenario and both lib jobs must be green; a PS7 pass never erases a PS5.1 failure.
   proof-gate:
     name: Windows 0.3.2 proof gate
-    needs: [department, secondary-ps7, lib-ps51, lib-ps7]
+    needs: [inputs, department, secondary-ps7, lib-ps51, lib-ps7]
     if: always()
     runs-on: ubuntu-latest
     steps:

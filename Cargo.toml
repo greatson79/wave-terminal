@@ -5,6 +5,8 @@ exclude = ["vendor/portable-pty"]
 
 [package]
 name = "cys-terminal"
+autobins = false
+default-run = "wave"
 version = "0.3.2"
 edition = "2021"
 description = "Wave Terminal — the CYSJavis terminal: bidirectional socket IPC, multi-agent OS, governance, heartbeat"
@@ -15,12 +17,24 @@ name = "cys"
 path = "src/lib.rs"
 
 [[bin]]
-name = "cysd"
+name = "waved"
 path = "src/bin/cysd/main.rs"
 
 [[bin]]
-name = "cys"
+name = "wave"
 path = "src/bin/cys.rs"
+
+[[bin]]
+name = "cys"
+path = "src/compat/cli.rs"
+
+[[bin]]
+name = "cysd"
+path = "src/compat/daemon.rs"
+
+[[bin]]
+name = "cys-app"
+path = "src/compat/app.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal", "process"] }
@@ -67,6 +81,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Pipes",
     "Win32_System_JobObjects",  # ★D3(W5): Job Object(KILL_ON_JOB_CLOSE) — PTY 자식 동반사망
     "Win32_System_Threading",   # ★D3(W5): OpenProcess(자식 pid → Job 편입)
+    "Win32_Storage_FileSystem", # Durable restore-marker replacement on Windows.
     "Win32_Security_Cryptography",  # R-CLI-1: BCryptGenRandom(CNG CSPRNG) — 브리지 토큰 예측가능 폴백 제거
     "Win32_System_Registry",    # ★stale PATH: RegGetValueW(HKLM/HKCU Environment\Path 신선 재합성)
 ] }

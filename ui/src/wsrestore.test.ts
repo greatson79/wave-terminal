@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { coalesceHqWorkspaces, normalizeWorkspaces, pruneEmptyHqWorkspaces, rehomeRestoredSeats, shouldKeepEmptyWorkspaceOnRestore } from "./wsrestore";
+import { coalesceHqWorkspaces, normalizeWorkspaces, pruneEmptyHqWorkspaces, rehomeRestoredSeats, remapPrimarySurfaceIds, prepareRenameLayout, applyRenameLayoutSafely, shouldKeepEmptyWorkspaceOnRestore } from "./wsrestore";
 import { treeSids, type LayoutNode } from "./treededupe";
 import { configureHierarchyNaming, paneRehomeTarget, sameHqPanelName } from "./hierarchy";
 
@@ -126,4 +126,143 @@ test("restore reuses an exact legacy target even when local HQ aliases do not ma
     () => "legacy·운영본부", () => { throw new Error("duplicate workspace"); }, sameHqPanelName);
   expect(workspaces).toHaveLength(2);
   expect(treeSids(workspaces[1].tree)).toEqual([9]);
+});
+
+
+test("rename remaps primary leaves while preserving panels, groups and split layout", () => {
+  const tree: LayoutNode = { type: "split", dir: "col", ratio: 0.35,
+    a: { type: "pane", sid: 1 },
+    b: { type: "split", dir: "row", ratio: 0.7,
+      a: { type: "pane", sid: 2 }, b: { type: "pane", sid: 9 } } };
+  const saved = [
+    { id: 4, name: "operations", tree, groupId: 3, collapsed: true, manual: true },
+    { id: 5, name: "notes", tree: null, groupId: 3 },
+    { id: 6, name: "department", socket: "dept", tree: { type: "pane" as const, sid: 1 } },
+  ];
+  const restored = remapPrimarySurfaceIds(saved, { "1": 11, "2": 12 });
+  expect(restored[0]).toEqual({ ...saved[0], tree: { ...tree,
+    a: { type: "pane", sid: 11 }, b: { ...tree.b, a: { type: "pane", sid: 12 } } } });
+  expect(restored[1]).toBe(saved[1]);
+  expect(restored[2]).toBe(saved[2]);
+  expect(treeSids(saved[0].tree)).toEqual([1, 2, 9]);
+  expect(treeSids(restored[0].tree)).toEqual([11, 12, 9]);
+});
+
+test("absent rename map leaves saved layout unchanged", () => {
+  const saved = [{ id: 1, name: "panel", tree: { type: "pane" as const, sid: 1 } }];
+  expect(remapPrimarySurfaceIds(saved)).toBe(saved);
+  expect(remapPrimarySurfaceIds(saved, {})).toBe(saved);
+});
+
+test("rename IDs swap simultaneously and remain scoped to the primary socket", () => {
+  const saved = [
+    { id: 1, name: "one", tree: { type: "pane" as const, sid: 1 } },
+    { id: 2, name: "two", tree: { type: "pane" as const, sid: 2 } },
+    { id: 3, name: "dept", socket: "dept", tree: { type: "pane" as const, sid: 2 } },
+  ];
+  const restored = remapPrimarySurfaceIds(saved, { "1": 2, "2": 1 });
+  expect(restored.map((ws) => treeSids(ws.tree))).toEqual([[2], [1], [2]]);
+  expect(restored[2]).toBe(saved[2]);
+});
+
+test("rename collisions or invalid IDs reject atomically without changing saved trees", () => {
+  const saved = [
+    { id: 1, name: "one", tree: { type: "pane" as const, sid: 1 } },
+    { id: 2, name: "two", tree: { type: "pane" as const, sid: 2 } },
+  ];
+  for (const map of [{ "1": 2 }, { "1": 3, "2": 3 }, { "1": -1 }, { "01": 3 }, { "1": NaN }]) {
+    expect(() => remapPrimarySurfaceIds(saved, map)).toThrow();
+    expect(saved.map((ws) => treeSids(ws.tree))).toEqual([[1], [2]]);
+  }
+});
+
+
+test("replayable swap survives failure after persistence without remapping twice", () => {
+  const saved = {
+    workspaces: [
+      { id: 1, name: "one", tree: { type: "pane" as const, sid: 1 } },
+      { id: 2, name: "two", tree: { type: "pane" as const, sid: 2 } },
+    ],
+    groups: [{ id: 7, name: "saved group" }], active: 1, counter: 9, custom: { preserved: true },
+  };
+  const handover = { revision: "rename-1", map: { "1": 2, "2": 1 } };
+  const converted = prepareRenameLayout(saved, handover);
+  const persisted = JSON.stringify(converted); // Crash before ack: backend still replays this revision.
+  const restarted = JSON.parse(persisted) as typeof converted;
+  expect(prepareRenameLayout(restarted, handover)).toBe(restarted);
+  expect(restarted.workspaces.map((ws) => treeSids(ws.tree))).toEqual([[2], [1]]);
+  expect(restarted.renameRevision).toBe("rename-1");
+  expect(restarted.groups).toEqual(saved.groups);
+  expect(restarted.active).toBe(1);
+  expect(restarted.custom).toEqual({ preserved: true });
+  // Normal subsequent saves carry the revision even after backend acknowledgement.
+  const savedAgain = { ...restarted, active: 0 };
+  expect(prepareRenameLayout(savedAgain, handover)).toBe(savedAgain);
+});
+
+test("failed layout persistence leaves old storage replayable after remapping in memory", () => {
+  const saved = { workspaces: [{ id: 1, name: "panel", tree: { type: "pane" as const, sid: 1 } }] };
+  const oldStorage = JSON.stringify(saved);
+  const handover = { revision: "rename-2", map: { "1": 11 } };
+  const inMemory = prepareRenameLayout(saved, handover);
+  const write = (_value: string) => { throw new Error("storage full"); };
+  expect(() => write(JSON.stringify(inMemory))).toThrow("storage full");
+  expect(JSON.stringify(saved)).toBe(oldStorage);
+  const restarted = prepareRenameLayout(JSON.parse(oldStorage) as typeof saved, handover);
+  expect(treeSids(restarted.workspaces[0].tree)).toEqual([11]);
+  expect(restarted.renameRevision).toBe("rename-2");
+});
+
+test("no pending revision preserves the saved document", () => {
+  const saved = { workspaces: [], renameRevision: "earlier" };
+  expect(prepareRenameLayout(saved, null)).toBe(saved);
+  expect(prepareRenameLayout(saved, { revision: "", map: {} })).toBe(saved);
+  expect(() => prepareRenameLayout(saved, { revision: "", map: { "1": 2 } })).toThrow();
+});
+
+const fallbackSaved = () => ({
+  workspaces: [
+    { id: 1, name: "ops", tree: { type: "pane" as const, sid: 1 }, groupId: 7 },
+    { id: 2, name: "dept", socket: "dept", tree: { type: "pane" as const, sid: 1 } },
+  ],
+  groups: [{ id: 7, name: "team" }], active: 1, custom: { kept: true },
+});
+
+test("corrupt or colliding handover keeps the saved layout, drops the ack and explains in Korean", () => {
+  const saved = fallbackSaved();
+  saved.workspaces[0].tree = { type: "split", dir: "row", a: { type: "pane", sid: 1 }, b: { type: "pane", sid: 5 } } as never;
+  const before = JSON.stringify(saved);
+  for (const bad of [{ revision: "r1", map: [] }, { revision: 3, map: {} }, { revision: "r1", map: { "1": 5 } },
+    { revision: "", map: { "1": 2 } }, { revision: "r1", map: { "x": 2 } }]) {
+    const result = applyRenameLayoutSafely(saved, bad as never);
+    expect(result.layout).toBe(saved);
+    expect(result.handover).toBeNull();
+    expect(result.notice).toContain("저장된 레이아웃을 유지");
+    expect(result.backup).toBe(before);
+    expect(JSON.stringify(saved)).toBe(before);
+  }
+});
+
+test("valid handover backs up the exact old layout and keeps groups, departments and extras", () => {
+  const saved = fallbackSaved();
+  const before = JSON.stringify(saved);
+  const handover = { revision: "r2", map: { "1": 11 } };
+  const result = applyRenameLayoutSafely(saved, handover);
+  expect(result.notice).toBeUndefined();
+  expect(result.handover).toBe(handover);
+  expect(result.backup).toBe(before);
+  expect(treeSids(result.layout.workspaces[0].tree)).toEqual([11]);
+  expect(result.layout.workspaces[1]).toBe(saved.workspaces[1]); // department socket untouched
+  expect(result.layout.groups).toBe(saved.groups);
+  expect(result.layout.custom).toEqual({ kept: true });
+});
+
+test("no handover or an already applied revision changes nothing and writes no backup", () => {
+  const saved = fallbackSaved();
+  expect(applyRenameLayoutSafely(saved, null)).toEqual({ layout: saved, handover: null });
+  const applied = { ...saved, renameRevision: "r3" };
+  const result = applyRenameLayoutSafely(applied, { revision: "r3", map: { "1": 11 } });
+  expect(result.layout).toBe(applied);
+  expect(result.backup).toBeUndefined();
+  expect(result.notice).toBeUndefined();
 });

@@ -43,6 +43,91 @@ export function normalizeWorkspaces<T extends SavedWorkspace>(list: T[]): T[] {
   return out;
 }
 
+// Rename handover changes primary-daemon IDs; panel/group/split state stays where it was.
+export function remapPrimarySurfaceIds<T extends SavedWorkspace>(
+  workspaces: T[], surfaceMap: Readonly<Record<string, number>> = {},
+): T[] {
+  const entries = Object.entries(surfaceMap);
+  if (!entries.length) return workspaces;
+  const ids = new Map<number, number>();
+  const targets = new Set<number>();
+  for (const [old, next] of entries) {
+    const previous = Number(old);
+    if (!Number.isSafeInteger(previous) || previous < 1 || String(previous) !== old
+      || !Number.isSafeInteger(next) || next < 1 || targets.has(next)) {
+      throw new Error("업데이트 좌석 ID 대응표가 올바르지 않습니다. 저장된 레이아웃을 유지합니다.");
+    }
+    ids.set(previous, next);
+    targets.add(next);
+  }
+  const seen = new Set<number>();
+  const remap = (node: LayoutNode | null): LayoutNode | null => {
+    if (!node) return null;
+    if (node.type === "pane") {
+      const sid = ids.get(node.sid) ?? node.sid;
+      if (seen.has(sid)) throw new Error("업데이트 좌석 ID가 겹칩니다. 저장된 레이아웃을 유지합니다.");
+      seen.add(sid);
+      return sid === node.sid ? node : { ...node, sid };
+    }
+    const a = remap(node.a)!;
+    const b = remap(node.b)!;
+    return a === node.a && b === node.b ? node : { ...node, a, b };
+  };
+  return workspaces.map((ws) => {
+    if (ws.socket !== undefined) return ws;
+    const tree = remap(ws.tree);
+    return tree === ws.tree ? ws : { ...ws, tree };
+  });
+}
+
+export interface RenameSurfaceMap {
+  revision: string;
+  map: Readonly<Record<string, number>>;
+  /** Korean notice from the backend capture (fallback / custom-command seats); optional. */
+  notice?: string | null;
+}
+
+// The caller persists this document before acknowledging the replayable backend map.
+export function prepareRenameLayout<T extends { workspaces: SavedWorkspace[]; renameRevision?: string }>(
+  saved: T, handover: RenameSurfaceMap | null,
+): T & { renameRevision?: string } {
+  if (handover === null) return saved;
+  if (typeof handover.revision !== "string" || !handover.map || typeof handover.map !== "object" || Array.isArray(handover.map)) {
+    throw new Error("업데이트 레이아웃 확인 정보가 올바르지 않습니다. 저장된 레이아웃을 유지합니다.");
+  }
+  if (!handover.revision) {
+    if (Object.keys(handover.map).length) throw new Error("업데이트 레이아웃 확인 번호가 없습니다. 저장된 레이아웃을 유지합니다.");
+    return saved;
+  }
+  if (saved.renameRevision === handover.revision) return saved;
+  return { ...saved, workspaces: remapPrimarySurfaceIds(saved.workspaces, handover.map), renameRevision: handover.revision };
+}
+
+export interface RenameStartup<T> {
+  layout: T;
+  /** null = do not acknowledge (nothing was applied; the backend keeps replaying). */
+  handover: RenameSurfaceMap | null;
+  /** Korean notice for a corrupt/unusable handover; startup always continues. */
+  notice?: string;
+  /** Exact pre-remap layout JSON, kept so unmatched old IDs are never lost. */
+  backup?: string;
+}
+
+// Startup wrapper: a bad handover must never block the app or lose the saved layout.
+export function applyRenameLayoutSafely<T extends { workspaces: SavedWorkspace[]; renameRevision?: string }>(
+  saved: T, handover: RenameSurfaceMap | null,
+): RenameStartup<T & { renameRevision?: string }> {
+  try {
+    const layout = prepareRenameLayout(saved, handover);
+    // Already-applied revisions still pass through so the backend ack clears its replay.
+    return layout === saved ? { layout, handover } : { layout, handover, backup: JSON.stringify(saved) };
+  } catch (error) {
+    const notice = error instanceof Error && error.message ? error.message
+      : "업데이트 레이아웃 정보를 읽지 못해 저장된 레이아웃을 유지합니다.";
+    return { layout: saved, handover: null, notice, backup: JSON.stringify(saved) };
+  }
+}
+
 // 같은 소켓의 구/신 본부명 패널을 합친다. 빈 중복도 저장 전에 제거한다.
 export function coalesceHqWorkspaces<T extends SavedWorkspace>(
   workspaces: T[],

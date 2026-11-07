@@ -13,6 +13,10 @@ pub mod pack;
 pub mod packsig;
 pub mod overrides;
 pub mod wire;
+pub mod rename_handover;
+pub mod restore_key;
+pub mod update_snapshot;
+pub mod windows_autostart;
 #[cfg(target_os = "macos")]
 pub mod launchd;
 

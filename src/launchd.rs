@@ -6,7 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
-pub const LAUNCHD_LABEL: &str = "com.cysjavis.cysd";
+pub const LAUNCHD_LABEL: &str = "com.waveainetworks.waved";
+pub const LEGACY_LAUNCHD_LABEL: &str = "com.cysjavis.cysd";
 
 /// ~/Library/LaunchAgents/com.cysjavis.cysd.plist
 pub fn plist_path() -> PathBuf {
@@ -92,7 +93,7 @@ pub fn kickstart_restart() -> bool {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LaunchdState {
+pub enum LaunchdState {
     Running(u32),
     LoadedIdle,
     NotLoaded,
@@ -119,7 +120,11 @@ fn parse_launchctl_list(exit_code: Option<i32>, stdout: &str, stderr: &str) -> L
 }
 
 fn launchd_state() -> LaunchdState {
-    let Ok(out) = std::process::Command::new("launchctl").args(["list", LAUNCHD_LABEL]).output() else {
+    state_for_label(LAUNCHD_LABEL)
+}
+
+pub fn state_for_label(label: &str) -> LaunchdState {
+    let Ok(out) = std::process::Command::new("launchctl").args(["list", label]).output() else {
         return LaunchdState::Unknown;
     };
     parse_launchctl_list(out.status.code(), std::str::from_utf8(&out.stdout).unwrap_or(""),

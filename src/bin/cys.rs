@@ -1,16 +1,18 @@
-//! cys — the CYSJavis terminal CLI client. 모든 pane 안의 AI가 이 CLI로 동등 노드가 된다.
-//! 예: cys send --surface surface:31 "..." ; cys send-key --surface surface:31 Return
+//! wave — the Wave Terminal CLI client. 모든 pane 안의 AI가 이 CLI로 동등 노드가 된다.
+//! 예: wave send --surface surface:31 "..." ; wave send-key --surface surface:31 Return
 
 use clap::{Parser, Subcommand};
+#[cfg(windows)]
+use cys::windows_autostart::render_task as cysd_task_xml;
 use cys::{key_to_bytes, parse_surface_ref, socket_path, surface_ref, ENV_SURFACE_ID};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 
 #[derive(Parser)]
 #[command(
-    name = "cys",
+    name = "wave",
     version,
-    about = "cys — the CYSJavis terminal CLI (bidirectional socket, multi-agent OS)"
+    about = "Wave Terminal CLI (bidirectional socket, multi-agent OS)"
 )]
 struct Cli {
     /// Socket path override (default: AITERM_SOCKET or platform default)
@@ -26,7 +28,7 @@ enum Command {
     Ping,
     /// Identify daemon + caller (uses AITERM_SURFACE_ID env when inside a surface)
     Identify,
-    /// ★W1: 이 cys 바이너리 자신의 identity 3필드(build_id·embedded_pack_hash·protocol_version) JSON 출력.
+    /// ★W1: 이 wave 바이너리 자신의 identity 3필드(build_id·embedded_pack_hash·protocol_version) JSON 출력.
     /// 데몬 불요(컴파일타임 상수 self-report) — phoenix 폴백이 데몬 status 의 동일 3필드와 교차대조한다.
     #[command(name = "phoenix-identity", hide = true)]
     PhoenixIdentity,
@@ -55,7 +57,7 @@ enum Command {
     /// List surfaces
     List,
     /// 창에 표시할 이름을 바꿉니다. 이름을 비우려면 --clear를 쓰세요.
-    #[command(help_template = "사용법: cys rename [--surface 창번호] [--clear] [이름]\n\n창에 표시할 이름을 바꿉니다. 이름을 비우려면 --clear를 쓰세요.\n\n이름: 새 창 이름\n--surface 창번호: 바꿀 창 번호. 생략하면 현재 창입니다\n--clear: 창 이름을 지웁니다\n--socket 경로: 연결할 데몬 소켓 경로\n--help: 도움말을 봅니다\n")]
+    #[command(help_template = "사용법: wave rename [--surface 창번호] [--clear] [이름]\n\n창에 표시할 이름을 바꿉니다. 이름을 비우려면 --clear를 쓰세요.\n\n이름: 새 창 이름\n--surface 창번호: 바꿀 창 번호. 생략하면 현재 창입니다\n--clear: 창 이름을 지웁니다\n--socket 경로: 연결할 데몬 소켓 경로\n--help: 도움말을 봅니다\n")]
     Rename {
         /// 바꿀 창 번호. 생략하면 현재 창입니다.
         #[arg(long, value_name = "창번호")]
@@ -530,7 +532,7 @@ enum Command {
         #[command(subcommand)]
         action: SkillAction,
     },
-    /// 노드 페르소나·운영 노브 커스터마이즈 (안전핵은 잠김). `cys persona list-params`로 노브 확인
+    /// 노드 페르소나·운영 노브 커스터마이즈 (안전핵은 잠김). `wave persona list-params`로 노브 확인
     Persona {
         #[command(subcommand)]
         action: PersonaAction,
@@ -603,7 +605,7 @@ enum Command {
         #[arg(long)]
         quiet: bool,
     },
-    /// Print this surface's cysd-authoritative role (one word) — PreToolUse capability-gate hook용.
+    /// Print this surface's waved-authoritative role (one word) — PreToolUse capability-gate hook용.
     /// CYS_SURFACE_ID로 자기 surface를 찾아 데몬 roles 맵의 role을 출력(미등록 시 빈 줄·exit 0).
     SurfaceRole,
     /// HMAC signed-prefix 승인 — 위험명령 prefix를 1회 서명하면 이후 자동 통과(guard.sh 연동)
@@ -696,7 +698,7 @@ enum ApprovalAction {
 /// C0 채널 서브명령 — 전부 channel.* RPC의 thin wrapper. 결과는 JSON 한 줄로 출력(브리지 소비용).
 #[derive(Subcommand)]
 enum ChannelAction {
-    /// 브리지 스폰(cysd 자식·1회용 토큰) + desired-state enabled=1. 첫 기동엔 --cmd 필수.
+    /// 브리지 스폰(waved 자식·1회용 토큰) + desired-state enabled=1. 첫 기동엔 --cmd 필수.
     Start {
         channel: String,
         /// 브리지 실행 명령(sh -c 로 스폰). 첫 start에 등록되면 이후 재사용·재스폰.
@@ -719,7 +721,7 @@ enum ChannelAction {
         #[arg(long = "bridge-ver")]
         bridge_ver: Option<String>,
     },
-    /// 인바운드 메시지 제출(브리지→cysd). inbox-first 퍼널 판정. kind=interaction이면 승인 버튼 검증.
+    /// 인바운드 메시지 제출(브리지→waved). inbox-first 퍼널 판정. kind=interaction이면 승인 버튼 검증.
     Inbound {
         channel: String,
         #[arg(long = "sender-id")]
@@ -769,7 +771,7 @@ enum ChannelAction {
         #[arg(long = "retry-of")]
         retry_of: Option<i64>,
     },
-    /// 아웃바운드 receipt 보고(브리지→cysd). 단조 전이·terminal 후는 late_receipt 화해.
+    /// 아웃바운드 receipt 보고(브리지→waved). 단조 전이·terminal 후는 late_receipt 화해.
     Receipt {
         #[arg(long = "outbound-id")]
         outbound_id: i64,
@@ -959,7 +961,7 @@ fn main() {
         if e.kind() == clap::error::ErrorKind::DisplayHelp { e.exit(); }
         if is_rename_subcommand(std::env::args_os().skip(1)) {
             eprintln!("{}", rename_parse_error_ko(&e));
-            eprintln!("사용법: cys rename [--surface 창번호] [--clear] [이름]");
+            eprintln!("사용법: wave rename [--surface 창번호] [--clear] [이름]");
             std::process::exit(2);
         }
         e.exit();
@@ -989,14 +991,14 @@ fn rename_parse_error_ko(e: &clap::Error) -> String {
     let value = context(ContextKind::InvalidValue);
     let prior = context(ContextKind::PriorArg);
     match (e.kind(), arg.as_deref(), value.as_deref(), prior.as_deref()) {
-        (ErrorKind::UnknownArgument, Some(arg), _, _) => format!("cys rename에서 알아보지 못한 인자: {arg}"),
-        (ErrorKind::InvalidValue, Some(arg), Some(""), _) => format!("cys rename 인자 {arg}의 값이 빠졌습니다"),
-        (ErrorKind::InvalidValue, Some(arg), Some(value), _) => format!("cys rename 인자 {arg}의 값이 올바르지 않습니다: {value}"),
-        (ErrorKind::ArgumentConflict, Some(arg), _, Some(prior)) if arg == prior => format!("cys rename 인자 {arg}를 여러 번 쓸 수 없습니다"),
-        (ErrorKind::ArgumentConflict, Some(arg), _, Some(prior)) => format!("cys rename 인자 {arg}와 {prior}를 함께 쓸 수 없습니다"),
-        (ErrorKind::ArgumentConflict, Some(arg), _, _) => format!("cys rename 인자 {arg}가 다른 인자와 충돌합니다"),
-        (ErrorKind::TooManyValues, Some(arg), Some(value), _) => format!("cys rename 인자 {arg}에 값이 너무 많습니다: {value}"),
-        (ErrorKind::MissingRequiredArgument, Some(arg), _, _) => format!("cys rename 필수 인자가 빠졌습니다: {arg}"),
+        (ErrorKind::UnknownArgument, Some(arg), _, _) => format!("wave rename에서 알아보지 못한 인자: {arg}"),
+        (ErrorKind::InvalidValue, Some(arg), Some(""), _) => format!("wave rename 인자 {arg}의 값이 빠졌습니다"),
+        (ErrorKind::InvalidValue, Some(arg), Some(value), _) => format!("wave rename 인자 {arg}의 값이 올바르지 않습니다: {value}"),
+        (ErrorKind::ArgumentConflict, Some(arg), _, Some(prior)) if arg == prior => format!("wave rename 인자 {arg}를 여러 번 쓸 수 없습니다"),
+        (ErrorKind::ArgumentConflict, Some(arg), _, Some(prior)) => format!("wave rename 인자 {arg}와 {prior}를 함께 쓸 수 없습니다"),
+        (ErrorKind::ArgumentConflict, Some(arg), _, _) => format!("wave rename 인자 {arg}가 다른 인자와 충돌합니다"),
+        (ErrorKind::TooManyValues, Some(arg), Some(value), _) => format!("wave rename 인자 {arg}에 값이 너무 많습니다: {value}"),
+        (ErrorKind::MissingRequiredArgument, Some(arg), _, _) => format!("wave rename 필수 인자가 빠졌습니다: {arg}"),
         _ => {
             let reason = match e.kind() {
                 ErrorKind::UnknownArgument => "알 수 없는 인자",
@@ -1011,7 +1013,7 @@ fn rename_parse_error_ko(e: &clap::Error) -> String {
                 ErrorKind::MissingSubcommand => "하위 명령 누락",
                 _ => "인자 형식 오류",
             };
-            format!("cys rename 입력이 올바르지 않습니다: {reason}")
+            format!("wave rename 입력이 올바르지 않습니다: {reason}")
         }
     }
 }
@@ -1210,7 +1212,7 @@ fn sha256_file(path: &str) -> Option<String> {
 fn connect_raw() -> Result<std::os::unix::net::UnixStream, String> {
     let path = socket_path();
     std::os::unix::net::UnixStream::connect(&path)
-        .map_err(|e| format!("cannot connect to cysd at {}: {e}", path.display()))
+        .map_err(|e| format!("cannot connect to waved at {}: {e}", path.display()))
 }
 
 /// ERROR_PIPE_BUSY(231) 한정 bounded 재시도로 named pipe 를 연다. 그 외 오류(파이프 부재
@@ -1238,7 +1240,7 @@ fn open_pipe_busy_retry(path: &std::path::Path) -> std::io::Result<std::fs::File
 fn connect_raw() -> Result<std::fs::File, String> {
     let path = socket_path();
     open_pipe_busy_retry(&path)
-        .map_err(|e| format!("cannot connect to cysd pipe {}: {e}", path.display()))
+        .map_err(|e| format!("cannot connect to waved pipe {}: {e}", path.display()))
 }
 
 /// 온보딩④: 자동 기동 허용 — ping(순수 프로브)·daemon status는 main()에서 끈다.
@@ -1248,7 +1250,7 @@ static AUTOSTART_TRIED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 fn sibling_daemon_path() -> Option<std::path::PathBuf> {
-    let name = if cfg!(windows) { "cysd.exe" } else { "cysd" };
+    let name = if cfg!(windows) { "waved.exe" } else { "waved" };
     std::env::current_exe()
         .ok()?
         .parent()
@@ -1259,15 +1261,6 @@ fn sibling_daemon_path() -> Option<std::path::PathBuf> {
 // ── Windows 진짜 KeepAlive 패리티(작업 스케줄러 RestartOnFailure) 헬퍼 (mac launchd KeepAlive 대응) ──
 // schtasks 명령줄 플래그엔 RestartOnFailure(사망 시 재기동)가 없어 태스크 XML 로만 설정 가능하다.
 // 아래 함수는 전부 #[cfg(windows)] — mac 빌드에선 컴파일되지 않는다(dead_code 없음).
-
-#[cfg(windows)]
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
 
 /// env(USERDOMAIN·USERNAME)로 "DOMAIN\\User" 조립 — 순수(테스트 가능). USERNAME 부재·빈값 = None.
 #[cfg(any(windows, test))]
@@ -1292,63 +1285,6 @@ fn current_user_id() -> Option<String> {
     let out = std::process::Command::new("whoami").output().ok()?;
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (out.status.success() && !s.is_empty()).then_some(s)
-}
-
-/// cysd 작업 스케줄러 태스크 XML. LogonTrigger(현재 사용자) + RestartOnFailure(PT1M×10) +
-/// ★ExecutionTimeLimit PT0S(무제한 — 기본 72h 제한이 장수 데몬을 죽인다) + IgnoreNew(중복 인스턴스 억제) +
-/// 배터리 제약 해제 + StartWhenAvailable + LeastPrivilege(=schtasks /RL LIMITED 대응).
-#[cfg(windows)]
-fn cysd_task_xml(daemon: &std::path::Path, user_id: &str) -> String {
-    let cmd = xml_escape(&daemon.display().to_string());
-    let uid = xml_escape(user_id);
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo>
-    <Description>CYSJavis terminal daemon (cysd) — 로그온 자동기동 + 사망 시 자동 재기동(RestartOnFailure)</Description>
-  </RegistrationInfo>
-  <Triggers>
-    <LogonTrigger>
-      <Enabled>true</Enabled>
-      <UserId>{uid}</UserId>
-    </LogonTrigger>
-  </Triggers>
-  <Principals>
-    <Principal id="Author">
-      <UserId>{uid}</UserId>
-      <LogonType>InteractiveToken</LogonType>
-      <RunLevel>LeastPrivilege</RunLevel>
-    </Principal>
-  </Principals>
-  <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <AllowHardTerminate>true</AllowHardTerminate>
-    <StartWhenAvailable>true</StartWhenAvailable>
-    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
-    <IdleSettings>
-      <StopOnIdleEnd>false</StopOnIdleEnd>
-      <RestartOnIdle>false</RestartOnIdle>
-    </IdleSettings>
-    <AllowStartOnDemand>true</AllowStartOnDemand>
-    <Enabled>true</Enabled>
-    <Hidden>false</Hidden>
-    <RunOnlyIfIdle>false</RunOnlyIfIdle>
-    <RestartOnFailure>
-      <Interval>PT1M</Interval>
-      <Count>10</Count>
-    </RestartOnFailure>
-    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-    <Priority>7</Priority>
-  </Settings>
-  <Actions Context="Author">
-    <Exec>
-      <Command>{cmd}</Command>
-    </Exec>
-  </Actions>
-</Task>"#
-    )
 }
 
 /// XML 을 UTF-16LE(BOM 포함)로 기록 — schtasks /Create /XML 이 요구하는 인코딩(UTF-16 관례).
@@ -1412,6 +1348,11 @@ fn poll_socket_ready() -> Option<ConnStream> {
     None
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn primary_launchd_check(_socket: &std::path::Path, check: impl FnOnce() -> bool) -> bool {
+    check()
+}
+
 /// 온보딩④: 연결 실패 시 형제 cysd를 자동 기동 후 재시도 — 신규 머신 zero-setup.
 /// 옵트아웃: CYS_NO_AUTOSTART=1. (데몬 중복 기동은 cysd 자체의 flock이 차단)
 /// ★W3: macOS에서 launchd가 cysd를 소유(적재)하면 sibling spawn 대신 launchctl kickstart로
@@ -1421,6 +1362,15 @@ fn connect() -> Result<ConnStream, String> {
     match connect_raw() {
         Ok(s) => Ok(s),
         Err(first) => {
+            if cys::rename_handover::autostart_blocked(&socket_path())? {
+                return Err("업데이트 이름 변경이 진행 중입니다. 앱의 복원 안내를 확인하세요.".into());
+            }
+            #[cfg(target_os = "macos")]
+            if primary_launchd_check(&socket_path(), || !matches!(
+                cys::launchd::state_for_label(cys::launchd::LEGACY_LAUNCHD_LABEL), cys::launchd::LaunchdState::NotLoaded
+            )) {
+                return Err("기존 자동 시작 등록을 이관해야 합니다. Wave Terminal 앱을 열어 업데이트를 완료하세요.".into());
+            }
             let opted_out = cys::env_compat("CYS_NO_AUTOSTART")
                 .map(|v| v == "1")
                 .unwrap_or(false);
@@ -1433,29 +1383,29 @@ fn connect() -> Result<ConnStream, String> {
             // launchd 위임 우선(macOS·적재 시). 실패 시 아래 sibling 경로로 폴백.
             #[cfg(target_os = "macos")]
             {
-                if cys::launchd::should_delegate_autostart(cys::launchd::is_loaded()) {
-                    eprintln!("[cys] cysd not serving — delegating to launchd (launchctl kickstart)");
+                if primary_launchd_check(&socket_path(), || cys::launchd::should_delegate_autostart(cys::launchd::is_loaded())) {
+                    eprintln!("[wave] waved not serving — delegating to launchd (launchctl kickstart)");
                     if cys::launchd::kickstart() {
                         if let Some(s) = poll_socket_ready() {
                             return Ok(s);
                         }
                         eprintln!(
-                            "[cys] launchd kickstart did not yield a socket within 4s — falling back to sibling spawn"
+                            "[wave] launchd kickstart did not yield a socket within 4s — falling back to sibling spawn"
                         );
                     } else {
-                        eprintln!("[cys] launchctl kickstart failed — falling back to sibling spawn");
+                        eprintln!("[wave] launchctl kickstart failed — falling back to sibling spawn");
                     }
                 }
             }
             let Some(daemon) = sibling_daemon_path() else {
-                return Err(format!("{first} (no sibling cysd to autostart)"));
+                return Err(format!("{first} (no sibling waved to autostart)"));
             };
-            eprintln!("[cys] cysd not running — autostarting {}", daemon.display());
+            eprintln!("[wave] waved not running — autostarting {}", daemon.display());
             if spawn_detached_daemon(&daemon).is_err() {
                 return Err(first);
             }
             poll_socket_ready()
-                .ok_or_else(|| format!("{first} (autostarted cysd did not come up within 4s)"))
+                .ok_or_else(|| format!("{first} (autostarted waved did not come up within 4s)"))
         }
     }
 }
@@ -1666,7 +1616,7 @@ fn run(command: Command) -> i32 {
                                 Some(d) => println!("QUEUED (depth {d})"),
                                 // 구 데몬은 queued 파라미터를 모르고 즉시 주입한다 —
                                 // "QUEUED"로 오표시하지 않는다(skew의 결정론 신호).
-                                None => return Err("데몬이 --queued를 지원하지 않아 직접 주입됨(구버전 cysd — 재기동으로 갱신하라)".into()),
+                                None => return Err("데몬이 --queued를 지원하지 않아 직접 주입됨(구버전 데몬 — 재기동으로 갱신하라)".into()),
                             }
                         }
                     }
@@ -1735,7 +1685,7 @@ fn run(command: Command) -> i32 {
         Command::Fleet { json: as_json } => return run_fleet(as_json),
 
         Command::Pause { reason } => request("system.pause", json!({"reason": reason}))
-            .map(|_| println!("PAUSED — 큐 배달·스케줄 발화 동결 (이미 실행 중인 에이전트 행동은 계속된다; cys resume로 해제)")),
+            .map(|_| println!("PAUSED — 큐 배달·스케줄 발화 동결 (이미 실행 중인 에이전트 행동은 계속된다; wave resume로 해제)")),
 
         Command::Resume => request("system.resume", json!({}))
             .map(|_| println!("RESUMED — 동결된 큐·스케줄 재개")),
@@ -1750,6 +1700,9 @@ fn run(command: Command) -> i32 {
                 std::thread::sleep(std::time::Duration::from_secs(12));
                 std::process::exit(1);
             });
+            // C4d: 평문 drain 로직 이전에 비밀 없는 좌석 배치 메타데이터를 비공개 파일로 남긴다.
+            // 실패는 조용히 무시한다 — stdout·종료 코드는 기존과 동일해야 한다.
+            let snapshot = drain_snapshot_begin();
             let mut n = 0;
             let mut failed = false;
             match request("system.topology", json!({})) {
@@ -1768,7 +1721,9 @@ fn run(command: Command) -> i32 {
                 std::thread::sleep(std::time::Duration::from_secs(8));
             }
             println!("drained {n} node(s)");
-            return if failed { 1 } else { 0 };
+            let status = if failed { 1 } else { 0 };
+            drain_snapshot_finish(snapshot, status);
+            return status;
         }
 
         Command::GateCheck => {
@@ -2208,7 +2163,7 @@ fn run(command: Command) -> i32 {
                 request("learn.propose", json!({"reason": "manual", "topic": t}))
                     .map(|r| println!("{}", serde_json::to_string_pretty(&r).unwrap()))
             } else {
-                Err("usage: cys learn <topic> | cys learn --status".to_string())
+                Err("usage: wave learn <topic> | wave learn --status".to_string())
             }
         }
 
@@ -2320,20 +2275,21 @@ fn run_feed(action: FeedAction) -> i32 {
 }
 
 /// (2c) 재연결해도 되는 일시적 오류인가? cmux isTransientEventStreamError(Events.swift:105-134) 포팅.
-/// ★실측 정렬: cys connect()는 `cannot connect to cysd at {path}: {e}`를 반환하고 {e}는 OS 에러
+/// ★실측 정렬: wave connect()는 `cannot connect to waved at {path}: {e}`를 반환하고 {e}는 OS 에러
 /// Display라 누락 소켓="No such file or directory (os error 2)"·거부="Connection refused (os error 61)",
 /// read half-open="Broken pipe (os error 32)"/"Connection reset by peer (os error 54)"로 나온다.
 /// 서버가 (2a) slow_consumer로 스트림을 종료한 케이스도 재연결 대상. 그 외(invalid_params 등)는 비-transient.
 fn is_transient_event_error(msg: &str) -> bool {
     let m = msg.to_lowercase();
     const MARKERS: &[&str] = &[
-        "no such file or directory", // cys connect_raw: 누락 소켓(ENOENT) — 데몬 재기동 중
+        "no such file or directory", // wave connect_raw: 누락 소켓(ENOENT) — 데몬 재기동 중
         "connection refused",        // 데몬 부팅 직전(ECONNREFUSED)
         "connection reset",          // half-open read(ECONNRESET)
         "broken pipe",               // write/read 단절(EPIPE)
         "event stream closed",       // 정상 EOF — 재연결로 이어붙임
         "slow_consumer",             // 서버가 (2a)로 종료한 케이스
-        "cannot connect to cysd",    // connect_raw 래퍼 문구(autostart 실패 포함)
+        "cannot connect to waved",   // canonical connect_raw wrapper
+        "cannot connect to cysd",    // compatibility: legacy connect_raw 래퍼 문구(autostart 실패 포함)
         "os error 32",
         "os error 35",
         "os error 54",
@@ -2668,7 +2624,7 @@ fn run_cost_baseline(action: CostBaselineAction) -> i32 {
             let locked_raw = match std::fs::read_to_string(&path) {
                 Ok(s) => s,
                 Err(_) => {
-                    eprintln!("박제본 없음 — 먼저 `cys cost-baseline lock` 실행: {}", path.display());
+                    eprintln!("박제본 없음 — 먼저 `wave cost-baseline lock` 실행: {}", path.display());
                     return 2;
                 }
             };
@@ -2751,7 +2707,7 @@ fn run_skill(action: SkillAction) -> i32 {
         SkillAction::List => (|| {
             if !skills_dir.exists() {
                 return Err(format!(
-                    "no skills dir: {} (run cys init-pack)",
+                    "no skills dir: {} (run wave init-pack)",
                     skills_dir.display()
                 ));
             }
@@ -2780,7 +2736,7 @@ fn run_skill(action: SkillAction) -> i32 {
                 println!("{name}\t{desc}{}", if *local { "\t[local]" } else { "" });
             }
             if merged.is_empty() {
-                println!("(no skills yet — `cys skill new <name> --description \"...\"`)");
+                println!("(no skills yet — `wave skill new <name> --description \"...\"`)");
             }
             Ok(())
         })(),
@@ -2850,7 +2806,7 @@ fn run_persona(action: PersonaAction) -> i32 {
                 println!("  {:<20} {}-{} (기본 {}) — {}", k.key, k.min, k.max, k.default, k.label);
             }
             println!(
-                "\n페르소나: cys persona set --persona \"말투·호칭·언어 자유 텍스트\" (최대 {}자)",
+                "\n페르소나: wave persona set --persona \"말투·호칭·언어 자유 텍스트\" (최대 {}자)",
                 cys::overrides::PERSONA_MAX_LEN
             );
             Ok(())
@@ -3161,7 +3117,7 @@ fn run_init_pack(force: bool, no_install_hook: bool, claude_settings: Option<Str
         kept,
         if force { ", forced" } else { "" }
     );
-    println!("다음: cys launch-agent --role master --agent claude  (역할 지침 자동 주입)");
+    println!("다음: wave launch-agent --role master --agent claude  (역할 지침 자동 주입)");
 
     if no_install_hook {
         return 0;
@@ -3296,7 +3252,7 @@ fn install_claude_hook(settings_path: &str, pack_dir: &std::path::Path) -> Resul
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// cys doctor (§3.4) — 시스템 자기진단·수리. 진단은 읽기전용, --fix는 안전 항목만
+// wave doctor (§3.4) — 시스템 자기진단·수리. 진단은 읽기전용, --fix는 안전 항목만
 // (stale lock·고아 소켓·staging 잔재 제거 + hook 재등록). ★사용자 데이터·pack 본체·
 // channels.db는 절대 삭제하지 않는다(비가역 삭제 경계).
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3367,7 +3323,7 @@ fn diag_pack_version(ctx: &DoctorCtx) -> DiagItem {
             name: "pack-version",
             status: DiagStatus::Warn,
             detail: "팩 미설치(.pack-version 없음)".into(),
-            action: "cys init-pack 실행".into(),
+            action: "wave init-pack 실행".into(),
         },
         Ok(s) => {
             let disk = s.trim().to_string();
@@ -3383,7 +3339,7 @@ fn diag_pack_version(ctx: &DoctorCtx) -> DiagItem {
                 cys::pack::parse_semver(&disk),
                 cys::pack::parse_semver(&ctx.binary_version),
             ) {
-                (Some(d), Some(b)) if d < b => "팩이 바이너리보다 구버전 — cys init-pack 권장",
+                (Some(d), Some(b)) if d < b => "팩이 바이너리보다 구버전 — wave init-pack 권장",
                 (Some(d), Some(b)) if d > b => "팩이 바이너리보다 신버전(바이너리 구버전) — 업데이트 권장",
                 _ => "버전 파싱 불가 — 수동 확인",
             };
@@ -3418,7 +3374,7 @@ fn diag_pack_state(ctx: &DoctorCtx) -> DiagItem {
             name: "pack-state",
             status: DiagStatus::Fail,
             detail: format!(".pack-state.json 손상: {e}"),
-            action: "cys pack-repair-channel (doctor는 상태파일을 자동 수정하지 않음)".into(),
+            action: "wave pack-repair-channel (doctor는 상태파일을 자동 수정하지 않음)".into(),
         },
     }
 }
@@ -3432,7 +3388,7 @@ fn diag_install_manifest(ctx: &DoctorCtx) -> DiagItem {
                 name: "install-manifest",
                 status: DiagStatus::Warn,
                 detail: "설치 매니페스트 없음(구설치본) — 자동갱신·prune이 보존측으로만 동작".into(),
-                action: "cys init-pack --force 로 매니페스트 재생성 권장".into(),
+                action: "wave init-pack --force 로 매니페스트 재생성 권장".into(),
             }
         } else {
             DiagItem {
@@ -3460,7 +3416,7 @@ fn diag_install_manifest(ctx: &DoctorCtx) -> DiagItem {
             name: "install-manifest",
             status: DiagStatus::Fail,
             detail: "설치 매니페스트 파싱 실패(손상)".into(),
-            action: "cys init-pack --force 로 재생성".into(),
+            action: "wave init-pack --force 로 재생성".into(),
         },
     }
 }
@@ -3522,7 +3478,7 @@ fn diag_hook(ctx: &DoctorCtx, fix: bool) -> DiagItem {
             "SessionStart hook 미등록({}개 settings 확인)",
             ctx.settings_paths.len()
         ),
-        action: "cys doctor --fix 또는 cys init-pack 로 등록".into(),
+        action: "wave doctor --fix 또는 wave init-pack 로 등록".into(),
     }
 }
 
@@ -3571,7 +3527,7 @@ fn diag_orphan_socket(ctx: &DoctorCtx, fix: bool) -> DiagItem {
             name: "socket",
             status: DiagStatus::Warn,
             detail: "고아 소켓(리스너 없음)".into(),
-            action: "cys doctor --fix 로 제거".into(),
+            action: "wave doctor --fix 로 제거".into(),
         }
     }
 }
@@ -3641,7 +3597,7 @@ fn diag_stale_lock(ctx: &DoctorCtx, fix: bool) -> DiagItem {
             name: "startup-lock",
             status: DiagStatus::Warn,
             detail: "잔여 시작 락(아무도 미보유)".into(),
-            action: "cys doctor --fix 로 제거".into(),
+            action: "wave doctor --fix 로 제거".into(),
         }
     };
     unsafe {
@@ -3750,7 +3706,7 @@ fn diag_staging_residue(ctx: &DoctorCtx, fix: bool) -> DiagItem {
             name: "staging-residue",
             status: DiagStatus::Warn,
             detail: format!("staging 잔재 {}건", residue.len()),
-            action: "cys doctor --fix 로 정리".into(),
+            action: "wave doctor --fix 로 정리".into(),
         }
     }
 }
@@ -3918,7 +3874,7 @@ fn run_doctor(fix: bool, json_out: bool) -> i32 {
         );
     } else {
         println!(
-            "cys doctor — 시스템 자기진단{}",
+            "wave doctor — 시스템 자기진단{}",
             if fix { " (--fix)" } else { "" }
         );
         for i in &items {
@@ -3962,7 +3918,7 @@ fn run_doctor_custom_report() -> i32 {
     let version = std::fs::read_to_string(dir.join(".pack-version"))
         .unwrap_or_else(|_| "?".into());
     let mut md = format!(
-        "# cys 커스터마이즈 실태 리포트\n\n- 바이너리: {}\n- 팩: {}\n\n## 병합 대기 원장 ({}건)\n",
+        "# Wave 커스터마이즈 실태 리포트\n\n- 바이너리: {}\n- 팩: {}\n\n## 병합 대기 원장 ({}건)\n",
         env!("CARGO_PKG_VERSION"), version.trim(), pending.len()
     );
     for (rel, e) in &pending {
@@ -4109,7 +4065,7 @@ fn run_boot(cwd: Option<String>, as_json: bool) -> i32 {
     let mut launched = 0;
     let mut failed = 0;
     let mut outcomes = Vec::new();
-    println!("cys boot — 기본 편성 점검 (master + CSO·worker, 리뷰어는 필요 시 명시 기동)");
+    println!("wave boot — 기본 편성 점검 (master + CSO·worker, 리뷰어는 필요 시 명시 기동)");
     for (role, agent) in BOOT_PLAN {
         let bin = agents
             .get(*agent)
@@ -4178,7 +4134,7 @@ fn run_boot(cwd: Option<String>, as_json: bool) -> i32 {
         }
     }
     println!(
-        "boot 완료: 신규 기동 {launched} · 실패 {failed} · 현황은 `cys list`로 확인 (role 열)"
+        "boot 완료: 신규 기동 {launched} · 실패 {failed} · 현황은 `wave list`로 확인 (role 열)"
     );
     if as_json {
         println!("{}", json!({"roles": outcomes,
@@ -4199,7 +4155,7 @@ fn load_agent_spec(agent: &str) -> Result<Value, String> {
         .and_then(|s| serde_json::from_str(&s).ok())
         .ok_or_else(|| {
             format!(
-                "agents.json not found at {} — run `cys init-pack` first",
+                "agents.json not found at {} — run `wave init-pack` first",
                 agents_path.display()
             )
         })?;
@@ -4245,7 +4201,7 @@ fn compose_directive(role: &str) -> Result<String, String> {
         ));
         directive.push_str(&memory);
     }
-    // 스킬 색인(표지) 동봉 — 본문은 필요 시 `cys skill show <name>`으로 점진 로드.
+    // 스킬 색인(표지) 동봉 — 본문은 필요 시 `wave skill show <name>`으로 점진 로드.
     // ① 오버레이: ~/.cys/local/skills 가 동명 팩 스킬을 shadowing(업데이트 불가침 사용자 커스텀).
     let scan_skills = |root: &std::path::Path| -> Vec<(String, String)> {
         let mut out = Vec::new();
@@ -4276,7 +4232,7 @@ fn compose_directive(role: &str) -> Result<String, String> {
         skill_index.insert(name, (desc, true)); // 동명 → local 이 이긴다(shadowing)
     }
     if !skill_index.is_empty() {
-        directive.push_str("\n\n■ 보유 스킬 색인 (본문: `cys skill show <name>`)\n");
+        directive.push_str("\n\n■ 보유 스킬 색인 (본문: `wave skill show <name>`)\n");
         for (name, (desc, local)) in &skill_index {
             directive.push_str(&format!(
                 "- {name}: {desc}{}\n",
@@ -4900,7 +4856,7 @@ fn launch_once_on_surface(
         return Err(format!(
             "agent '{agent}' readiness not confirmed in {max_wait_secs}s — directive injection \
              aborted (셸 오주입 차단). 실패 surface는 정리된다. 마지막 화면 꼬리:\n{tail}\n\
-             → agents.json의 cmd를 점검하고 `cys launch-agent --role <role> --agent {agent}`로 \
+             → agents.json의 cmd를 점검하고 `wave launch-agent --role <role> --agent {agent}`로 \
              재시도하라"
         )
         .into());
@@ -4933,7 +4889,7 @@ fn launch_once_on_surface(
             directive.len()
         );
     } else {
-        eprintln!("[launch-agent] warning: directive not visible on screen — verify with `cys read-screen --surface {}`", surface_ref(sid));
+        eprintln!("[launch-agent] warning: directive not visible on screen — verify with `wave read-screen --surface {}`", surface_ref(sid));
         if !fresh { return Err("node-recover directive not visible on screen".into()); }
     }
 
@@ -5144,7 +5100,7 @@ fn run_launch_agent_opts(
     // 빈 문자열은 None으로 정규화 — 구버전 topology의 "cwd": "" 가 PTY 생성을 깨거나
     // 잘못된 타이틀을 만드는 것을 차단(restore 경로 방어).
     // ★루트 cwd 교정(오너 2026-07-15 실사고): Finder 런칭 GUI·launchd 소유 cysd의 cwd는 "/"라
-    // ▶CEO/▶부서장 버튼·cys boot 경유 노드가 루트에서 태어나고, 그 값이 phoenix roster에
+    // ▶CEO/▶부서장 버튼·wave boot 경유 노드가 루트에서 태어나고, 그 값이 phoenix roster에
     // "진실"로 영속돼 이후 복원까지 오염시켰다. 루트는 이 제품에서 워크플로우 폴더일 수 없다
     // — home으로 교정한다(명시 --cwd "/"도 교정 대상 · restore가 넘기는 오염 roster 값도 치유).
     let cwd = cwd
@@ -5254,7 +5210,7 @@ fn run_launch_agent_opts(
                     ),
                     Err(e) => eprintln!(
                         "[launch-agent] failed surface {} close 실패: {e} — \
-                         `cys close-surface {}`로 수동 정리 필요(role 점유 잔존 가능)",
+                         `wave close-surface {}`로 수동 정리 필요(role 점유 잔존 가능)",
                         surface_ref(sid),
                         surface_ref(sid)
                     ),
@@ -5275,13 +5231,13 @@ fn run_daemon_cmd(action: DaemonAction) -> i32 {
             match action {
                 DaemonAction::Install { takeover } => {
                     let daemon = sibling_daemon_path()
-                        .ok_or("cysd binary not found next to cys (같은 폴더에 동봉 필요)")?;
+                        .ok_or("waved binary not found next to wave (같은 폴더에 동봉 필요)")?;
                     let running = connect_raw().is_ok();
                     if running && !takeover {
                         return Err(
                             "데몬이 이미 가동 중 — 등록만 하면 launchd 인스턴스가 flock에 막혀 재시도 루프가 된다.\n\
-                             기존 데몬을 정지하고 소유권을 이관하려면: cys daemon install --takeover\n\
-                             (주의: 가동 중인 세션이 소멸한다 — `cys list`로 먼저 확인)"
+                             기존 데몬을 정지하고 소유권을 이관하려면: wave daemon install --takeover\n\
+                             (주의: 가동 중인 세션이 소멸한다 — `wave list`로 먼저 확인)"
                                 .into(),
                         );
                     }
@@ -5399,11 +5355,11 @@ fn run_daemon_cmd(action: DaemonAction) -> i32 {
         }
         #[cfg(windows)]
         {
-            const TASK: &str = "cysd";
+            const TASK: &str = "waved";
             match action {
                 DaemonAction::Install { takeover: _ } => {
                     let daemon = sibling_daemon_path()
-                        .ok_or("cysd.exe not found next to cys.exe")?;
+                        .ok_or("waved.exe not found next to wave.exe")?;
                     // ★진짜 KeepAlive 패리티(mac launchd KeepAlive 대응): schtasks 명령줄 등록(ONLOGON뿐)엔
                     // RestartOnFailure 플래그가 없어 사망 시 자동 재기동이 불가했다(구: "미지원"). 태스크 XML 로
                     // RestartOnFailure(PT1M×10) + ExecutionTimeLimit PT0S(무제한·기본 72h 제한이 데몬을 죽인다) +
@@ -5422,7 +5378,7 @@ fn run_daemon_cmd(action: DaemonAction) -> i32 {
                     let user = current_user_id()
                         .ok_or("현재 사용자(whoami/USERNAME) 확인 실패 — 태스크 XML principal 생성 불가")?;
                     let xml = cysd_task_xml(&daemon, &user);
-                    let xml_path = std::env::temp_dir().join("cysd-task.xml");
+                    let xml_path = std::env::temp_dir().join("waved-task.xml");
                     write_utf16le_bom(&xml_path, &xml).map_err(|e| format!("태스크 XML 기록 실패: {e}"))?;
                     let out = std::process::Command::new("schtasks")
                         .args(["/Create", "/XML"])
@@ -6275,8 +6231,26 @@ fn drain_verify_targets() -> Vec<VerifyTarget> {
     targets
 }
 
-/// `cys drain --verify` 진입점 — 결정론 JSON을 stdout에, exit code로 전원 저장 여부를 반환한다
+/// `wave drain --verify` 진입점 — 결정론 JSON을 stdout에, exit code로 전원 저장 여부를 반환한다
 /// (전원 saved=0, 아니면 1). 0-노드는 우아한 no-op(exit 0)[A3-F5].
+/// system.identify 응답의 daemon_pid 를 OS 프로세스 신원(PID·시작시각·실행경로)으로 확정한다.
+fn drain_daemon_identity(identify: &Value) -> Option<cys::rename_handover::ProcessIdentity> {
+    let pid = identify["daemon_pid"].as_u64().filter(|pid| *pid > 0 && *pid <= u32::MAX as u64)?;
+    cys::rename_handover::process_identity(pid as u32).ok().flatten()
+}
+
+/// 평문 drain 직전 비공개 배치 스냅샷 기록(best-effort, 출력 없음).
+fn drain_snapshot_begin() -> Option<cys::update_snapshot::Reference> {
+    let daemon = drain_daemon_identity(&request("system.identify", json!({})).ok()?)?;
+    let surfaces = request("surface.list", json!({})).ok()?;
+    cys::update_snapshot::write(&socket_path(), &daemon, &surfaces).ok()
+}
+
+/// drain 종료 상태 기록. 종료 코드는 저장 성공의 증거가 아니므로 '검증됨'으로 표시하지 않는다.
+fn drain_snapshot_finish(reference: Option<cys::update_snapshot::Reference>, status: i32) {
+    if let Some(reference) = reference { let _ = cys::update_snapshot::finish_drain(&reference, status); }
+}
+
 fn run_drain_verify(timeout: u64) -> i32 {
     // 백스톱 하드 워치독 — 메인 로직이 어떤 이유로든 멈춰도 프로세스가 영구 정지하지 않게(plain drain 12s 패턴).
     // fan-out은 timeout+5s 안에 반환하므로 정상 경로에선 절대 발화하지 않는다.
@@ -6323,7 +6297,7 @@ fn run_fleet(as_json: bool) -> i32 {
                         .map(std::path::PathBuf::from)
                         .unwrap_or_else(|| cys::dept_socket_path(name));
                     let disp = meta["display_name"].as_str().unwrap_or(name).to_string();
-                    // 방출 socket = 실제 도달 소켓과 동일 경로 문자열(브리지가 cys --socket 로 재사용).
+                    // 방출 socket = 실제 도달 소켓과 동일 경로 문자열(브리지가 wave --socket 로 재사용).
                     let sock_str = sock.to_string_lossy().into_owned();
                     targets.push((sock, disp, name.clone(), Value::String(sock_str)));
                 }
@@ -6400,7 +6374,7 @@ fn run_status(as_json: bool) -> i32 {
     }
     if r["paused"].as_bool() == Some(true) {
         println!(
-            "⛔ PAUSED — {} (cys resume로 해제; 큐·스케줄 동결 중, 실행 중 에이전트 행동은 계속)",
+            "⛔ PAUSED — {} (wave resume로 해제; 큐·스케줄 동결 중, 실행 중 에이전트 행동은 계속)",
             r["pause_info"]["reason"].as_str().unwrap_or("")
         );
     }
@@ -6447,7 +6421,7 @@ fn run_status(as_json: bool) -> i32 {
     let pending = r["feed"]["pending"].as_u64().unwrap_or(0);
     if pending > 0 {
         println!(
-            "feed: {pending} pending (oldest {}) — `cys feed list --status pending`",
+            "feed: {pending} pending (oldest {}) — `wave feed list --status pending`",
             fmt_secs(r["feed"]["oldest_pending_age_secs"].as_u64().unwrap_or(0))
         );
     }
@@ -6653,7 +6627,7 @@ fn run_cycle_agent(
                        "body": body, "surface_id": sid, "wait": false}),
             )?;
             let req_id = push["request_id"].as_str().unwrap_or("").to_string();
-            inject_text(vsid, &format!("[CYCLE-VERIFY] role '{role_name}'(surface:{sid})의 컨텍스트 순환 전 저장 검증 요청. SESSION_STATE/TODO 파일이 방금 갱신되었는지 확인하고 `cys feed reply {req_id} allow` 또는 `cys feed reply {req_id} deny`로 판정하라."))?;
+            inject_text(vsid, &format!("[CYCLE-VERIFY] role '{role_name}'(surface:{sid})의 컨텍스트 순환 전 저장 검증 요청. SESSION_STATE/TODO 파일이 방금 갱신되었는지 확인하고 `wave feed reply {req_id} allow` 또는 `wave feed reply {req_id} deny`로 판정하라."))?;
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
             let decision = loop {
                 if std::time::Instant::now() >= deadline {
@@ -6739,7 +6713,7 @@ fn run_node_recover(surface: Option<String>, role: Option<String>, resume: bool)
         let entry = surface_entry(sid)?;
         if entry["exited"].as_bool() == Some(true) {
             return Err(format!(
-                "surface:{sid} 셸 자체가 종료됨 — `cys restore`로 재기동하라"
+                "surface:{sid} 셸 자체가 종료됨 — `wave restore`로 재기동하라"
             ));
         }
         let agent = entry["agent"]
@@ -6759,7 +6733,7 @@ fn run_node_recover(surface: Option<String>, role: Option<String>, resume: bool)
         if entry["env_injected"].as_bool() != Some(true) {
             return Err(format!(
                 "surface:{sid}는 env 미주입 pane(수동 생성·구세션) — Windows에선 순수 cmd 재기동 시 \
-                 CLAUDE_CONFIG_DIR 등이 실리지 않아 안전하지 않다. `cys restore` 또는 \
+                 CLAUDE_CONFIG_DIR 등이 실리지 않아 안전하지 않다. `wave restore` 또는 \
                  master에게 이 pane의 새 생성·복원을 요청하라"
             ));
         }
@@ -6937,7 +6911,7 @@ fn run_restore(cwd: Option<String>, include_master: bool, resume: bool, only_rol
     })();
     match result {
         Ok((ok, fail)) => {
-            println!("restore 완료: 재기동 {ok} · 실패 {fail} · 현황 `cys status`");
+            println!("restore 완료: 재기동 {ok} · 실패 {fail} · 현황 `wave status`");
             if fail > 0 {
                 1
             } else {
@@ -7024,7 +6998,7 @@ fn run_reinject(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 무중단 팩 업데이트 (cys pack-update, DESIGN-noshutdown-pack-update §2-②/§7)
+// 무중단 팩 업데이트 (wave pack-update, DESIGN-noshutdown-pack-update §2-②/§7)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// 버전 3축 게이트(§7-④) 판정. 순수 함수 — 단위테스트 대상.
@@ -7248,7 +7222,7 @@ fn build_pack_manifest_value(
     serde_json::Value::Object(obj)
 }
 
-/// `cys pack-manifest` 진입점 — 권위 manifest를 stdout으로 방출(§2-①). CI가 standalone 팩
+/// `wave pack-manifest` 진입점 — 권위 manifest를 stdout으로 방출(§2-①). CI가 standalone 팩
 /// manifest.json의 단일 SOT로 캡처한다.
 fn run_pack_manifest(
     key_id: Option<String>,
@@ -7525,7 +7499,7 @@ fn pack_update_from_dir(
             // 손상 상태의 튜플은 신뢰 불가 — typed 거부, repair 선행 요구(v4 §5).
             return Err(format!(
                 "[pack-state-corrupt] .pack-state.json 손상({e}) — pack-update 거부. \
-                 cys pack-repair-channel 로 복구 후 재시도하라"
+                 wave pack-repair-channel 로 복구 후 재시도하라"
             ));
         }
         cys::pack::PackStateRead::Valid(st) => {
@@ -7534,7 +7508,7 @@ fn pack_update_from_dir(
                 // 선행 경로 — pack-update는 보수적으로 거부한다.
                 return Err(format!(
                     "[pack-state-mismatch] state.base {:?} ≠ .pack-version {:?} — pack-update 거부. \
-                     cys init-pack(자가치유) 또는 cys pack-repair-channel 후 재시도하라",
+                     wave init-pack(자가치유) 또는 wave pack-repair-channel 후 재시도하라",
                     st.base_version, disk_version
                 ));
             }
@@ -7545,7 +7519,7 @@ fn pack_update_from_dir(
     if disk_channel == "pro" && manifest.channel == "free" {
         return Err(
             "[pack-channel-refused] pro 설치에 free 번들 — pro→free 전환은 \
-             cys pack-downgrade-to-free 전용 명령만 허용된다"
+             wave pack-downgrade-to-free 전용 명령만 허용된다"
                 .to_string(),
         );
     }
@@ -7645,7 +7619,7 @@ fn pack_state_base() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
-/// `cys pack-downgrade-to-free`(free/pro v3 §5) — 유일한 pro→free 전환 경로. license-aware:
+/// `wave pack-downgrade-to-free`(free/pro v3 §5) — 유일한 pro→free 전환 경로. license-aware:
 /// 유효 pro 라이선스 실재 시 기본 거부(--override-valid-license로만 통과). 실행 = state를
 /// free로 전환 후 내장 팩 재설치(prune이 pro 전용 파일 제거 — 의도된 강등 동작).
 fn run_pack_downgrade_to_free(yes: bool, override_valid_license: bool) -> i32 {
@@ -7664,7 +7638,7 @@ fn run_pack_downgrade_to_free(yes: bool, override_valid_license: bool) -> i32 {
         }
         cys::pack::PackStateRead::Valid(st) => st,
         cys::pack::PackStateRead::Corrupt(e) => {
-            eprintln!("팩 상태 손상({e}) — 먼저 cys pack-repair-channel 로 복구하라.");
+            eprintln!("팩 상태 손상({e}) — 먼저 wave pack-repair-channel 로 복구하라.");
             return 1;
         }
     };
@@ -7704,14 +7678,14 @@ fn run_pack_downgrade_to_free(yes: bool, override_valid_license: bool) -> i32 {
         }
         Err(e) => {
             eprintln!(
-                "[downgrade] ⚠ state는 free로 전환됐으나 내장 재설치 실패: {e} — cys init-pack 으로 재시도하라."
+                "[downgrade] ⚠ state는 free로 전환됐으나 내장 재설치 실패: {e} — wave init-pack 으로 재시도하라."
             );
             1
         }
     }
 }
 
-/// `cys pack-repair-channel`(free/pro v4 §5) — 채널 상태 진단·복구. 재기록 권위 =
+/// `wave pack-repair-channel`(free/pro v4 §5) — 채널 상태 진단·복구. 재기록 권위 =
 /// accepted 기록(서명 검증 이력) + pro 전용 파일 증거. 라이선스는 정보 표시(단독 권위 아님).
 fn run_pack_repair_channel(to: Option<String>, yes: bool, expert_override: bool) -> i32 {
     let dir = cys::pack::pack_dir();
@@ -7769,7 +7743,7 @@ fn run_pack_repair_channel(to: Option<String>, yes: bool, expert_override: bool)
         if cys::license::is_pro(now) && !expert_override {
             eprintln!(
                 "거부 — 유효 pro 라이선스 실재 중 free 재기록은 downgrade와 동일한 위험 \
-                 (다음 내장 install이 pro 파일을 prune). 강등은 cys pack-downgrade-to-free, \
+                 (다음 내장 install이 pro 파일을 prune). 강등은 wave pack-downgrade-to-free, \
                  강행은 --expert-override."
             );
             return 1;
@@ -8030,7 +8004,7 @@ fn consume_reinject_pending(base: &std::path::Path) -> Result<(usize, usize), St
     .map_err(|e| e.to_string())
 }
 
-/// `cys pack-update` 진입점(§2-② 전체 흐름). --from(핵심)·--manifest-url(부차).
+/// `wave pack-update` 진입점(§2-② 전체 흐름). --from(핵심)·--manifest-url(부차).
 /// ④ 투명성: 내장 팩 반영 드라이런 — install_into 와 **같은 판정 함수**(pack::decide_file_action)를
 /// 쓰는 pack::plan_install 로 갱신/보존/치유/병합대기/정리를 설치 전에 보여준다(쓰기 0·플랜≠실제 드리프트 0).
 fn run_pack_plan(force: bool) -> i32 {
@@ -8054,14 +8028,14 @@ fn run_pack_plan(force: bool) -> i32 {
     section("🔄 자동 갱신", &plan.update, "비수정 — 그대로 갱신됨");
     section("✨ 신규 생성", &plan.create, "");
     section("🛠 강제 치유", &plan.heal, "force 설치 — 덮기 전 사용자본을 <파일>.user 로 보존");
-    section("⏸ 보존+병합 대기", &plan.merge_new, "수정본 유지 + 신버전 <파일>.new 병치 → cys pack-merge");
+    section("⏸ 보존+병합 대기", &plan.merge_new, "수정본 유지 + 신버전 <파일>.new 병치 → wave pack-merge");
     section("🔒 보존", &plan.keep_user, "수정본 — 건드리지 않음");
     section("🗑 정리(폐기 파일)", &plan.prune_delete, "임베드에서 제거된 비수정 파일");
     section("🗑→🔒 폐기지만 보존", &plan.prune_keep_modified, "수정본이라 삭제하지 않음");
     println!("\n= 변화 없음(최신) {}건", plan.unchanged);
     let pending = cys::pack::load_merge_pending(&dir);
     if !pending.is_empty() {
-        println!("※ 기존 병합 대기 {}건 — `cys pack-merge` 로 검토", pending.len());
+        println!("※ 기존 병합 대기 {}건 — `wave pack-merge` 로 검토", pending.len());
     }
     println!("※ 사용자 전용 오버레이(~/.cys/local — 디렉티브 append·스킬 shadowing·훅 후행)는 업데이트가 절대 건드리지 않음");
     0
@@ -8095,10 +8069,10 @@ fn run_pack_merge(
             let ver = e.get("version").and_then(|v| v.as_str()).unwrap_or("?");
             match kind {
                 "new-pending" => println!(
-                    "  ⏸ {rel} — 내 수정본 유지 중, vendor {ver} 신버전이 {side} 에 대기\n     → cys pack-merge --file {rel} [--take-new|--keep-mine|--ai|--propose]"
+                    "  ⏸ {rel} — 내 수정본 유지 중, vendor {ver} 신버전이 {side} 에 대기\n     → wave pack-merge --file {rel} [--take-new|--keep-mine|--ai|--propose]"
                 ),
                 "healed" => println!(
-                    "  🛠 {rel} — vendor {ver} 로 치유됨, 내 수정본은 {side} 에 보존\n     → cys pack-merge --file {rel} [--to-local|--propose|--keep-mine(보존본 정리)]"
+                    "  🛠 {rel} — vendor {ver} 로 치유됨, 내 수정본은 {side} 에 보존\n     → wave pack-merge --file {rel} [--to-local|--propose|--keep-mine(보존본 정리)]"
                 ),
                 _ => println!("  ? {rel} ({kind})"),
             }
@@ -8107,7 +8081,7 @@ fn run_pack_merge(
     };
     // rel 검증(원장 기반 — 경로 traversal 차단: 원장에 있는 키만 처리).
     let Some(entry) = pending.get(&rel).cloned() else {
-        eprintln!("'{rel}' 은 병합 대기 목록에 없음 — `cys pack-merge` 로 목록 확인");
+        eprintln!("'{rel}' 은 병합 대기 목록에 없음 — `wave pack-merge` 로 목록 확인");
         return 1;
     };
     let kind = entry.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
@@ -8217,9 +8191,9 @@ fn run_pack_merge(
                 None => {
                     println!(
                         "자동 병합 불가(충돌 또는 도구 부재). 선택지:\n\
-                         \x20 cys pack-merge --file {rel} --take-new   # vendor 신버전 채택\n\
-                         \x20 cys pack-merge --file {rel} --keep-mine # 내 수정 유지\n\
-                         \x20 cys pack-merge --file {rel} --ai        # AI 3-way 병합 제안\n\
+                         \x20 wave pack-merge --file {rel} --take-new   # vendor 신버전 채택\n\
+                         \x20 wave pack-merge --file {rel} --keep-mine # 내 수정 유지\n\
+                         \x20 wave pack-merge --file {rel} --ai        # AI 3-way 병합 제안\n\
                          \x20 수동: {rel} 과 {rel}.new 를 직접 병합 후 --keep-mine 으로 해소"
                     );
                     1
@@ -8270,8 +8244,8 @@ fn run_pack_merge(
             } else {
                 println!(
                     "'{rel}' 은 과거 치유된 system 파일 — 보존본을 오버레이로 옮기거나 정리할 수 있습니다.\n\
-                     \x20 cys pack-merge --file {rel} --to-local  # 사용자본을 ~/.cys/local 오버레이로(스킬 shadowing)\n\
-                     \x20 cys pack-merge --file {rel} --keep-mine # vendor 본 유지 확정(보존본 정리)\n\
+                     \x20 wave pack-merge --file {rel} --to-local  # 사용자본을 ~/.cys/local 오버레이로(스킬 shadowing)\n\
+                     \x20 wave pack-merge --file {rel} --keep-mine # vendor 본 유지 확정(보존본 정리)\n\
                      보존본 위치: {}",
                     user_path.display()
                 );
@@ -8343,7 +8317,7 @@ fn run_pack_propose(dir: &std::path::Path, rel: &str, kind: &str, embed_now: Opt
     let body = unified_diff_via_cmd(&vendor, &mine, rel).unwrap_or_else(|| {
         format!("# diff 도구 부재 — vendor 전문\n{vendor}\n# 내 수정 전문\n{mine}")
     });
-    let header = format!("# cys 개선 제안 patch\n# 대상: {rel}\n# 생성 바이너리: {version}\n# 생성: cys pack-merge --file {rel} --propose\n\n");
+    let header = format!("# Wave 개선 제안 patch\n# 대상: {rel}\n# 생성 바이너리: {version}\n# 생성: wave pack-merge --file {rel} --propose\n\n");
     if let Err(e) = cys::pack::write_atomic(&out, format!("{header}{body}").as_bytes()) {
         eprintln!("patch 쓰기 실패: {e}");
         return 1;
@@ -8413,7 +8387,7 @@ fn ai_three_way_merge(rel: &str, base: Option<&str>, ours: &str, theirs: &str) -
         None => String::from("(공통 조상 없음 — 2-way: 내 수정 의도를 추론해 보존하라)\n"),
     };
     let prompt = format!(
-        "다음은 cys 팩 파일 '{rel}' 의 3-way 병합 요청이다.\n\
+        "다음은 Wave 팩 파일 '{rel}' 의 3-way 병합 요청이다.\n\
          {base_block}\
          <<<내 수정본(의도를 보존해야 할 대상)>>>\n{ours}\n<<<끝>>>\n\
          <<<vendor 신버전(새 베이스라인)>>>\n{theirs}\n<<<끝>>>\n\
@@ -8608,7 +8582,7 @@ fn run_pack_rollback(file: Option<String>, yes: bool) -> i32 {
         if count == 0 {
             println!("  (없음 — 보존본과 현재 팩이 동일)");
         } else {
-            println!("복원: cys pack-rollback --file <경로>");
+            println!("복원: wave pack-rollback --file <경로>");
         }
         return 0;
     };
@@ -8631,7 +8605,7 @@ fn run_pack_rollback(file: Option<String>, yes: bool) -> i32 {
     let content = match std::fs::read(&src) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("보존본에 '{rel}' 없음({e}) — cys pack-rollback 으로 후보 목록 확인");
+            eprintln!("보존본에 '{rel}' 없음({e}) — wave pack-rollback 으로 후보 목록 확인");
             return 1;
         }
     };
@@ -8664,7 +8638,7 @@ fn run_pack_rollback(file: Option<String>, yes: bool) -> i32 {
         "user" => println!("✅ {rel} 복원(user 소유 — 업데이트가 덮지 않으므로 이대로 유지됩니다)"),
         _ => println!(
             "✅ {rel} 복원(system 소유 — 다음 설치 스윕에서 vendor 본으로 재치유될 수 있습니다. \
-             수정본이 {rel}.user 로 보존되면 cys pack-merge로 검토하세요)"
+             수정본이 {rel}.user 로 보존되면 wave pack-merge로 검토하세요)"
         ),
     }
     0
@@ -8968,6 +8942,29 @@ extern "C" fn scoped_cleanup_handler(sig: libc::c_int) {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn primary_launchd_check_skips_department_queries() {
+        for socket in ["/fixture/state/cys-dept-dev/cys.sock", r"\\.\pipe\cys-dept-dev"] {
+            assert!(!super::primary_launchd_check(std::path::Path::new(socket), || {
+                panic!("department sockets must not query the primary launchd job")
+            }));
+        }
+    }
+
+    #[test]
+    fn primary_launchd_check_preserves_primary_queries() {
+        for socket in ["/fixture/state/cys/cys.sock", r"\\.\pipe\cys"] {
+            for expected in [false, true] {
+                let calls = std::cell::Cell::new(0);
+                assert_eq!(super::primary_launchd_check(std::path::Path::new(socket), || {
+                    calls.set(calls.get() + 1);
+                    expected
+                }), expected);
+                assert_eq!(calls.get(), 1);
+            }
+        }
+    }
+
+    #[test]
     fn drain_and_rollback_cli_contract() {
         use super::*;
         assert!(matches!(Cli::try_parse_from(["cys", "drain"]).unwrap().command,
@@ -8976,6 +8973,20 @@ mod tests {
             Command::Drain { verify: true, timeout: 7 }));
         assert!(matches!(Cli::try_parse_from(["cys", "pack-rollback", "--file", "README.md", "--yes"]).unwrap().command,
             Command::PackRollback { file: Some(ref file), yes: true } if file == "README.md"));
+    }
+
+    #[test]
+    fn drain_snapshot_daemon_identity_needs_a_live_positive_pid() {
+        use super::*;
+        let own = drain_daemon_identity(&json!({"daemon_pid": std::process::id()})).expect("own process is live");
+        assert_eq!(own.pid, std::process::id());
+        assert!(own.executable.is_absolute() && own.start_time > 0);
+        for bad in [json!({}), json!({"daemon_pid": 0}), json!({"daemon_pid": "7"}),
+            json!({"daemon_pid": u64::from(u32::MAX) + 1}), json!({"daemon_pid": -1})] {
+            assert!(drain_daemon_identity(&bad).is_none());
+        }
+        // No snapshot was started: finishing is a silent no-op and never reaches the real home.
+        drain_snapshot_finish(None, 1);
     }
 
     #[test]
@@ -9072,7 +9083,7 @@ mod tests {
             assert!(!message.contains("error:") && !message.contains("Usage:"), "{message}");
         }
         let error = clap::Error::raw(clap::error::ErrorKind::InvalidUtf8, "opaque");
-        assert_eq!(rename_parse_error_ko(&error), "cys rename 입력이 올바르지 않습니다: 문자 인코딩 오류");
+        assert_eq!(rename_parse_error_ko(&error), "wave rename 입력이 올바르지 않습니다: 문자 인코딩 오류");
     }
 
     #[test]
@@ -9912,20 +9923,25 @@ mod tests {
         assert_eq!(disk_after.trim(), "1.0.0", "거부인데 디스크 버전 변경됨");
     }
 
-    /// (2c) 회귀 박제: transient 화이트리스트가 cys connect()의 실제 에러 문자열과 정렬돼야
-    /// (2a) slow_consumer return 후 재연결이 작동한다. cys connect_raw는 누락 소켓에
+    /// (2c) 회귀 박제: transient 화이트리스트가 wave connect()의 실제 에러 문자열과 정렬돼야
+    /// (2a) slow_consumer return 후 재연결이 작동한다. wave connect_raw는 누락 소켓에
     /// "No such file or directory (os error 2)", 거부에 "Connection refused (os error 61)",
     /// half-open read에 "Broken pipe/Connection reset by peer"를 낸다. 그 외(invalid_params 등)는
     /// 비-transient라 즉시 반환돼야(무한루프 차단) 한다.
     #[test]
     fn transient_event_error_matches_real_connect_strings() {
-        // cys connect_raw가 실제로 내는 형태
+        // wave connect_raw가 실제로 내는 형태
         assert!(is_transient_event_error(
-            "cannot connect to cysd at /tmp/x.sock: No such file or directory (os error 2)"
+            "cannot connect to waved at /tmp/x.sock: No such file or directory (os error 2)"
         ));
         assert!(is_transient_event_error(
-            "cannot connect to cysd at /tmp/x.sock: Connection refused (os error 61)"
+            "cannot connect to waved at /tmp/x.sock: Connection refused (os error 61)"
         ));
+        // Compatibility: old installer/CLI errors remain reconnectable during upgrade.
+        assert!(is_transient_event_error("cannot connect to cysd at /tmp/x.sock"));
+        assert!(is_transient_event_error("cannot connect to cysd pipe"));
+        assert!(is_transient_event_error("cannot connect to waved at /tmp/x.sock"));
+        assert!(is_transient_event_error("cannot connect to waved pipe"));
         // half-open read 단절
         assert!(is_transient_event_error("Broken pipe (os error 32)"));
         assert!(is_transient_event_error("Connection reset by peer (os error 54)"));
@@ -9939,7 +9955,7 @@ mod tests {
 
     /// ★회귀 박제 (Windows named pipe busy-retry — ERROR_PIPE_BUSY 231 봉인):
     /// 231은 데몬 생존·listening 인스턴스 순간 소진(정상 혼잡)이라 재시도 없는 1회 open 은
-    /// 멀티 노드 동시 RPC 에서 상시 실패하고("cannot connect to cysd pipe … os error 231" —
+    /// 멀티 노드 동시 RPC 에서 상시 실패하고("cannot connect to waved pipe … os error 231" —
     /// 2026-07-10 Windows 실사고), 다운 오판이 sibling cysd autostart 헛발동까지 부른다.
     /// 간격이 0이면 busy spin, 마감 ≤ 간격이면 사실상 무재시도 — 정책 상수로 의도를 박제한다
     /// (Windows arm 은 이 호스트에서 컴파일/실행 불가 — cysd PIPE_ACCEPT_ERROR_BACKOFF 와 같은 방식).
@@ -11016,7 +11032,7 @@ different model.\n✻ Worked for 0s\n────────\n❯ \n───�
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    // ─── §3.4 cys doctor ───
+    // ─── §3.4 wave doctor ───
 
     fn doctor_ctx_at(base: &std::path::Path) -> DoctorCtx {
         DoctorCtx {

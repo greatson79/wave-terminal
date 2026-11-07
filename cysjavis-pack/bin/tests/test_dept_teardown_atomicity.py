@@ -18,7 +18,8 @@ import sys
 import tempfile
 
 SELF = os.path.dirname(os.path.abspath(__file__))
-DEPT = os.path.join(SELF, "..", "cys-dept")
+# normpath: the product scan excludes its own command line by the canonical "bin/cys-dept" substring.
+DEPT = os.path.normpath(os.path.join(SELF, "..", "cys-dept"))
 # Windows runners put the WSL launcher (System32\bash.exe) first on PATH; CI passes Git bash here.
 BASH = os.environ.get("CYS_TEST_BASH", "bash")
 fails = []

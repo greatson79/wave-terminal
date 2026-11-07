@@ -37,7 +37,9 @@ jobs:
           printf '%s\n' '{"model":{"id":"claude-opus-5-5","display_name":"Opus 5.5"},"context_window":{"context_window_size":200000,"used_percentage":41.6,"current_usage":{"input_tokens":1000,"cache_creation_input_tokens":2000,"cache_read_input_tokens":80000}},"rate_limits":{"five_hour":{"used_percentage":41,"resets_at":1781314865},"seven_day":{"used_percentage":12,"resets_at":1781781650}}}' | sh cysjavis-pack/hooks/cys-statusline.sh > "$RUNNER_TEMP/statusline-output.txt"
           test -s "$RUNNER_TEMP/statusline-output.txt"
           python -c 'import json,os; v=json.load(open(os.environ["CYS_STATUSLINE_CAPTURE"])); assert v["model"]["id"] == "claude-opus-5-5"; assert v["context_window"]["used_percentage"] == 41.6; assert v["rate_limits"]["five_hour"]["used_percentage"] == 41; assert v["rate_limits"]["seven_day"]["used_percentage"] == 12'
-          cargo test --bin cys statusline_params_full_schema
+          # 0.3.2: the test lives in bin wave (src/bin/cys.rs); cargo exits 0 when a filter matches nothing.
+          out="$(cargo test --bin wave statusline_params_full_schema 2>&1)"; printf '%s\n' "$out"
+          printf '%s\n' "$out" | grep -Eq 'test result: ok\. [1-9][0-9]* passed' || { echo 'statusline_params_full_schema matched 0 tests' >&2; exit 1; }
           export CYS_TEST_BASH="$(cygpath -w "$(command -v bash)")"
           python -m unittest cysjavis-pack/bin/tests/test_dept_statusline.py
   verify:
@@ -69,8 +71,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'updater signature invalid' }
           $p = Start-Process -FilePath (Resolve-Path update.exe).Path -ArgumentList '/S' -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "installer failed: $($p.ExitCode)" }
-          $installed = Join-Path $env:LOCALAPPDATA 'Wave Terminal\cys-app.exe'
+          $installed = Join-Path $env:LOCALAPPDATA 'Wave Terminal\wave-app.exe'
           if (-not (Test-Path $installed)) { throw 'installed app missing' }
+          # 0.3.2: the legacy GUI name stays as a forwarder.
+          if (-not (Test-Path (Join-Path $env:LOCALAPPDATA 'Wave Terminal\cys-app.exe'))) { throw 'legacy cys-app.exe forwarder missing' }
           $version = (Get-Item $installed).VersionInfo.ProductVersion
           if ($version -ne $env:RELEASE_VERSION) { throw "installed version mismatch: $version" }
           $cys = Join-Path $env:LOCALAPPDATA 'Wave Terminal\cys.exe'

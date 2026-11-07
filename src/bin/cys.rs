@@ -5271,10 +5271,12 @@ fn run_daemon_cmd(action: DaemonAction) -> i32 {
                                 .args(["-TERM", &pid.to_string()])
                                 .output();
                         } else {
-                            // 폴백: 전체 인자 경로 매칭(comm 절단 무관).
-                            let _ = std::process::Command::new("pkill")
-                                .args(["-TERM", "-f", "MacOS/cysd"])
-                                .output();
+                            // 폴백: 전체 인자 경로 매칭(comm 절단 무관). 0.3.2: 실행 데몬 = waved, 구 세대 = cysd.
+                            for tail in ["MacOS/waved", "MacOS/cysd"] {
+                                let _ = std::process::Command::new("pkill")
+                                    .args(["-TERM", "-f", tail])
+                                    .output();
+                            }
                         }
                         // 고정 sleep 대신 flock 해제(=소켓 연결 불가)까지 폴링(최대 5초).
                         let mut down = false;

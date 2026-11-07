@@ -43,7 +43,8 @@ for _stream in (sys.stdout, sys.stderr):
             pass
 
 # 정책 회귀를 무조건 차단하는 우리 바이너리(경로 말단 이름, 소문자).
-STRICT_BINARIES = {"cys.exe", "cysd.exe", "cys-app.exe"}
+# 0.3.2: canonical wave/waved/wave-app + legacy cys/cysd/cys-app forwarders.
+STRICT_BINARIES = {"wave.exe", "waved.exe", "wave-app.exe", "cys.exe", "cysd.exe", "cys-app.exe"}
 
 NEEDLE = "vcruntime140"  # vcruntime140.dll·vcruntime140_1.dll 모두 접두 매치
 

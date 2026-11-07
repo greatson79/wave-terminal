@@ -14,12 +14,48 @@
 
 !macro NSIS_HOOK_PREINSTALL
   ; ① GUI만 종료(세션은 데몬 소유 — 무손실). updater 경로면 이미 종료 중이라 멱등.
+  ; 0.3.2: canonical GUI wave-app + 구 이름 GUI forwarder cys-app 둘 다.
+  nsExec::Exec 'taskkill /F /T /IM wave-app.exe'
   nsExec::Exec 'taskkill /F /T /IM cys-app.exe'
 
 
-  ; ② cysd.exe rename-swap (데몬 무사망)
+  ; ② waved.exe rename-swap (canonical 데몬 무사망)
+  IfFileExists "$INSTDIR\waved.exe" 0 waved_done
+  Delete "$INSTDIR\waved.prev.exe"
+  ClearErrors
+  Rename "$INSTDIR\waved.exe" "$INSTDIR\waved.prev.exe"
+  IfErrors 0 waved_done
+  Delete "$INSTDIR\waved.prev2.exe"
+  ClearErrors
+  Rename "$INSTDIR\waved.exe" "$INSTDIR\waved.prev2.exe"
+  IfErrors 0 waved_done
+  Delete "$INSTDIR\waved.prev3.exe"
+  ClearErrors
+  Rename "$INSTDIR\waved.exe" "$INSTDIR\waved.prev3.exe"
+  IfErrors 0 waved_done
+  nsExec::Exec 'taskkill /F /T /IM waved.exe'   ; ③ 최후 폴백 — 기존 재시작 복원 경로가 받침
+waved_done:
+
+  ; ② wave.exe rename-swap (canonical CLI)
+  IfFileExists "$INSTDIR\wave.exe" 0 wave_done
+  Delete "$INSTDIR\wave.prev.exe"
+  ClearErrors
+  Rename "$INSTDIR\wave.exe" "$INSTDIR\wave.prev.exe"
+  IfErrors 0 wave_done
+  Delete "$INSTDIR\wave.prev2.exe"
+  ClearErrors
+  Rename "$INSTDIR\wave.exe" "$INSTDIR\wave.prev2.exe"
+  IfErrors 0 wave_done
+  Delete "$INSTDIR\wave.prev3.exe"
+  ClearErrors
+  Rename "$INSTDIR\wave.exe" "$INSTDIR\wave.prev3.exe"
+  IfErrors 0 wave_done
+  nsExec::Exec 'taskkill /F /T /IM wave.exe'   ; ③ 최후 폴백 — 기존 재시작 복원 경로가 받침
+wave_done:
+
+  ; ② cysd.exe rename-swap (구 이름 데몬 forwarder·구 lame-duck 데몬 무사망)
   IfFileExists "$INSTDIR\cysd.exe" 0 cysd_done
-  Delete "$INSTDIR\cysd.prev.exe"          ; 잔해 청소 시도(구 lame-duck 점유 시 실패해도 무시)
+  Delete "$INSTDIR\cysd.prev.exe"
   ClearErrors
   Rename "$INSTDIR\cysd.exe" "$INSTDIR\cysd.prev.exe"
   IfErrors 0 cysd_done
@@ -34,7 +70,7 @@
   nsExec::Exec 'taskkill /F /T /IM cysd.exe'   ; ③ 최후 폴백 — 기존 재시작 복원 경로가 받침
 cysd_done:
 
-  ; ② cys.exe rename-swap (CLI는 단명 프로세스지만 실행 중 잠금 대비 동일 처리)
+  ; ② cys.exe rename-swap (구 이름 CLI forwarder)
   IfFileExists "$INSTDIR\cys.exe" 0 cys_done
   Delete "$INSTDIR\cys.prev.exe"
   ClearErrors
@@ -48,8 +84,42 @@ cysd_done:
   ClearErrors
   Rename "$INSTDIR\cys.exe" "$INSTDIR\cys.prev3.exe"
   IfErrors 0 cys_done
-  nsExec::Exec 'taskkill /F /T /IM cys.exe'
+  nsExec::Exec 'taskkill /F /T /IM cys.exe'   ; ③ 최후 폴백 — 기존 재시작 복원 경로가 받침
 cys_done:
+
+  ; ② wave-app.exe rename-swap (GUI는 위에서 종료 — 잠금 잔여 대비)
+  IfFileExists "$INSTDIR\wave-app.exe" 0 wave_app_done
+  Delete "$INSTDIR\wave-app.prev.exe"
+  ClearErrors
+  Rename "$INSTDIR\wave-app.exe" "$INSTDIR\wave-app.prev.exe"
+  IfErrors 0 wave_app_done
+  Delete "$INSTDIR\wave-app.prev2.exe"
+  ClearErrors
+  Rename "$INSTDIR\wave-app.exe" "$INSTDIR\wave-app.prev2.exe"
+  IfErrors 0 wave_app_done
+  Delete "$INSTDIR\wave-app.prev3.exe"
+  ClearErrors
+  Rename "$INSTDIR\wave-app.exe" "$INSTDIR\wave-app.prev3.exe"
+  IfErrors 0 wave_app_done
+  nsExec::Exec 'taskkill /F /T /IM wave-app.exe'   ; ③ 최후 폴백 — 기존 재시작 복원 경로가 받침
+wave_app_done:
+
+  ; ② cys-app.exe rename-swap (구 이름 GUI forwarder)
+  IfFileExists "$INSTDIR\cys-app.exe" 0 cys_app_done
+  Delete "$INSTDIR\cys-app.prev.exe"
+  ClearErrors
+  Rename "$INSTDIR\cys-app.exe" "$INSTDIR\cys-app.prev.exe"
+  IfErrors 0 cys_app_done
+  Delete "$INSTDIR\cys-app.prev2.exe"
+  ClearErrors
+  Rename "$INSTDIR\cys-app.exe" "$INSTDIR\cys-app.prev2.exe"
+  IfErrors 0 cys_app_done
+  Delete "$INSTDIR\cys-app.prev3.exe"
+  ClearErrors
+  Rename "$INSTDIR\cys-app.exe" "$INSTDIR\cys-app.prev3.exe"
+  IfErrors 0 cys_app_done
+  nsExec::Exec 'taskkill /F /T /IM cys-app.exe'   ; ③ 최후 폴백 — 기존 재시작 복원 경로가 받침
+cys_app_done:
   ; ★잠금 스윕 일반화(2026-07-02 실장애: msys-2.0.dll Can't write → Installation Aborted).
   ; 라이브 세션 셸(claude의 bash 훅 등)이 로드한 runtime 이미지(.exe/.dll)는 '덮어쓰기'가 잠기지만
   ; 'rename'은 허용된다(로드된 PE 이미지의 Windows 특성 — cysd rename-swap과 동일 원리의 전수 일반화).
@@ -84,22 +154,50 @@ cys_done:
 
 !macro NSIS_HOOK_PREUNINSTALL
   ; 제거(uninstall)는 의도적 전면 종료 — 세션 보존 대상이 아니다. lame-duck(.prev*)까지 정리.
-  nsExec::Exec 'taskkill /F /T /IM cys-app.exe'
+  ; 0.3.2: canonical(wave·waved·wave-app) + 구 이름 forwarder(cys·cysd·cys-app) 여섯 이름 전부.
+  nsExec::Exec 'taskkill /F /T /IM waved.exe'
+  nsExec::Exec 'taskkill /F /T /IM wave.exe'
   nsExec::Exec 'taskkill /F /T /IM cysd.exe'
   nsExec::Exec 'taskkill /F /T /IM cys.exe'
+  nsExec::Exec 'taskkill /F /T /IM wave-app.exe'
+  nsExec::Exec 'taskkill /F /T /IM cys-app.exe'
+  nsExec::Exec 'taskkill /F /T /IM waved.prev.exe'
+  nsExec::Exec 'taskkill /F /T /IM waved.prev2.exe'
+  nsExec::Exec 'taskkill /F /T /IM waved.prev3.exe'
+  nsExec::Exec 'taskkill /F /T /IM wave.prev.exe'
+  nsExec::Exec 'taskkill /F /T /IM wave.prev2.exe'
+  nsExec::Exec 'taskkill /F /T /IM wave.prev3.exe'
   nsExec::Exec 'taskkill /F /T /IM cysd.prev.exe'
   nsExec::Exec 'taskkill /F /T /IM cysd.prev2.exe'
   nsExec::Exec 'taskkill /F /T /IM cysd.prev3.exe'
   nsExec::Exec 'taskkill /F /T /IM cys.prev.exe'
   nsExec::Exec 'taskkill /F /T /IM cys.prev2.exe'
   nsExec::Exec 'taskkill /F /T /IM cys.prev3.exe'
+  nsExec::Exec 'taskkill /F /T /IM wave-app.prev.exe'
+  nsExec::Exec 'taskkill /F /T /IM wave-app.prev2.exe'
+  nsExec::Exec 'taskkill /F /T /IM wave-app.prev3.exe'
+  nsExec::Exec 'taskkill /F /T /IM cys-app.prev.exe'
+  nsExec::Exec 'taskkill /F /T /IM cys-app.prev2.exe'
+  nsExec::Exec 'taskkill /F /T /IM cys-app.prev3.exe'
   Sleep 1000
+  Delete "$INSTDIR\waved.prev.exe"
+  Delete "$INSTDIR\waved.prev2.exe"
+  Delete "$INSTDIR\waved.prev3.exe"
+  Delete "$INSTDIR\wave.prev.exe"
+  Delete "$INSTDIR\wave.prev2.exe"
+  Delete "$INSTDIR\wave.prev3.exe"
   Delete "$INSTDIR\cysd.prev.exe"
   Delete "$INSTDIR\cysd.prev2.exe"
   Delete "$INSTDIR\cysd.prev3.exe"
   Delete "$INSTDIR\cys.prev.exe"
   Delete "$INSTDIR\cys.prev2.exe"
   Delete "$INSTDIR\cys.prev3.exe"
+  Delete "$INSTDIR\wave-app.prev.exe"
+  Delete "$INSTDIR\wave-app.prev2.exe"
+  Delete "$INSTDIR\wave-app.prev3.exe"
+  Delete "$INSTDIR\cys-app.prev.exe"
+  Delete "$INSTDIR\cys-app.prev2.exe"
+  Delete "$INSTDIR\cys-app.prev3.exe"
   ; 잠금 스윕 잔해(*.prev<rand> — 언인스톨러 미추적 파일)까지 정리해 빈 폴더 잔존을 막는다.
   ; 프로세스는 위에서 전부 종료됐으므로 삭제 가능. runtime은 전량 우리 소유 트리다.
   RMDir /r "$INSTDIR\runtime"

@@ -87,10 +87,12 @@ def _resolve_cysd():
     cand = "/Applications/cys.app/Contents/MacOS/cysd"
     if os.path.exists(cand):
         return cand
-    p = shutil_which("cysd")
-    if p:
-        return os.path.realpath(p)
-    die("cysd 바이너리를 찾을 수 없다.")
+    # 0.3.2: canonical daemon binary waved first; cysd (forwarder / older install) as fallback.
+    for name in ("waved", "cysd"):
+        p = shutil_which(name)
+        if p:
+            return os.path.realpath(p)
+    die("waved/cysd 바이너리를 찾을 수 없다.")
 
 
 def shutil_which(name):
@@ -190,10 +192,13 @@ def harness_daemon_pids():
     pids = []
     harn_dir_rp = os.path.realpath(HARN_DIR)
     harn_sock_rp = os.path.realpath(HARN_SOCK)
-    try:
-        out = subprocess.run(["pgrep", "-x", "cysd"], capture_output=True, text=True, timeout=10).stdout
-    except Exception:
-        return pids
+    # 0.3.2: the running daemon image is waved; cysd only for an older generation. Exact names (-x) only.
+    out = ""
+    for name in ("waved", "cysd"):
+        try:
+            out += subprocess.run(["pgrep", "-x", name], capture_output=True, text=True, timeout=10).stdout + "\n"
+        except Exception:
+            continue
     for line in out.split():
         pid = line.strip()
         if not pid.isdigit():

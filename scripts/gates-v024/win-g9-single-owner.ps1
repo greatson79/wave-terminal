@@ -1,11 +1,11 @@
 ﻿$ErrorActionPreference = 'Stop'
 $dir = Join-Path $env:LOCALAPPDATA 'Wave Terminal'
-$daemon = Join-Path $dir 'cysd.exe'
-$cys = Join-Path $dir 'cys.exe'
+$daemon = Join-Path $dir 'waved.exe'
+$cys = Join-Path $dir 'wave.exe'
 if (-not (Test-Path -LiteralPath $daemon) -or -not (Test-Path -LiteralPath $cys)) { throw 'installed daemon or CLI missing' }
 
 function Owners {
-  @((Get-CimInstance Win32_Process -Filter "Name='cysd.exe'") | Where-Object { $_.ExecutablePath -eq $daemon })
+  @((Get-CimInstance Win32_Process -Filter "Name='waved.exe'") | Where-Object { $_.ExecutablePath -eq $daemon })
 }
 if ((Owners).Count -eq 0) { Start-Process -FilePath $daemon -WindowStyle Hidden | Out-Null }
 $deadline = (Get-Date).AddSeconds(15)
@@ -26,14 +26,14 @@ $logName = 'Microsoft-Windows-TaskScheduler/Operational'
 wevtutil sl $logName /e:true
 if ($LASTEXITCODE -ne 0) { throw 'Task Scheduler history unavailable' }
 $since = Get-Date
-schtasks /Run /TN cysd 2>&1 | Out-Null
+schtasks /Run /TN waved 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'scheduled daemon launch failed' }
 Start-Sleep -Seconds 60
 $task = (New-Object -ComObject 'Schedule.Service')
 $task.Connect()
-$registered = $task.GetFolder('\').GetTask('cysd')
+$registered = $task.GetFolder('\').GetTask('waved')
 if ($registered.LastTaskResult -ne 0) { throw "scheduled task result $($registered.LastTaskResult)" }
 $starts = @((Get-WinEvent -FilterHashtable @{ LogName = $logName; Id = 200; StartTime = $since } -ErrorAction Stop) |
-  Where-Object { $_.Message -match '\\cysd\b' })
+  Where-Object { $_.Message -match '\\waved\b' })
 if ($starts.Count -ne 1 -or (Owners).Count -ne 1) { throw "scheduled starts $($starts.Count), owners $((Owners).Count)" }
 Write-Host 'G9 win-single-owner PASS'

@@ -68,6 +68,20 @@ jobs:
         run: |
           set -euo pipefail
           bun x @tauri-apps/cli@2 build --target "$CYS_TARGET" --bundles app,dmg --config '{"bundle":{"createUpdaterArtifacts":false}}' 2>&1 | tee "$RUNNER_TEMP/w3-macos-evidence/build.log"
+      # 0.3.2 rename gate 2: list Contents/MacOS and require canonical + legacy entrypoints (evidence before later checks).
+      - name: App bundle listing (0.3.2 canonical + legacy names)
+        shell: bash
+        run: |
+          set -euo pipefail
+          PRODUCT="$(python3 -c 'import json; print(json.load(open("src-tauri/tauri.conf.json"))["productName"])')"
+          APP="target/$CYS_TARGET/release/bundle/macos/$PRODUCT.app"
+          ls -la "$APP/Contents/MacOS" | tee "$RUNNER_TEMP/w3-macos-evidence/contents-macos.txt"
+          missing=()
+          for name in wave-app wave waved cys cysd cys-app; do
+            [ -x "$APP/Contents/MacOS/$name" ] || missing+=("$name")
+          done
+          [ ${#missing[@]} -eq 0 ] || { echo "Contents/MacOS missing: ${missing[*]}" >&2; exit 1; }
+          echo "OK: wave-app, wave, waved + cys, cysd, cys-app in Contents/MacOS"
       - name: Mount DMG read-only and verify packaged runtimes
         shell: bash
         run: |

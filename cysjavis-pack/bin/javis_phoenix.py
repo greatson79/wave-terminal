@@ -2517,12 +2517,25 @@ def _win_restart_daemon(socket, timeout):
     return res
 
 
-def supervisor_status(label, running_pid=None):
-    """플랫폼 감독자 관리 상태(재부팅/로그온 자동기동 토대). mac=launchd_status · win=_schtasks_status.
-    반환 dict 의 state(managed/orphan/unmanaged) 계약은 양 플랫폼 동일(deploy 게이트가 이 필드만 본다)."""
+def _supervisor_status_exact(label, running_pid=None):
     if IS_WINDOWS:
         return _schtasks_status(label, running_pid=running_pid)
     return launchd_status(label, running_pid=running_pid)
+
+
+def supervisor_status(label, running_pid=None):
+    """플랫폼 감독자 관리 상태(재부팅/로그온 자동기동 토대). mac=launchd_status · win=_schtasks_status.
+    반환 dict 의 state(managed/orphan/unmanaged) 계약은 양 플랫폼 동일(deploy 게이트가 이 필드만 본다).
+    0.3.2: the canonical job (waved) is probed first. Only when the canonical label itself was asked for and is
+    not managed while the legacy registration still is (not migrated yet) is the legacy state reported, marked
+    legacy_fallback, so ensure never adds a second supervisor. Restart/ensure always aim at the canonical job."""
+    st = _supervisor_status_exact(label, running_pid=running_pid)
+    if label != SUPERVISOR_LABEL or st.get("state") == "managed" or LEGACY_SUPERVISOR_LABEL is None:
+        return st
+    legacy = _supervisor_status_exact(LEGACY_SUPERVISOR_LABEL, running_pid=running_pid)
+    if legacy.get("state") != "managed":
+        return st
+    return dict(legacy, legacy_fallback=True, canonical=st)
 
 
 def supervisor_ensure(label, plist=None, running_pid=None):
@@ -2539,16 +2552,23 @@ def supervisor_ensure(label, plist=None, running_pid=None):
 #   실패 대비 독립 수동 runbook 을 세대 스냅샷에 동봉한다(집행 계층 비의존). 단계는 P4 저널 상태머신으로
 #   기록·재개하며(restore 와 동일 프리미티브 재사용·코드 복제 금지), 판정은 M9 정직 enum + 결정론 exit code.
 
-# launchd 계열(라이브 재시작 경로) — src/launchd.rs 단일 소스(LAUNCHD_LABEL·plist 경로)와 정합.
-LAUNCHD_LABEL = "com.cysjavis.cysd"
-# supervisor 레이블 — mac=launchd label · win=schtasks 태스크명 'cysd'(Rust cys.rs DaemonAction TASK 와 정합).
-#   PHOENIX_SUPERVISOR_LABEL 오버라이드: 격리 스모크가 글로벌 'cysd' 태스크와 분리(예: 존재하지 않는 테스트 태스크명
+# launchd 계열(라이브 재시작 경로) — src/launchd.rs 단일 소스(LAUNCHD_LABEL·LEGACY_LAUNCHD_LABEL·plist 경로)와 정합.
+LAUNCHD_LABEL = "com.waveainetworks.waved"
+LEGACY_LAUNCHD_LABEL = "com.cysjavis.cysd"   # status-probe fallback only (not migrated yet)
+# Windows schtasks 태스크명 — Rust cys.rs DaemonAction TASK('waved') 와 정합. 'cysd' = 구 등록(상태 조회 폴백 전용).
+CANONICAL_TASK = "waved"
+LEGACY_TASK = "cysd"
+# supervisor 레이블 — mac=launchd label · win=schtasks 태스크명.
+#   PHOENIX_SUPERVISOR_LABEL 오버라이드: 격리 스모크가 글로벌 태스크와 분리(예: 존재하지 않는 테스트 태스크명
 #   → schtasks 미등록=unmanaged → 재기동 유발이 커스텀 파이프의 cys list lazy-spawn 경로를 타게 함·교차오염 0).
-SUPERVISOR_LABEL = os.environ.get("PHOENIX_SUPERVISOR_LABEL") or ("cysd" if IS_WINDOWS else LAUNCHD_LABEL)
+#   오버라이드 시 레거시 폴백은 꺼진다(LEGACY_SUPERVISOR_LABEL=None).
+_SUPERVISOR_OVERRIDE = os.environ.get("PHOENIX_SUPERVISOR_LABEL")
+SUPERVISOR_LABEL = _SUPERVISOR_OVERRIDE or (CANONICAL_TASK if IS_WINDOWS else LAUNCHD_LABEL)
+LEGACY_SUPERVISOR_LABEL = None if _SUPERVISOR_OVERRIDE else (LEGACY_TASK if IS_WINDOWS else LEGACY_LAUNCHD_LABEL)
 
 
 def _launchd_plist_path():
-    """~/Library/LaunchAgents/com.cysjavis.cysd.plist — src/launchd.rs plist_path() 와 동일 규약.
+    """~/Library/LaunchAgents/com.waveainetworks.waved.plist — src/launchd.rs plist_path() 와 동일 규약.
     launchd 재등록(launchd_ensure)의 소스. 부재하면 재등록 불가(정직 실패)."""
     return os.path.join(HOME, "Library", "LaunchAgents", LAUNCHD_LABEL + ".plist")
 

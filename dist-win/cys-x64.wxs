@@ -10,6 +10,8 @@
           <Component Id="MainExecutable" Guid="7494B3F8-B58B-49E1-B095-BDE28A42FADF">
             <File Id="cysd.exe" Name="cysd.exe" Source="../target/x86_64-pc-windows-gnu/release/cysd.exe"/>
             <File Id="cys.exe" Name="cys.exe" Source="../target/x86_64-pc-windows-gnu/release/cys.exe"/>
+            <File Id="waved.exe" Name="waved.exe" Source="../target/x86_64-pc-windows-gnu/release/waved.exe"/>
+            <File Id="wave.exe" Name="wave.exe" Source="../target/x86_64-pc-windows-gnu/release/wave.exe"/>
             <Environment Id="UpdatePath" Name="PATH" Value="[INSTALLDIR]" Permanent="no" Part="last" Action="set" System="yes"/>
           </Component>
         </Directory>

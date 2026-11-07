@@ -111,10 +111,11 @@ jobs:
         if: matrix.target == 'aarch64-apple-darwin'
         run: |
           set -euo pipefail
-          cargo build --bin cys --bin cysd
-          export PHOENIX_HARNESS_CYSD="$PWD/target/debug/cysd"
+          # 0.3.2: cys/cysd are forwarders to wave/waved (src/compat) — build all four, drive the canonical binaries.
+          cargo build --bin wave --bin waved --bin cys --bin cysd
+          export PHOENIX_HARNESS_CYSD="$PWD/target/debug/waved"
           export PATH="$PWD/target/debug:$PATH"
-          export PHOENIX_CYS="$PWD/target/debug/cys"
+          export PHOENIX_CYS="$PWD/target/debug/wave"
           # ★커밋된 phoenix 테스트 전건 실행(glob) — 하드코딩 리스트는 신규 웨이브 테스트(w2/w3/c6/as3 …)를 조용히
           #   누락시키는 위험이 있어 tests/ 디렉터리를 스캔한다(정직성: 게이트가 실제 커밋 테스트 전부를 돈다).
           for t in cysjavis-pack/bin/tests/test_phoenix_*.py; do
@@ -124,7 +125,7 @@ jobs:
           # Rust auto-restore 단위(재시도 seam·env 주입·B1·B3) + pack 소유권(B2).
           # ★--skip hwmon:: — hwmon 테스트는 실 GPU 전제(gpu.cores>0 단언)라 가상 러너에서 환경 FAIL
           #   (v0.12.21 release run 28792111282 실증 — phoenix 게이트와 무관한 host 하드웨어 의존).
-          CYS_PACK_DIR="$(mktemp -d)" cargo test --bin cysd -- --test-threads=1 --skip hwmon::
+          CYS_PACK_DIR="$(mktemp -d)" cargo test --bin waved -- --test-threads=1 --skip hwmon::
           CYS_PACK_DIR="$(mktemp -d)" cargo test --lib -- --test-threads=1
 
       # Windows 자기완결 런타임 동봉 (windows-build.yml과 동일 절차 — PortableGit + Python embeddable).

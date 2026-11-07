@@ -160,7 +160,7 @@ import os,re,subprocess,sys
 keys=[k.lower() for k in sys.argv[1:] if k]
 ps='Get-CimInstance Win32_Process | ForEach-Object { "{0}`t{1}`t{2}`t{3}" -f $_.ProcessId,$_.ParentProcessId,$_.Name,$_.CommandLine }'
 def mask(text):
-    text=re.sub(r'[A-Za-z]:[\\/]\S*|\\\\\S+|/\S+','<path>',text)
+    text=re.sub(r'[A-Za-z]:[\\/].*|\\\\.*|/\S+','<path>',text)
     for k in sys.argv[1:]:
         if k: text=text.replace(k,'<key>')
     return text[:120]

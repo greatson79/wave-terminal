@@ -172,6 +172,14 @@ class ScanBoundaryTests(unittest.TestCase):
         for leaked in ("secret", "C:", "cys-dept-dept-3", "second"):
             self.assertNotIn(leaked, line)
 
+    def test_unknown_scan_masks_a_whole_windows_path_containing_spaces(self):
+        stub = [sys.executable, "-c",
+                "import sys;sys.stderr.write('CIM failed at C:\\\\Users\\\\First Last\\\\AppData\\\\x');sys.exit(3)"]
+        (line,) = self.scan(["cys-dept-dept-3"], [], stub=stub)
+        self.assertIn("CIM failed", line)
+        for leaked in ("Last", "First", "AppData", "Users"):
+            self.assertNotIn(leaked, line)
+
 
 class PidWriterTests(unittest.TestCase):
     def test_reg_set_pids_records_pid_and_start_and_warns_on_bad_identity(self):

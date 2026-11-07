@@ -225,6 +225,12 @@ enum Command {
         /// 에이전트 resume 플래그(agents.json resume_arg) 미사용
         #[arg(long)]
         no_resume: bool,
+        #[arg(long, hide = true)]
+        only_role: Vec<String>,
+        #[arg(long, hide = true)]
+        model: Option<String>,
+        #[arg(long, hide = true)]
+        saved_stdin: bool,
     },
     /// T2-7 디렉티브 재주입 (+--check: 각성 핑으로 드리프트 감지 후 필요 시에만 재주입)
     Reinject {
@@ -1839,8 +1845,8 @@ fn run(command: Command) -> i32 {
 
         Command::NodeRecover { surface, role, resume } => return run_node_recover(surface, role, resume),
 
-        Command::Restore { cwd, include_master, resume, no_resume } => {
-            return run_restore(cwd, include_master, resume && !no_resume)
+        Command::Restore { cwd, include_master, resume, no_resume, only_role, model, saved_stdin } => {
+            return run_restore(cwd, include_master, resume && !no_resume, &only_role, model, saved_stdin)
         }
 
         Command::Reinject { role, surface, check, timeout } => {
@@ -6799,8 +6805,36 @@ fn restore_surface_label(sid: u64, entry: &Value) -> Result<(), String> {
     request("surface.set_label", json!({"surface_id": sid, "label": label})).map(|_| ())
 }
 
-fn run_restore(cwd: Option<String>, include_master: bool, resume: bool) -> i32 {
+const RESTORE_SAVED_STDIN_MAX_BYTES: usize = 1024 * 1024;
+
+fn read_restore_saved_entries(reader: impl Read) -> Result<Vec<Value>, String> {
+    let mut bytes = Vec::new();
+    reader.take((RESTORE_SAVED_STDIN_MAX_BYTES + 1) as u64).read_to_end(&mut bytes)
+        .map_err(|_| "복원 입력을 읽지 못했습니다.".to_string())?;
+    if bytes.len() > RESTORE_SAVED_STDIN_MAX_BYTES {
+        return Err("복원 입력은 1 MiB를 넘을 수 없습니다.".into());
+    }
+    let entries: Vec<Value> = serde_json::from_slice(&bytes)
+        .map_err(|_| "복원 입력이 올바른 JSON 배열이 아닙니다.".to_string())?;
+    if entries.iter().any(|entry| {
+        !entry.is_object()
+            || entry.get("role").and_then(Value::as_str).is_none_or(|role| role.trim().is_empty())
+            || !entry.get("agent").is_some_and(|agent| agent.is_null()
+                || agent.as_str().is_some_and(|agent| !agent.trim().is_empty()))
+            || !entry.get("cwd").is_some_and(Value::is_string)
+    }) {
+        return Err("복원 입력 항목의 역할·에이전트·작업 폴더 형식이 올바르지 않습니다.".into());
+    }
+    Ok(entries)
+}
+
+fn run_restore(cwd: Option<String>, include_master: bool, resume: bool, only_roles: &[String], model: Option<String>, saved_stdin: bool) -> i32 {
     let result = (|| -> Result<(usize, usize), String> {
+        let supplied_saved = if saved_stdin {
+            Some(read_restore_saved_entries(std::io::stdin().lock())?)
+        } else {
+            None
+        };
         let topo = request("system.topology", json!({}))?;
         let live: std::collections::HashSet<String> = topo["live"]
             .as_array()
@@ -6809,7 +6843,7 @@ fn run_restore(cwd: Option<String>, include_master: bool, resume: bool) -> i32 {
             .iter()
             .filter_map(|e| e["role"].as_str().map(String::from))
             .collect();
-        let saved = topo["saved"].as_array().cloned().unwrap_or_default();
+        let saved = supplied_saved.unwrap_or_else(|| topo["saved"].as_array().cloned().unwrap_or_default());
         // ★W2a 심층방어: 의도적으로 닫힌(surface.close 경유) 역할의 묘비 — raw restore도 절대 재스폰하지
         // 않는다(1급 원칙: 사고사만 부활, 의도삭제는 좀비 차단). phoenix가 desired_roster로 병합하는
         // 것과 별개로, 이 경로가 직접 호출돼도 좀비를 살리지 않도록 한 겹 더 막는다.
@@ -6829,6 +6863,9 @@ fn run_restore(cwd: Option<String>, include_master: bool, resume: bool) -> i32 {
             let Some(role) = entry["role"].as_str() else {
                 continue;
             };
+            if !only_roles.is_empty() && !only_roles.iter().any(|requested| requested == role) {
+                continue;
+            }
             // ★W2a: 묘비 역할은 include_master 여부와 무관하게 건너뛴다(의도삭제>강제부활).
             if tombstones.contains(role) {
                 println!("· {role}: 의도적 삭제(묘비) — 부활 안 함 (좀비 차단)");
@@ -6854,7 +6891,7 @@ fn run_restore(cwd: Option<String>, include_master: bool, resume: bool) -> i32 {
             let sess = entry["session_id"].as_str().map(String::from);
             // (W1) topology에 기록된 원 계정 config_dir을 넘긴다(구 topology=None → 기존 템플릿 동작).
             let cfg = entry["claude_config_dir"].as_str().map(String::from);
-            let rc = run_launch_agent_opts(role, agent, target_cwd, resume, sess, true, cfg, None, None);
+            let rc = run_launch_agent_opts(role, agent, target_cwd, resume, sess, true, cfg, None, model.clone());
             if rc == LAUNCH_PENDING_RC {
                 println!("· {role}: 다른 호출이 기동 중인 좌석을 재사용 — 완료를 기다리지 못함(실패로 세지 않음)");
             } else if rc == 0 {
@@ -10349,6 +10386,98 @@ mod tests {
         assert!(matches!(cli.command, Command::LaunchAgent { title: Some(_), model: Some(_), .. }));
         let cli = Cli::try_parse_from(["cys", "rename-surface", "--surface", "surface:2", "--title", "Team·Worker·s2"]).unwrap();
         assert!(matches!(cli.command, Command::RenameSurface { .. }));
+    }
+
+    #[test]
+    fn restore_internal_role_and_model_options_parse() {
+        let cli = Cli::try_parse_from(["wave", "restore", "--include-master", "--cwd", "/fixture/project",
+            "--only-role", "master", "--only-role", "worker-2", "--model", "claude-sonnet-5-5"]).unwrap();
+        match cli.command {
+            Command::Restore { cwd, include_master, only_role, model, .. } => {
+                assert_eq!(cwd.as_deref(), Some("/fixture/project"));
+                assert!(include_master);
+                assert_eq!(only_role, ["master", "worker-2"]);
+                assert_eq!(model.as_deref(), Some("claude-sonnet-5-5"));
+            }
+            _ => panic!("expected restore options"),
+        }
+        let cli = Cli::try_parse_from(["wave", "restore"]).unwrap();
+        assert!(matches!(cli.command, Command::Restore { only_role, model: None, .. } if only_role.is_empty()));
+    }
+
+    #[test]
+    fn restore_saved_stdin_options_parse() {
+        let cli = Cli::try_parse_from(["wave", "restore", "--saved-stdin", "--only-role", "worker-2"]).unwrap();
+        assert!(matches!(cli.command, Command::Restore { saved_stdin: true, only_role, .. }
+            if only_role == ["worker-2"]));
+        let cli = Cli::try_parse_from(["wave", "restore"]).unwrap();
+        assert!(matches!(cli.command, Command::Restore { saved_stdin: false, .. }));
+    }
+
+    #[test]
+    fn restore_saved_stdin_preserves_original_entries() {
+        let saved = json!([
+            {"role":"master", "agent":"claude", "cwd":"/fixture/project", "session_id":"fixture-session",
+             "claude_config_dir":"/fixture/account", "label":"원래 좌석", "pack_reinject":{"pack_version":"0.3.1"}},
+            {"role":"plain", "agent":null, "cwd":"/fixture/plain"}
+        ]);
+        let entries = read_restore_saved_entries(std::io::Cursor::new(serde_json::to_vec(&saved).unwrap())).unwrap();
+        assert_eq!(entries, saved.as_array().unwrap().clone());
+        assert!(read_restore_saved_entries(std::io::Cursor::new(b"[]")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn restore_saved_stdin_rejects_invalid_types_without_payload() {
+        for saved in [
+            json!(null), json!({}), json!([1]),
+            json!([{"agent":"claude","cwd":"/fixture"}]),
+            json!([{"role":1,"agent":"claude","cwd":"/fixture"}]),
+            json!([{"role":"","agent":"claude","cwd":"/fixture"}]),
+            json!([{"role":"worker","cwd":"/fixture"}]),
+            json!([{"role":"worker","agent":1,"cwd":"/fixture"}]),
+            json!([{"role":"worker","agent":"","cwd":"/fixture"}]),
+            json!([{"role":"worker","agent":"claude"}]),
+            json!([{"role":"worker","agent":"claude","cwd":null}]),
+        ] {
+            assert!(read_restore_saved_entries(std::io::Cursor::new(serde_json::to_vec(&saved).unwrap())).is_err());
+        }
+        let error = read_restore_saved_entries(std::io::Cursor::new(b"[RESTORE_SECRET_SENTINEL]")).unwrap_err();
+        assert_eq!(error, "복원 입력이 올바른 JSON 배열이 아닙니다.");
+        assert!(!error.contains("RESTORE_SECRET_SENTINEL"));
+    }
+
+    #[test]
+    fn restore_saved_stdin_enforces_exact_byte_bound() {
+        struct CountingRead<'a> { remaining: usize, count: &'a std::cell::Cell<usize> }
+        impl std::io::Read for CountingRead<'_> {
+            fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                let amount = output.len().min(self.remaining);
+                output[..amount].fill(b' ');
+                self.remaining -= amount;
+                self.count.set(self.count.get() + amount);
+                Ok(amount)
+            }
+        }
+        let mut exact = vec![b' '; RESTORE_SAVED_STDIN_MAX_BYTES];
+        exact[..2].copy_from_slice(b"[]");
+        assert!(read_restore_saved_entries(std::io::Cursor::new(exact)).unwrap().is_empty());
+        let count = std::cell::Cell::new(0);
+        let error = read_restore_saved_entries(CountingRead {
+            remaining: RESTORE_SAVED_STDIN_MAX_BYTES + 4096, count: &count,
+        }).unwrap_err();
+        assert_eq!(count.get(), RESTORE_SAVED_STDIN_MAX_BYTES + 1);
+        assert_eq!(error, "복원 입력은 1 MiB를 넘을 수 없습니다.");
+    }
+
+    #[test]
+    fn restore_saved_stdin_masks_read_errors() {
+        struct FailedRead;
+        impl std::io::Read for FailedRead {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("RESTORE_SECRET_SENTINEL"))
+            }
+        }
+        assert_eq!(read_restore_saved_entries(FailedRead).unwrap_err(), "복원 입력을 읽지 못했습니다.");
     }
 
     #[cfg(unix)]

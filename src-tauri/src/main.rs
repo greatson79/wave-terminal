@@ -2015,10 +2015,22 @@ fn read_dept_catalog() -> Result<Value, String> {
 /// ★WP-3(BOOTSTRAP_HARDENING): 소켓 문자열에서 부서명 파생 — cys-dept-<name> 슬러그
 /// (unix `.../cys-dept-<n>/cys.sock` · pipe `\\.\pipe\cys-dept-<n>` 공통 · cys-dept D8 파생과 동일 규약).
 fn dept_name_from_socket(sock: &str) -> Option<String> {
-    let norm = sock.replace('\\', "/");
-    norm.split('/')
-        .find_map(|seg| seg.strip_prefix("cys-dept-").map(str::to_string))
-        .filter(|n| !n.is_empty())
+    // Q3: same anchored parse as the shared classifier — never a dept-like user/ancestor folder.
+    cys::dept_socket_name(std::path::Path::new(sock))
+}
+
+#[cfg(test)]
+mod dept_name_from_socket_tests {
+    #[test]
+    fn dept_name_comes_only_from_the_anchored_department_endpoint() {
+        // Q3: a primary socket under a user folder must never name a department (wrong tombstone target).
+        assert_eq!(super::dept_name_from_socket("/Users/cys-dept-kim/.local/state/cys/cys.sock"), None);
+        assert_eq!(super::dept_name_from_socket("/Users/wave-dept-kim/.local/state/cys/cys.sock"), None);
+        assert_eq!(super::dept_name_from_socket("/Users/kim/.local/state/cys-dept-dev/cys.sock").as_deref(), Some("dev"));
+        assert_eq!(super::dept_name_from_socket(r"\\.\pipe\cys-dept-3").as_deref(), Some("3"));
+        assert_eq!(super::dept_name_from_socket("/tmp/x/cys-dept-dept-3.sock").as_deref(), Some("dept-3"));
+        assert_eq!(super::dept_name_from_socket(r"\\.\pipe\cys"), None);
+    }
 }
 
 /// ★WP-3 의도 선기록: 부서 삭제 클릭의 **제1행위** — base 데몬에 dept 묘비를 기록한다(견고

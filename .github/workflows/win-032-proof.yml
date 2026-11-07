@@ -754,7 +754,7 @@ jobs:
         run: |
           $head = (git rev-parse HEAD).Trim()
           $changed = @(git diff --name-only $env:EXPECTED_SHA $head)
-          $extra = @($changed | Where-Object { $_ -notin @('.github/proof-inputs-032.json','.github/workflows/win-032-proof.yml','cysjavis-pack/bin/tests/test_dept_paths_hotfix.py','cysjavis-pack/bin/tests/test_dept_stop_hotfix.py','cysjavis-pack/bin/tests/test_dept_teardown_atomicity.py') })
+          $extra = @($changed | Where-Object { $_ -notin @('.github/proof-inputs-032.json','.github/workflows/win-032-proof.yml','cysjavis-pack/bin/tests/test_dept_paths_hotfix.py','cysjavis-pack/bin/tests/test_dept_stop_hotfix.py','cysjavis-pack/bin/tests/test_dept_teardown_atomicity.py','cysjavis-pack/bin/tests/test_dept_crashed_windows.py') })
           if ($extra.Count -ne 0) { throw "Checkout differs from the built app commit beyond the proof harness: $($extra -join ', ')" }
           Write-Host "LIB_TESTS_COMMIT head=$head app=$env:EXPECTED_SHA harness_only_diff=$($changed -join ',')"
 

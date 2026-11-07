@@ -1,0 +1,821 @@
+name: Windows 0.3.2 proof (dept sidebar + teardown + lib tests)
+
+# Derived from CC's proven probe (ci/win-dept-probe @ 79c1183); every probe assertion is kept.
+# workflow_dispatch only. Tests THIS commit's NSIS build (artifact of a windows-build run bound to the same sha).
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: 'windows-build run id (same commit) that produced artifact cys-windows-x64-nsis'
+        required: true
+        type: string
+      expected_sha:
+        description: 'Full commit sha under test (must equal this workflow run sha AND the build run head_sha)'
+        required: true
+        type: string
+      expected_version:
+        description: 'Product version the installer and daemon must report'
+        required: true
+        default: '0.3.2'
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  department:
+    name: Required PS5.1 dept proof / ${{ matrix.path_context }} / ${{ matrix.entry }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell]
+        path_context: [gui, user-path-fix]
+        entry: [allocate, create]
+    # Anchors: https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations#yaml-anchors-and-aliases
+    steps: &department-probe-steps
+      - name: Bind the tested build to the expected commit
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_SHA -ne $env:EXPECTED_SHA) { throw "Proof run sha $env:GITHUB_SHA != expected_sha $env:EXPECTED_SHA" }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:BUILD_RUN_ID" | ConvertFrom-Json
+          if ($run.conclusion -ne 'success') { throw "Build run $env:BUILD_RUN_ID conclusion=$($run.conclusion)" }
+          if ($run.head_sha -ne $env:EXPECTED_SHA) { throw "Build run head_sha $($run.head_sha) != expected_sha $env:EXPECTED_SHA" }
+          Write-Host "BUILD_BOUND run=$env:BUILD_RUN_ID head_sha=$($run.head_sha) workflow=$($run.name)"
+
+      - name: Download the tested NSIS installer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cys-windows-x64-nsis
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}\nsis
+
+      - name: Prepare common probe (UTF-8 BOM for PowerShell 5.1)
+        shell: pwsh
+        run: |
+          $script = @'
+          param([string]$ProbeShell, [string]$PathContext, [ValidateSet('allocate','create')][string]$Entry, [Parameter(Mandatory=$true)][string]$ExpectedSid, [Parameter(Mandatory=$true)][string]$SetupPath, [Parameter(Mandatory=$true)][string]$SetupSha256, [Parameter(Mandatory=$true)][string]$ExpectedVersion)
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          $script:Scan = New-Object Text.StringBuilder
+          $script:ScanOn = $true
+          [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+          $OutputEncoding = [Console]::OutputEncoding
+          function Step($label, [scriptblock]$body) {
+            $timer = [Diagnostics.Stopwatch]::StartNew()
+            Write-Host ("{0:o} START {1}" -f (Get-Date), $label)
+            try { . $body; Write-Host ("{0:o} END {1} exit=0 elapsed_ms={2}" -f (Get-Date), $label, $timer.ElapsedMilliseconds) }
+            catch { Write-Host ("{0:o} FAIL {1} exit=1 elapsed_ms={2}: {3}" -f (Get-Date), $label, $timer.ElapsedMilliseconds, $_); throw }
+          }
+          function Assert($condition, $message) { if (-not $condition) { throw $message } }
+          function AssertNoPathErrors($where) {
+            $text = $script:Scan.ToString()
+            Assert ($text -notmatch 'FileNotFoundError') "FileNotFoundError found in product output ($where)"
+            Assert ($text -notmatch 'unicodeescape') "unicodeescape SyntaxError found in product output ($where)"
+            Assert ($text -notmatch '\(unicode error\)') "unicode error found in product output ($where)"
+          }
+          function Native($exe, [string[]]$argv, [Nullable[int]]$expected = 0) {
+            $quoted = @($argv | ForEach-Object {
+              if ($_ -ne '' -and $_ -notmatch '[\s"]') { $_ }
+              else { '"' + (($_ -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"' }
+            })
+            $timer = [Diagnostics.Stopwatch]::StartNew()
+            Write-Host ("{0:o} EXEC {1} {2}" -f (Get-Date), $exe, ($argv -join ' | '))
+            # Own the Process from Start through ExitCode; PS5 Start-Process -PassThru lost fast-exit status.
+            $p = New-Object Diagnostics.Process
+            $p.StartInfo.FileName = $exe
+            $p.StartInfo.Arguments = $quoted -join ' '
+            Write-Host ("RAW_ARGUMENTS=<{0}>" -f $p.StartInfo.Arguments)
+            $p.StartInfo.UseShellExecute = $false
+            $p.StartInfo.RedirectStandardOutput = $true
+            $p.StartInfo.RedirectStandardError = $true
+            $p.StartInfo.StandardOutputEncoding = [Text.Encoding]::UTF8
+            $p.StartInfo.StandardErrorEncoding = [Text.Encoding]::UTF8
+            try {
+              Assert ($p.Start()) "Cannot start $exe"
+              $stdoutTask = $p.StandardOutput.ReadToEndAsync()
+              $stderrTask = $p.StandardError.ReadToEndAsync()
+              if (-not $p.WaitForExit(120000)) { throw "TIMEOUT pid=$($p.Id) exe=$exe (job timeout is final containment)" }
+              $code = $p.ExitCode
+              $stdout = $stdoutTask.GetAwaiter().GetResult()
+              $stderr = $stderrTask.GetAwaiter().GetResult()
+              Write-Host $stdout
+              Write-Host $stderr
+              if ($script:ScanOn) { [void]$script:Scan.AppendLine([string]$stdout); [void]$script:Scan.AppendLine([string]$stderr) }
+              Write-Host ("{0:o} EXIT code={1} elapsed_ms={2}" -f (Get-Date), $code, $timer.ElapsedMilliseconds)
+              Assert ($null -ne $code) "Missing native exit status from $exe"
+              if ($null -ne $expected) { Assert ($code -eq $expected) "Unexpected exit $code, expected $expected from $exe" }
+              return $stdout
+            } finally { $p.Dispose() }
+          }
+          # Verbatim: wave-install 419cf078688e8d4a0d374cd4a868ecf148298ad0/bootstrap.ps1:696-730.
+          function Say($message) { Write-Host $message }
+          function Update-ClaudePath {
+            $bin = Join-Path $env:USERPROFILE '.local\bin'
+            $userKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+            try {
+              foreach ($scope in @('User', 'Process')) {
+                $current = if ($scope -eq 'User') {
+                  [string]$userKey.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                } else { $env:Path }
+                $entries = @()
+                $found = $false
+                if ($current) {
+                  foreach ($entry in $current.Split(';')) {
+                    $normalized = [Environment]::ExpandEnvironmentVariables($entry.Trim().Trim('"')).TrimEnd('\')
+                    if ($normalized -eq $bin) {
+                      if ($found) { continue }
+                      $found = $true
+                      if ($scope -eq 'Process') { $entry = $bin }
+                    }
+                    $entries += $entry
+                  }
+                }
+                if (-not $found) { $entries += $bin }
+                $updated = $entries -join ';'
+                if ($updated -cne $current) {
+                  if ($scope -eq 'User') {
+                    $kind = if ($userKey.GetValueNames() -contains 'Path') { $userKey.GetValueKind('Path') } else { [Microsoft.Win32.RegistryValueKind]::ExpandString }
+                    [Environment]::SetEnvironmentVariable('Path', $updated, 'User')
+                    $userKey.SetValue('Path', $updated, $kind)
+                  } else { $env:Path = $updated }
+                }
+              }
+            } finally { $userKey.Dispose() }
+            Say 'Claude 명령 경로를 등록했습니다. 다른 터미널에서도 쓰려면 터미널을 닫고 새로 열어 주세요.'
+          }
+          function OwnedProcesses {
+            @(Get-CimInstance Win32_Process | Where-Object {
+              $_.ExecutablePath -and $_.ExecutablePath.StartsWith($install + '\', [StringComparison]::OrdinalIgnoreCase)
+            })
+          }
+          function ProcessTree([object[]]$roots) {
+            $all = @(Get-CimInstance Win32_Process)
+            $current = @{}
+            foreach ($item in $all) { $current[[int]$item.ProcessId] = $item }
+            $members = @{}
+            $recorded = @{}
+            foreach ($root in $roots) {
+              if ($null -eq $root) { continue }
+              Assert ($root.ProcessId -gt 0 -and $null -ne $root.CreationDate) 'Process tree root needs PID and creation time'
+              $key = [int]$root.ProcessId
+              $recorded[$key] = $root
+              if ($current.ContainsKey($key) -and $current[$key].CreationDate -eq $root.CreationDate) {
+                $members[$key] = $current[$key]
+              } else { Write-Host "TREE_ROOT_GONE_OR_REUSED pid=$key recorded_created=$($root.CreationDate)" }
+            }
+            do {
+              $added = $false
+              foreach ($item in $all) {
+                $parent = $members[[int]$item.ParentProcessId]
+                $key = [int]$item.ProcessId
+                if ($null -eq $parent -or $members.ContainsKey($key)) { continue }
+                # A stale PPID may refer to a reused PID; its old children predate the current parent.
+                if ($null -eq $item.CreationDate -or $item.CreationDate -lt $parent.CreationDate) {
+                  Write-Host "TREE_REJECT_OLDER_CHILD pid=$key parent=$($parent.ProcessId) child_created=$($item.CreationDate) parent_created=$($parent.CreationDate)"
+                  continue
+                }
+                $members[$key] = $item
+                $recorded[$key] = $item
+                $added = $true
+              }
+            } while ($added)
+            @($recorded.Values | Sort-Object ProcessId)
+          }
+          function AssertGone($recorded) {
+            $now = @(Get-CimInstance Win32_Process)
+            foreach ($old in $recorded) {
+              $survivors = @($now | Where-Object { $_.ProcessId -eq $old.ProcessId -and $_.CreationDate -eq $old.CreationDate })
+              Assert ($survivors.Count -eq 0) "Process survived: pid=$($old.ProcessId) command=$($old.CommandLine)"
+            }
+          }
+          function WaitForTreeExit($recorded, [int]$seconds = 30) {
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            $gone = New-Object 'System.Collections.Generic.HashSet[int]'
+            do {
+              $now = @(Get-CimInstance Win32_Process)
+              $pending = @()
+              foreach ($old in $recorded) {
+                $alive = @($now | Where-Object { $_.ProcessId -eq $old.ProcessId -and $_.CreationDate -eq $old.CreationDate }).Count -gt 0
+                if ($alive) {
+                  $pending += $old
+                  Write-Host ("TEARDOWN alive pid={0} elapsed_ms={1}" -f $old.ProcessId, $watch.ElapsedMilliseconds)
+                } elseif ($gone.Add([int]$old.ProcessId)) {
+                  Write-Host ("TEARDOWN first_observed_gone pid={0} elapsed_ms={1}" -f $old.ProcessId, $watch.ElapsedMilliseconds)
+                }
+              }
+              $left = $seconds * 1000 - $watch.ElapsedMilliseconds
+              if ($pending.Count -eq 0 -or $left -le 0) { break }
+              Start-Sleep -Milliseconds ([int][Math]::Min(1000, $left))
+            } while ($true)
+            foreach ($old in $pending) {
+              Write-Host ("TEARDOWN SURVIVOR pid={0} elapsed_ms={1} created={2:o} exe={3} command={4}" -f $old.ProcessId, $watch.ElapsedMilliseconds, $old.CreationDate, $old.ExecutablePath, $old.CommandLine)
+            }
+            return $pending
+          }
+          $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+          Assert ($identity.User.Value -eq $ExpectedSid) 'Probe did not run as the newly created Korean account'
+          $bootstrapHome = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+          Assert (-not [string]::IsNullOrWhiteSpace($bootstrapHome)) 'Loaded account has no native user profile'
+          $nativeTemp = Join-Path $bootstrapHome 'AppData\Local\Temp'
+          New-Item -ItemType Directory -Force -Path $nativeTemp | Out-Null
+          # PS5 csc failed writing its DLL in Korean TEMP; compile in the launcher's SID-writable ASCII scratch.
+          Assert ($env:TEMP -match '^[\x00-\x7F]+$' -and (Test-Path -LiteralPath $env:TEMP -PathType Container)) 'Compiler scratch must exist and be ASCII'
+          Write-Host "PROFILE_HELPER_COMPILER_TEMP=$env:TEMP"
+          Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class CCProfile { [DllImport("shell32.dll")] public static extern int SHGetKnownFolderPath(ref Guid id, uint flags, IntPtr token, out IntPtr path); }'
+          $env:TEMP = $nativeTemp
+          $env:TMP = $nativeTemp
+          Write-Host "PRODUCT_TEMP=$env:TEMP"
+          $folderId = [guid]'5E6C858F-0E22-4760-9AFE-EA3317B67173'
+          $pointer = [IntPtr]::Zero
+          try {
+            $hr = [CCProfile]::SHGetKnownFolderPath([ref]$folderId, 0, [IntPtr]::Zero, [ref]$pointer)
+            Assert ($hr -eq 0) "SHGetKnownFolderPath failed: $hr"
+            $probeHome = [Runtime.InteropServices.Marshal]::PtrToStringUni($pointer)
+          } finally { if ($pointer -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::FreeCoTaskMem($pointer) } }
+          Assert ($probeHome -eq $bootstrapHome) 'Native profile APIs disagree'
+          $registeredProfile = [Environment]::ExpandEnvironmentVariables((Get-ItemProperty -LiteralPath ("HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\" + $ExpectedSid)).ProfileImagePath)
+          Assert ($registeredProfile -eq $probeHome) 'Profile registry does not match the process token native profile'
+          Write-Host "PROFILE_REGISTRY sid=$ExpectedSid ProfileImagePath=$registeredProfile"
+          Assert ((Split-Path -Leaf $probeHome) -eq '최형석') "Actual native profile is not the Korean account: $probeHome"
+          Write-Host "REAL_ACCOUNT name=$($identity.Name) sid=$($identity.User.Value) SHGetKnownFolderPath_Profile=$probeHome inherited_USERPROFILE=$env:USERPROFILE inherited_HOME=$env:HOME"
+          $probeRoot = Join-Path $probeHome ('cc-' + [guid]::NewGuid().ToString())
+          $team = Join-Path $probeHome '내 팀 폴더'
+          $install = Join-Path $probeHome 'Wave Terminal'
+          $pathKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')
+          try {
+            $originalUserPathExists = $pathKey -and ($pathKey.GetValueNames() -contains 'Path')
+            $originalUserPath = if ($originalUserPathExists) { $pathKey.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } else { $null }
+            $originalUserPathKind = if ($originalUserPathExists) { $pathKey.GetValueKind('Path') } else { $null }
+          } finally { if ($pathKey) { $pathKey.Dispose() } }
+          $originalProcessPath = $env:PATH
+          $registryPathChanged = $false
+          $env:USERPROFILE = $probeHome
+          $env:HOME = $probeHome
+          $env:LOCALAPPDATA = Join-Path $probeHome 'AppData\Local'
+          $env:APPDATA = Join-Path $probeHome 'AppData\Roaming'
+          $registryPath = Join-Path $probeHome '.cys\depts.json'
+          $packRoot = Join-Path $probeHome '.cys\pack'
+          $env:PYTHONUTF8 = '1'
+          $env:PYTHONIOENCODING = 'utf-8'
+          $env:PYTHONDONTWRITEBYTECODE = '1'
+          $env:CYS_SHELL = (Get-Command $ProbeShell -CommandType Application).Source
+          foreach ($key in @('CYS_ROLE','CYS_SURFACE_ID','CYS_SOCKET','CYS_ACCOUNT_DIR','CYS_DEPT_NO_MASTER','CYS_DEPT_DEFAULT_ACCOUNT','CYS_DEPTS_JSON','CYS_PACK_DIR')) {
+            [Environment]::SetEnvironmentVariable($key, $null, 'Process')
+          }
+          try {
+            . Step 'Native exit-capture self-check (before any product evidence)' {
+              # CMD has command-string parsing, not CRT argv; use the actual selected shell's encoded script.
+              $exit0 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('exit 0'))
+              $exit7 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('exit 7'))
+              $null = Native $env:CYS_SHELL @('-NoProfile','-NonInteractive','-EncodedCommand',$exit0)
+              $null = Native $env:CYS_SHELL @('-NoProfile','-NonInteractive','-EncodedCommand',$exit7) 7
+              $rejected = $false
+              try { $null = Native $env:CYS_SHELL @('-NoProfile','-NonInteractive','-EncodedCommand',$exit7) } catch { $rejected = $_.Exception.Message -match 'Unexpected exit 7' }
+              Assert $rejected 'Native helper accepted a nonzero exit as success'
+            }
+            . Step 'Isolated Korean profile and Windows shell' {
+              New-Item -ItemType Directory -Force -Path $probeRoot,$team,$env:LOCALAPPDATA,$env:APPDATA | Out-Null
+              Write-Host "PS=$($PSVersionTable.PSVersion) profile=$probeHome team=$team context=$PathContext"
+              Assert (@(Get-Process cys,cysd,cys-app -ErrorAction SilentlyContinue).Count -eq 0) 'Runner already has Wave processes; refuse shared runtime'
+            }
+            . Step 'Verify the exact tested installer bytes (artifact of the bound build run)' {
+              $setup = Join-Path $probeRoot 'setup.exe'
+              Copy-Item -LiteralPath $SetupPath -Destination $setup
+              $sha = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
+              Write-Host "asset=$SetupPath sha256=$sha expected_version=$ExpectedVersion"
+              Assert ($sha -eq $SetupSha256.ToLowerInvariant()) 'Installer bytes differ from the artifact hashed on the runner'
+            }
+            . Step 'Silent install the tested build (no source build here)' {
+              # NSIS /D must be last and unquoted, including a destination containing spaces.
+              $p = New-Object Diagnostics.Process
+              $p.StartInfo.FileName = $setup
+              $p.StartInfo.Arguments = "/S /D=$install"
+              $p.StartInfo.UseShellExecute = $false
+              Assert ($p.Start()) 'Cannot start installer'
+              Assert ($p.WaitForExit(180000)) 'Installer timeout'
+              Write-Host "installer exit=$($p.ExitCode)"
+              Assert ($p.ExitCode -eq 0) 'Installer failed'
+              $p.Dispose()
+              foreach ($relative in @('cys.exe','cysd.exe','runtime\git\usr\bin\bash.exe','runtime\python\python3.exe')) {
+                $file = Join-Path $install $relative
+                Assert (Test-Path -LiteralPath $file -PathType Leaf) "Missing shipped file: $file"
+                Write-Host "$relative sha256=$((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash)"
+              }
+            }
+            $cys = Join-Path $install 'cys.exe'
+            $bash = Join-Path $install 'runtime\git\usr\bin\bash.exe'
+            $dept = Join-Path $packRoot 'bin\cys-dept'
+            . Step 'GUI runtime PATH and optional current user-PATH fix' {
+              # Same prefix order as runtime_prefixed_path / inject_runtime_path at v0.3.1.
+              $prefix = @($install) + @('runtime\python','runtime\git\cmd','runtime\git\usr\bin','runtime\node' | ForEach-Object { Join-Path $install $_ })
+              $env:PATH = ($prefix -join ';') + ';' + $env:PATH
+              $localBin = Join-Path $probeHome '.local\bin'
+              New-Item -ItemType Directory -Force -Path $localBin | Out-Null
+              if ($PathContext -eq 'user-path-fix') {
+                $registryPathChanged = $true
+                Update-ClaudePath
+                $pathAfterFirst = $env:PATH
+                Update-ClaudePath
+                Assert ($env:PATH -ceq $pathAfterFirst) 'Repeated PATH fix changed process PATH'
+                $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')
+                try {
+                  $rawPath = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                  $kind = $key.GetValueKind('Path')
+                  $expectedKind = if ($originalUserPathExists) { $originalUserPathKind } else { [Microsoft.Win32.RegistryValueKind]::ExpandString }
+                  Assert ($kind -eq $expectedKind) 'PATH fix changed registry value kind'
+                  Assert (@($rawPath.Split(';') | Where-Object { [Environment]::ExpandEnvironmentVariables($_.Trim().Trim('"')).TrimEnd('\') -eq $localBin }).Count -eq 1) 'User PATH must contain Korean local bin exactly once'
+                  Assert (@($env:PATH.Split(';') | Where-Object { $_ -eq $localBin }).Count -eq 1) 'Process PATH must contain Korean local bin exactly once'
+                  Write-Host "user-path-kind=$kind local-bin-count=1 process-local-bin-count=1"
+                } finally { $key.Dispose() }
+              }
+              Assert (@(Get-ChildItem -LiteralPath $localBin -Force).Count -eq 0) 'Korean .local/bin must stay empty (no Claude or stub)'
+              Write-Host "runtime-prefix=$($prefix -join ';') local-bin-in-parent=$($env:PATH.Split(';') -contains $localBin)"
+              $cliVersion = Native $cys @('--version')
+              Assert ($cliVersion -match [regex]::Escape($ExpectedVersion)) "cys --version is not $ExpectedVersion : $cliVersion"
+              $null = Native $cys @('init-pack','--no-install-hook')
+              Assert (Test-Path -LiteralPath $dept) 'init-pack did not seed shipped department tool'
+              Write-Host "APP_HOME_PROOF cys-init-pack-default=$packRoot native-profile=$probeHome"
+              Write-Host "cys-dept sha256=$((Get-FileHash -LiteralPath $dept -Algorithm SHA256).Hash)"
+            }
+            . Step 'Observed reg_count Windows-literal error (diagnostic, not a runtime patch)' {
+              # Exact python -c expression in shipped cys-dept:105; SyntaxError occurs before file access.
+              $windowsReg = 'C:\Users\최형석\.cys\depts.json'
+              $expression = "import json;print(len(json.load(open('$windowsReg'))['depts']))"
+              Write-Host "REG_COUNT_DIAGNOSTIC REG=<$windowsReg>"
+              # Intentionally provokes the old Windows-literal error; excluded from the product-output scan.
+              $script:ScanOn = $false
+              try { $null = Native (Join-Path $install 'runtime\python\python3.exe') @('-c',$expression) 1 } finally { $script:ScanOn = $true }
+            }
+            . Step 'Catalog fixture (no credentials, no AI)' {
+              $account = Join-Path $probeHome '.cys\probe-account'
+              New-Item -ItemType Directory -Force -Path $account | Out-Null
+              $catalog = @{ accounts = @{ probe = $account }; departments = @{ probe = @{ display = '검증 부서'; account = 'probe'; mission_key = 'cc-probe'; cwd = $team } } }
+              $env:CYS_DEPT_CATALOG = Join-Path $probeHome '.cys\dept-catalog.json'
+              [IO.File]::WriteAllText($env:CYS_DEPT_CATALOG, ($catalog | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
+              $env:CYS_DEPT_CWD = $team
+            }
+            foreach ($entry in @($Entry)) {
+              $socket = $null
+              $daemonPid = $null
+              $daemonRecord = $null
+              $surfacePids = @()
+              $surfaceRecords = @()
+              try {
+                . Step "$entry via GUI department tool" {
+                  $argv = @($dept,$entry)
+                  if ($entry -eq 'create') { $argv += 'probe' }
+                  # Log the GUI-default REG expression in the same Bash environment, then run the unmodified tool.
+                  $envLog = 'printf "DEPT_ENV HOME=<%s> USERPROFILE=<%s> REG=<%s> CYS_DEPTS_JSON=<%s>\n" "$HOME" "$USERPROFILE" "${CYS_DEPTS_JSON:-$HOME/.cys/depts.json}" "${CYS_DEPTS_JSON-<unset>}" >&2; exec bash "$@"'
+                  $answer = Native $bash (@('-c',$envLog,'cc-env') + $argv)
+                  $name = ($answer.Trim() -split "`r?`n")[-1].Trim()
+                  Assert ($name -match '^dept-\d+$') "Invalid department output: $answer"
+                  $registry = Get-Content -LiteralPath $registryPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                  $socket = $registry.depts.$name.socket
+                  Assert ($socket -eq "\\.\pipe\cys-dept-$name") "Wrong named pipe: $socket"
+                  $env:CYS_SOCKET = $socket
+                  $env:CYS_NO_AUTOSTART = '1'
+                  $null = Native $cys @('ping')
+                  $identity = (Native $cys @('identify')) | ConvertFrom-Json
+                  $daemonPid = [int]$identity.daemon_pid
+                  Assert ($identity.version -eq $ExpectedVersion) "Wrong daemon version $($identity.version), expected $ExpectedVersion"
+                  $process = Get-CimInstance Win32_Process -Filter "ProcessId=$daemonPid"
+                  Assert ($process.ExecutablePath -eq (Join-Path $install 'cysd.exe')) 'Daemon is not the installed binary'
+                  $daemonRecord = $process
+                  $process | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine | Format-List | Out-Host
+                  $state = (Native $cys @('status','--json')) | ConvertFrom-Json
+                  $masters = @($state.surfaces | Where-Object { $_.role -eq 'master' -and -not $_.exited })
+                  Assert ($masters.Count -eq 1) 'Expected exactly one live master placeholder'
+                  Assert ($null -eq $masters[0].agent) 'Master unexpectedly has AI agent metadata'
+                  Write-Host "master-slot=blank-shell surface=$($masters[0].surface_ref) cwd=$($masters[0].cwd)"
+                }
+                . Step "$entry department is listed as its own workspace (depts.json + org.status, same source as the sidebar)" {
+                  Assert ($registryPath.Contains('최형석')) 'Registry is not under the Korean account profile'
+                  $savedSocket = $env:CYS_SOCKET
+                  $env:CYS_SOCKET = $null
+                  try { $fleetJson = Native $cys @('fleet','--json') $null } finally { $env:CYS_SOCKET = $savedSocket }
+                  $fleet = $fleetJson | ConvertFrom-Json
+                  $mine = @($fleet.departments | Where-Object { $_.dept -eq $name })
+                  Assert ($mine.Count -eq 1) "Department $name is not listed as its own workspace"
+                  Assert ($null -eq $mine[0].PSObject.Properties['error']) "Department $name is listed but unreachable: $($mine[0].error)"
+                  $expectedDisplay = if ($entry -eq 'create') { '검증 부서' } else { $name }
+                  Assert ($mine[0].department -eq $expectedDisplay) "Workspace label '$($mine[0].department)' != '$expectedDisplay'"
+                  Assert ($mine[0].socket -eq $socket) 'Workspace socket differs from registry socket'
+                  Assert (@($mine[0].surfaces | Where-Object { $_.role -eq 'master' -and -not $_.exited }).Count -eq 1) 'Workspace has no live master node'
+                  Write-Host "WORKSPACE_LISTED dept=$name label=$($mine[0].department) socket=$($mine[0].socket)"
+                  AssertNoPathErrors "after $entry"
+                }
+                . Step "$entry launch exactly one plain worker shell and read actual cwd" {
+                  $proof = Join-Path $team "$entry-proof.json"
+                  $payload = Join-Path $team "$entry-cwd.ps1"
+                  $body = '$ErrorActionPreference="Stop"; $d=@{cwd=(Get-Location).Path; path=$env:PATH; cys_command=(Get-Command cys.exe -ErrorAction Stop | Select-Object -First 1 -ExpandProperty Source)}; [IO.File]::WriteAllText(' + "'$proof.tmp'" + ',($d|ConvertTo-Json),[Text.Encoding]::UTF8); Move-Item -LiteralPath ' + "'$proof.tmp' -Destination '$proof'"
+                  [IO.File]::WriteAllText($payload, $body, (New-Object Text.UTF8Encoding($true)))
+                  $command = "& '$payload'; while (`$true) { Start-Sleep -Seconds 1 }"
+                  $worker = (Native $cys @('new-surface','--role','worker','--cwd',$team,'--cmd',$command)).Trim()
+                  Assert ($worker -match '^surface:\d+$') 'No worker surface ref'
+                  $null = Native $cys @('list')
+                  $state = (Native $cys @('status','--json')) | ConvertFrom-Json
+                  $live = @($state.surfaces | Where-Object { -not $_.exited })
+                  Assert ($live.Count -eq 2) 'Expected master plus exactly one worker'
+                  $workers = @($live | Where-Object { $_.role -eq 'worker' -and $_.surface_ref -eq $worker })
+                  Assert ($workers.Count -eq 1 -and $null -eq $workers[0].agent) 'Worker missing or AI launched'
+                  Assert ($workers[0].cwd -eq $team) 'Surface cwd metadata mismatch'
+                  $deadline = (Get-Date).AddSeconds(30)
+                  while (-not (Test-Path -LiteralPath $proof) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
+                  Assert (Test-Path -LiteralPath $proof) 'Shell did not execute cwd readback'
+                  $readback = Get-Content -LiteralPath $proof -Raw -Encoding UTF8 | ConvertFrom-Json
+                  Assert ($readback.cwd -eq $team) "Actual shell cwd mismatch: $($readback.cwd)"
+                  Assert ($readback.cys_command -eq $cys) 'Worker shell does not resolve installed cys.exe'
+                  if ($PathContext -eq 'user-path-fix') { Assert ($readback.path.Split(';') -contains $localBin) 'Korean local bin not present in worker shell PATH' }
+                  Assert (@(Get-ChildItem -LiteralPath $localBin -Force).Count -eq 0) 'Korean local bin gained files'
+                  Write-Host ($readback | ConvertTo-Json)
+                  $null = Native $cys @('read-screen','--surface',$worker)
+                  $list = Native $cys @('list')
+                  $surfacePids = @([regex]::Matches($list, '\bpid=(\d+)') | ForEach-Object { [int]$_.Groups[1].Value })
+                  Assert ($surfacePids.Count -eq 2) 'Cannot bind both shell PIDs for teardown evidence'
+                  $surfaceRecords = @($surfacePids | ForEach-Object {
+                    $record = Get-CimInstance Win32_Process -Filter "ProcessId=$_"
+                    Assert ($record -and $record.CreationDate -ge $daemonRecord.CreationDate) 'Shell PID identity predates daemon or is missing'
+                    Assert ($record.ExecutablePath -eq $env:CYS_SHELL) 'Recorded surface PID is not the selected shell'
+                    Assert ($record.ParentProcessId -eq $daemonRecord.ProcessId) 'Recorded surface shell is not a child of the daemon'
+                    $record
+                  })
+                }
+              } finally {
+                if ($socket) {
+                  . Step "$entry down-sock and prove department removal" {
+                    $departmentTree = @(ProcessTree (@($daemonRecord) + $surfaceRecords))
+                    $departmentTree | Select-Object ProcessId,ParentProcessId,CreationDate,ExecutablePath,CommandLine | Format-List | Out-Host
+                    $stopOut = Native $bash @($dept,'down-sock',$socket)
+                    $receiptLines = @(($stopOut -split "`r?`n") | Where-Object { $_ -like 'CYS_DEPT_STOP_RESULT *' })
+                    Assert ($receiptLines.Count -eq 1) 'Verified-stop receipt (CYS_DEPT_STOP_RESULT) missing from down-sock output'
+                    $receipt = $receiptLines[0].Substring('CYS_DEPT_STOP_RESULT '.Length) | ConvertFrom-Json
+                    Assert ($receipt.verified -eq $true -and $receipt.schema_version -eq 1 -and $receipt.scope -eq 'known-process-tree') "Receipt not verified: $($receiptLines[0])"
+                    Assert ([int]$receipt.daemon_pid -eq $daemonPid) 'Receipt daemon_pid differs from the recorded daemon'
+                    Assert ([int]$receipt.descendants -ge 1) 'Receipt reports no descendants although shells were running'
+                    Write-Host "STOP_RECEIPT $($receiptLines[0])"
+                    $remaining = @(WaitForTreeExit $departmentTree 30)
+                    $registryText = Get-Content -LiteralPath $registryPath -Raw -Encoding UTF8
+                    Write-Host "depts.json after teardown=$registryText"
+                    Assert ($remaining.Count -eq 0) "Department processes survived 30 seconds: $((@($remaining | ForEach-Object { $_.ProcessId })) -join ',')"
+                    AssertGone $departmentTree
+                    $registry = $registryText | ConvertFrom-Json
+                    Assert (@($registry.depts.PSObject.Properties).Count -eq 0) 'Department registry not empty'
+                    # ping does not autostart; any success here means teardown failed.
+                    $null = Native $cys @('ping') 1
+                    AssertNoPathErrors "after $entry teardown"
+                  }
+                  $env:CYS_SOCKET = $null
+                }
+              }
+            }
+          } finally {
+            try {
+            . Step 'Final process inventory and isolated base-runtime cleanup' {
+              $owned = @(OwnedProcesses)
+              $runtimeTree = @(ProcessTree $owned)
+              $runtimeTree | Select-Object ProcessId,ParentProcessId,CreationDate,ExecutablePath,CommandLine | Format-List | Out-Host
+              # Department assertions happen before this fallback; cleanup never converts a failed probe to PASS.
+              foreach ($process in $owned) {
+                $current = Get-CimInstance Win32_Process -Filter "ProcessId=$($process.ProcessId)"
+                if ($current -and $current.ExecutablePath -eq $process.ExecutablePath -and $current.CreationDate -eq $process.CreationDate) {
+                  $null = Native (Join-Path $env:WINDIR 'System32\taskkill.exe') @('/PID',"$($process.ProcessId)",'/T','/F') $null
+                }
+              }
+              Start-Sleep -Seconds 2
+              Assert (@(OwnedProcesses).Count -eq 0) 'Installed runtime processes remain'
+              AssertGone $runtimeTree
+            }
+            } finally {
+              . Step 'Restore original raw HKCU PATH and value kind' {
+                if ($registryPathChanged) {
+                  $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+                  try {
+                    if ($originalUserPathExists) {
+                      $key.SetValue('Path', $originalUserPath, $originalUserPathKind)
+                      Assert ($key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) -ceq $originalUserPath) 'Original raw user PATH not restored'
+                      Assert ($key.GetValueKind('Path') -eq $originalUserPathKind) 'Original user PATH kind not restored'
+                    } else {
+                      $key.DeleteValue('Path', $false)
+                      Assert (-not ($key.GetValueNames() -contains 'Path')) 'Originally absent user PATH was not removed'
+                    }
+                  } finally { $key.Dispose() }
+                }
+                $env:PATH = $originalProcessPath
+              }
+            }
+          }
+          Write-Host ("{0:o} PROOF_DEPT_PASS shell={1} context={2} entrypoint={3}" -f (Get-Date), $ProbeShell, $PathContext, $Entry)
+          '@
+          [IO.File]::WriteAllText((Join-Path $env:RUNNER_TEMP 'cc-dept-probe.ps1'), $script, (New-Object Text.UTF8Encoding($true)))
+          $launcher = @'
+          param([ValidateSet('pwsh','powershell')][string]$ProbeShell, [string]$PathContext, [ValidateSet('allocate','create')][string]$Entry, [Parameter(Mandatory=$true)][string]$NsisDir, [Parameter(Mandatory=$true)][string]$ExpectedVersion)
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          $account = $null
+          $password = $null
+          $process = $null
+          $stdout = $null
+          $stderr = $null
+          $outputWritten = $false
+          $name = '최형석'
+          function AccountProcesses($sid) {
+            @(Get-CimInstance Win32_Process | ForEach-Object {
+              $owner = Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid -ErrorAction SilentlyContinue
+              if ($owner -and $owner.ReturnValue -eq 0 -and $owner.Sid -eq $sid) { $_ }
+            })
+          }
+          try {
+            if (Get-LocalUser -Name $name -ErrorAction SilentlyContinue) { throw 'Korean test account already exists; refuse reuse' }
+            # Password stays in memory; never pass it in command-line arguments or log it.
+            $password = ConvertTo-SecureString ([guid]::NewGuid().ToString('N') + 'aA1!') -AsPlainText -Force
+            $account = New-LocalUser -Name $name -Password $password -Description 'Disposable CC department probe' -PasswordNeverExpires
+            Add-LocalGroupMember -Group (Get-LocalGroup -SID 'S-1-5-32-545') -Member $account
+            $sid = $account.SID.Value
+            Write-Host ("{0:o} ACCOUNT_CREATED name={1} sid={2}" -f (Get-Date), $name, $sid)
+            Start-Service seclogon
+            $shared = Join-Path $env:PUBLIC ('cc-dept-' + [guid]::NewGuid().ToString())
+            New-Item -ItemType Directory -Path $shared | Out-Null
+            $childScript = Join-Path $shared 'cc-dept-probe.ps1'
+            Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'cc-dept-probe.ps1') -Destination $childScript
+            $nsis = @(Get-ChildItem -LiteralPath $NsisDir -Filter '*-setup.exe' -Recurse)
+            if ($nsis.Count -ne 1) { throw "Expected exactly one NSIS setup, found $($nsis.Count)" }
+            if ($nsis[0].Name -notlike "*$ExpectedVersion*") { throw "Installer name $($nsis[0].Name) does not carry version $ExpectedVersion" }
+            $childSetup = Join-Path $shared 'setup.exe'
+            Copy-Item -LiteralPath $nsis[0].FullName -Destination $childSetup
+            $setupSha = (Get-FileHash -LiteralPath $childSetup -Algorithm SHA256).Hash.ToLowerInvariant()
+            Write-Host "TESTED_INSTALLER name=$($nsis[0].Name) sha256=$setupSha"
+            & (Join-Path $env:WINDIR 'System32\icacls.exe') $shared /grant "*$($sid):(OI)(CI)RX" | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot grant the test user script access' }
+            $scratch = Join-Path $shared 'temp'
+            New-Item -ItemType Directory -Path $scratch | Out-Null
+            & (Join-Path $env:WINDIR 'System32\icacls.exe') $scratch /grant "*$($sid):(OI)(CI)F" | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot grant the test user temporary-file access' }
+            $process = New-Object Diagnostics.Process
+            $process.StartInfo.FileName = (Get-Command $ProbeShell -CommandType Application).Source
+            $process.StartInfo.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $childScript + '" -ProbeShell ' + $ProbeShell + ' -PathContext ' + $PathContext + ' -Entry ' + $Entry + ' -ExpectedSid ' + $sid + ' -SetupPath "' + $childSetup + '" -SetupSha256 ' + $setupSha + ' -ExpectedVersion ' + $ExpectedVersion
+            $process.StartInfo.WorkingDirectory = $shared
+            $process.StartInfo.UserName = $name
+            $process.StartInfo.Domain = $env:COMPUTERNAME
+            $process.StartInfo.Password = $password
+            $process.StartInfo.LoadUserProfile = $true
+            $process.StartInfo.EnvironmentVariables['TEMP'] = $scratch
+            $process.StartInfo.EnvironmentVariables['TMP'] = $scratch
+            $process.StartInfo.UseShellExecute = $false
+            $process.StartInfo.RedirectStandardOutput = $true
+            $process.StartInfo.RedirectStandardError = $true
+            $process.StartInfo.StandardOutputEncoding = [Text.Encoding]::UTF8
+            $process.StartInfo.StandardErrorEncoding = [Text.Encoding]::UTF8
+            if (-not $process.Start()) { throw 'Cannot start the real-account probe' }
+            $stdout = $process.StandardOutput.ReadToEndAsync()
+            $stderr = $process.StandardError.ReadToEndAsync()
+            if (-not $process.WaitForExit(1080000)) { throw 'Real-account probe exceeded 18 minutes' }
+            Write-Host $stdout.GetAwaiter().GetResult()
+            Write-Host $stderr.GetAwaiter().GetResult()
+            $outputWritten = $true
+            Write-Host ("{0:o} REAL_ACCOUNT_PROBE_EXIT code={1}" -f (Get-Date), $process.ExitCode)
+            if ($process.ExitCode -ne 0) { throw "Real-account probe failed: $($process.ExitCode)" }
+          } finally {
+            try {
+              if ($account) {
+                # This unique account belongs only to this job; recheck SID before each final cleanup kill.
+                foreach ($owned in @(AccountProcesses $account.SID.Value)) {
+                  $current = Get-CimInstance Win32_Process -Filter "ProcessId=$($owned.ProcessId)"
+                  if ($current -and $current.CreationDate -eq $owned.CreationDate) {
+                    $owner = Invoke-CimMethod -InputObject $current -MethodName GetOwnerSid
+                    if ($owner.ReturnValue -eq 0 -and $owner.Sid -eq $account.SID.Value) {
+                      Write-Host "ACCOUNT_CLEANUP pid=$($current.ProcessId) command=$($current.CommandLine)"
+                      & (Join-Path $env:WINDIR 'System32\taskkill.exe') /PID $current.ProcessId /T /F | Out-Host
+                      Write-Host "ACCOUNT_CLEANUP taskkill_exit=$LASTEXITCODE"
+                    }
+                  }
+                }
+                Start-Sleep -Seconds 1
+                if (@(AccountProcesses $account.SID.Value).Count -ne 0) { throw 'Korean account processes survived final cleanup' }
+              }
+            } finally {
+              try {
+                if (-not $outputWritten) {
+                  foreach ($stream in @($stdout,$stderr)) {
+                    if ($stream -and $stream.IsCompleted -and -not $stream.IsFaulted -and -not $stream.IsCanceled) { Write-Host $stream.GetAwaiter().GetResult() }
+                    elseif ($stream) { Write-Host 'CHILD_OUTPUT_INCOMPLETE after cleanup (timeout/failure remains FAIL)' }
+                  }
+                }
+              } finally {
+                if ($account) {
+                  Remove-LocalUser -SID $account.SID
+                  if (Get-LocalUser -SID $account.SID -ErrorAction SilentlyContinue) { throw 'Korean test account removal failed' }
+                  Write-Host ("{0:o} ACCOUNT_REMOVED sid={1}" -f (Get-Date), $account.SID.Value)
+                }
+                if ($process) { $process.Dispose() }
+                if ($password) { $password.Dispose() }
+              }
+            }
+          }
+          '@
+          [IO.File]::WriteAllText((Join-Path $env:RUNNER_TEMP 'cc-korean-account.ps1'), $launcher, (New-Object Text.UTF8Encoding($true)))
+
+      - name: Required Windows PowerShell 5.1 probe
+        id: ps51
+        if: matrix.shell == 'powershell'
+        shell: powershell
+        env:
+          PROBE_PATH_CONTEXT: ${{ matrix.path_context }}
+          PROBE_ENTRY: ${{ matrix.entry }}
+          PROOF_VERSION: ${{ inputs.expected_version }}
+        run: |
+          if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1) { throw 'Required Windows PowerShell 5.1 did not execute' }
+          & "$env:RUNNER_TEMP\cc-korean-account.ps1" -ProbeShell powershell -PathContext $env:PROBE_PATH_CONTEXT -Entry $env:PROBE_ENTRY -NsisDir "$env:RUNNER_TEMP\nsis" -ExpectedVersion $env:PROOF_VERSION
+
+      - name: Secondary PowerShell 7 regression
+        if: matrix.shell == 'pwsh'
+        shell: pwsh
+        env:
+          PROBE_PATH_CONTEXT: ${{ matrix.path_context }}
+          PROBE_ENTRY: ${{ matrix.entry }}
+          PROOF_VERSION: ${{ inputs.expected_version }}
+        run: '& "$env:RUNNER_TEMP\cc-korean-account.ps1" -ProbeShell pwsh -PathContext $env:PROBE_PATH_CONTEXT -Entry $env:PROBE_ENTRY -NsisDir "$env:RUNNER_TEMP\nsis" -ExpectedVersion $env:PROOF_VERSION'
+
+      - name: Fail unless the required PS5.1 probe executed successfully
+        if: always() && matrix.shell == 'powershell'
+        shell: pwsh
+        env:
+          PS51_OUTCOME: ${{ steps.ps51.outcome }}
+        run: |
+          if ($env:PS51_OUTCOME -ne 'success') { throw "Required PS5.1 probe did not succeed: $env:PS51_OUTCOME" }
+
+      - name: Assert Korean test account is gone
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $name = '최형석'
+          $account = Get-LocalUser -Name $name -ErrorAction SilentlyContinue
+          if ($account) {
+            $sid = $account.SID.Value
+            Remove-LocalUser -SID $account.SID
+            Write-Host "ACCOUNT_REMOVED_BY_GUARD sid=$sid"
+            if (Get-LocalUser -Name $name -ErrorAction SilentlyContinue) {
+              throw "Korean test account survived final guard: $sid"
+            }
+            $profileKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid"
+            if (Test-Path -LiteralPath $profileKey) {
+              $path = (Get-ItemProperty -LiteralPath $profileKey).ProfileImagePath
+              Write-Host "PROFILE_LEFT sid=$sid path=$path"
+              throw "Korean test profile remains registered: $sid"
+            }
+          } else {
+            Write-Host "ACCOUNT_ABSENT name=$name"
+          }
+
+  secondary-ps7:
+    name: Secondary PS7 dept proof / ${{ matrix.path_context }} / ${{ matrix.entry }}
+    needs: department
+    if: always()
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [pwsh]
+        path_context: [gui, user-path-fix]
+        entry: [allocate, create]
+    steps: *department-probe-steps
+
+  # C3: the Rust library tests + cys-dept Python tests on Windows, under PS 5.1 (required) and PS7 (secondary).
+  # No skip / ignore / cfg-out: the three known tests are run by exact name and the full run must report 0 ignored.
+  lib-ps51:
+    name: Required PS5.1 Windows lib + dept tests
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps: &lib-test-steps
+      - uses: actions/checkout@v4
+
+      - name: Bind the checkout to the expected commit
+        shell: pwsh
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          $head = (git rev-parse HEAD).Trim()
+          if ($head -ne $env:EXPECTED_SHA) { throw "Checkout $head != expected_sha $env:EXPECTED_SHA" }
+          Write-Host "LIB_TESTS_COMMIT $head"
+
+      - name: Setup Rust (x86_64-pc-windows-msvc)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          key: windows-032-proof-lib
+
+      - name: Prepare lib test script
+        shell: pwsh
+        run: |
+          $script = @'
+          param([string]$Shell)
+          $ErrorActionPreference = 'Continue'
+          $env:PYTHONUTF8 = '1'
+          $env:PYTHONIOENCODING = 'utf-8'
+          $env:PYTHONDONTWRITEBYTECODE = '1'
+          function RunCargo([string[]]$cargoArgs) {
+            # PS 5.1 wraps native stderr in error records; collect text and judge by exit code only.
+            $text = (& cargo @cargoArgs 2>&1 | ForEach-Object { "$_" }) -join "`n"
+            Write-Host $text
+            if ($LASTEXITCODE -ne 0) { throw "cargo $($cargoArgs -join ' ') failed with exit $LASTEXITCODE" }
+            return $text
+          }
+          Write-Host "PS=$($PSVersionTable.PSVersion) shell=$Shell"
+          $named = @(
+            'pack::tests::install_from_iter_equivalent_to_install',
+            'tests::resolve_claude_config_dir_is_deterministic_env_not_scan',
+            'tests::runtime_prefixed_path_prepends_exe_dir_and_dedups'
+          )
+          foreach ($name in $named) {
+            $out = RunCargo @('test','--lib',$name,'--','--exact')
+            if ($out -notmatch 'test result: ok\. 1 passed; 0 failed; 0 ignored') { throw "C3 test not green (or ignored/filtered): $name" }
+            Write-Host "C3_TEST_GREEN $name"
+          }
+          $full = RunCargo @('test','--lib')
+          if ($full -notmatch 'test result: ok\. \d+ passed; 0 failed; 0 ignored') { throw 'Full lib suite not green or has ignored tests' }
+          $env:CYS_TEST_BASH = 'C:\Program Files\Git\bin\bash.exe'
+          if (-not (Test-Path -LiteralPath $env:CYS_TEST_BASH)) { throw 'Git bash missing' }
+          $tests = @(Get-ChildItem -LiteralPath 'cysjavis-pack/bin/tests' -Filter 'test_dept_*.py' | Sort-Object Name)
+          if ($tests.Count -lt 3) { throw "Expected the cys-dept Python tests, found $($tests.Count)" }
+          foreach ($test in $tests) {
+            & python -B $test.FullName
+            if ($LASTEXITCODE -ne 0) { throw "cys-dept test failed: $($test.Name) exit=$LASTEXITCODE" }
+            Write-Host "DEPT_PY_GREEN $($test.Name)"
+          }
+          Write-Host "LIB_AND_DEPT_TESTS_PASS shell=$Shell"
+          '@
+          [IO.File]::WriteAllText((Join-Path $env:RUNNER_TEMP 'lib-tests.ps1'), $script, (New-Object Text.UTF8Encoding($true)))
+
+      - name: Required Windows PowerShell 5.1 lib and dept tests
+        id: ps51
+        if: matrix.shell == 'powershell'
+        shell: powershell
+        run: |
+          if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1) { throw 'Required Windows PowerShell 5.1 did not execute' }
+          & "$env:RUNNER_TEMP\lib-tests.ps1" -Shell powershell
+          if (-not $?) { throw 'lib-tests.ps1 failed' }
+
+      - name: Secondary PowerShell 7 lib and dept tests
+        if: matrix.shell == 'pwsh'
+        shell: pwsh
+        run: |
+          & "$env:RUNNER_TEMP\lib-tests.ps1" -Shell pwsh
+          if (-not $?) { throw 'lib-tests.ps1 failed' }
+
+      - name: Fail unless the required PS5.1 run executed successfully
+        if: always() && matrix.shell == 'powershell'
+        shell: pwsh
+        env:
+          PS51_OUTCOME: ${{ steps.ps51.outcome }}
+        run: |
+          if ($env:PS51_OUTCOME -ne 'success') { throw "Required PS5.1 lib/dept tests did not succeed: $env:PS51_OUTCOME" }
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell]
+
+  lib-ps7:
+    name: Secondary PS7 Windows lib + dept tests
+    needs: lib-ps51
+    if: always()
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [pwsh]
+    steps: *lib-test-steps
+
+  # Single verdict: every dept scenario and both lib jobs must be green; a PS7 pass never erases a PS5.1 failure.
+  proof-gate:
+    name: Windows 0.3.2 proof gate
+    needs: [department, secondary-ps7, lib-ps51, lib-ps7]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every proof job to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS"
+          python3 - <<'PY'
+          import json, os, sys
+          needs = json.loads(os.environ["RESULTS"])
+          bad = {k: v["result"] for k, v in needs.items() if v["result"] != "success"}
+          if bad:
+              print("PROOF FAIL:", bad)
+              sys.exit(1)
+          print("PROOF PASS:", {k: v["result"] for k, v in needs.items()})
+          PY

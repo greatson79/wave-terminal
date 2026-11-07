@@ -62,11 +62,11 @@ class DepartmentPathTests(unittest.TestCase):
             (root / "cygpath").write_text("#!/bin/sh\nprintf 'C:/%s\\n' \"${2#/c/}\"\n", encoding="utf-8")
             (root / "python3").write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n", encoding="utf-8")
             for executable in root.iterdir(): executable.chmod(0o700)
-            program = boundary + '\npython3 /x /regex/i --opt=/y "/Team Name" "$(native_path /c/Users/a/depts.json)"\n'
+            program = boundary + '\npython3 /x /regex/i --opt=/y "/Team Name" "$(native_path /c/Users/user/depts.json)"\n'
             result = subprocess.run([BASH, "-c", program], env={**os.environ, "PATH": str(root)+os.pathsep+os.environ.get("PATH", "")},
                                     text=True, encoding="utf-8", capture_output=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.splitlines(), ["/x", "/regex/i", "--opt=/y", "/Team Name", "C:/Users/a/depts.json"])
+            self.assertEqual(result.stdout.splitlines(), ["/x", "/regex/i", "--opt=/y", "/Team Name", "C:/Users/user/depts.json"])
 
     def test_path_conversion_failure_fails_closed_and_never_runs_python(self):
         source = DEPT.read_text(encoding="utf-8")
@@ -78,11 +78,11 @@ class DepartmentPathTests(unittest.TestCase):
             (root / "cygpath").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
             (root / "python3").write_text("#!/bin/sh\n: > '%s'\n" % ran, encoding="utf-8")
             for executable in root.iterdir(): executable.chmod(0o700)
-            program = boundary + '\npython3 -c code "$(native_path /c/Users/a/depts.json)" other\n'
+            program = boundary + '\npython3 -c code "$(native_path /c/Users/user/depts.json)" other\n'
             result = subprocess.run([BASH, "-c", program], env={**os.environ, "PATH": str(root)+os.pathsep+os.environ.get("PATH", "")},
                                     text=True, encoding="utf-8", capture_output=True, timeout=10)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("경로 변환 실패 / path conversion failed: /c/Users/a/depts.json", result.stderr)
+            self.assertIn("경로 변환 실패 / path conversion failed: /c/Users/user/depts.json", result.stderr)
             self.assertFalse(ran.exists(), "python must not run with a failed/empty path argument")
 
 

@@ -848,10 +848,84 @@ jobs:
         shell: [pwsh]
     steps: *lib-test-steps
 
+  # C3 (additive): src-tauri app tests + core lib tests on Windows, PS5.1 required. C9: injected, isolated roots only.
+  # Roots follow the committed rules in src-tauri/src/dept_teardown.rs (CYS_DEPT_TEST_ROOT: absolute, no system names,
+  # no symlinks, marker file .cys-dept-test-root = "owned-dept-fixture\n"); WAVE_TEST_ROOT is a private empty dir.
+  # No skip / ignore: every cargo "test result" line must report 0 ignored and 0 failed.
+  app-ps51:
+    needs: inputs
+    name: Required PS5.1 Windows app + core cargo tests
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Bind the checkout to the expected commit
+        shell: pwsh
+        env:
+          EXPECTED_SHA: ${{ needs.inputs.outputs.expected_sha }}
+        run: |
+          $head = (git rev-parse HEAD).Trim()
+          $changed = @(git diff --name-only $env:EXPECTED_SHA $head)
+          $extra = @($changed | Where-Object { $_ -notin @('.github/proof-inputs-032.json','.github/workflows/win-032-proof.yml','cysjavis-pack/bin/tests/test_dept_paths_hotfix.py','cysjavis-pack/bin/tests/test_dept_stop_hotfix.py','cysjavis-pack/bin/tests/test_dept_teardown_atomicity.py','cysjavis-pack/bin/tests/test_dept_crashed_windows.py') })
+          if ($extra.Count -ne 0) { throw "Checkout differs from the built app commit beyond the proof harness: $($extra -join ', ')" }
+          Write-Host "APP_TESTS_COMMIT head=$head app=$env:EXPECTED_SHA harness_only_diff=$($changed -join ',')"
+
+      - name: Setup Rust (x86_64-pc-windows-msvc)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          key: windows-032-proof-app
+
+      - name: Required Windows PowerShell 5.1 app and core cargo tests
+        id: app
+        shell: powershell
+        run: |
+          if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1) { throw 'Required Windows PowerShell 5.1 did not execute' }
+          $ErrorActionPreference = 'Continue'
+          $base = Join-Path $env:RUNNER_TEMP 'app-fixture'
+          $deptRoot = Join-Path $base 'dept-root'
+          $waveRoot = Join-Path $base 'wave-root'
+          New-Item -ItemType Directory -Force -Path $deptRoot, $waveRoot | Out-Null
+          [IO.File]::WriteAllText((Join-Path $deptRoot '.cys-dept-test-root'), "owned-dept-fixture`n", (New-Object Text.UTF8Encoding($false)))
+          $env:CYS_DEPT_TEST_ROOT = $deptRoot
+          $env:WAVE_TEST_ROOT = $waveRoot
+          Write-Host "APP_FIXTURE_ROOTS dept=$deptRoot wave=$waveRoot"
+          function RunCargo([string[]]$cargoArgs) {
+            $text = (& cargo @cargoArgs 2>&1 | ForEach-Object { "$_" }) -join "`n"
+            Write-Host $text
+            if ($LASTEXITCODE -ne 0) { throw "cargo $($cargoArgs -join ' ') failed with exit $LASTEXITCODE" }
+            $results = @([regex]::Matches($text, 'test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored'))
+            if ($results.Count -lt 1) { throw "no cargo test result line for: $($cargoArgs -join ' ')" }
+            foreach ($m in $results) {
+              if ($m.Groups[1].Value -ne 'ok' -or $m.Groups[3].Value -ne '0' -or $m.Groups[4].Value -ne '0') { throw "not green or has ignored tests: $($m.Value)" }
+            }
+            $passed = ($results | ForEach-Object { [int]$_.Groups[2].Value } | Measure-Object -Sum).Sum
+            Write-Host "CARGO_GREEN $($cargoArgs -join ' ') passed=$passed"
+            return $passed
+          }
+          $app = RunCargo @('test','-p','cys-app')
+          if ($app -lt 1) { throw 'app tests ran zero tests' }
+          $core = RunCargo @('test','-p','cys-terminal','--lib')
+          if ($core -lt 1) { throw 'core lib ran zero tests' }
+          Write-Host "APP_AND_CORE_TESTS_PASS app=$app core=$core"
+
+      - name: Fail unless the required PS5.1 run executed successfully
+        if: always()
+        shell: pwsh
+        env:
+          APP_OUTCOME: ${{ steps.app.outcome }}
+        run: |
+          if ($env:APP_OUTCOME -ne 'success') { throw "Required PS5.1 app/core cargo tests did not succeed: $env:APP_OUTCOME" }
+
   # Single verdict: every dept scenario and both lib jobs must be green; a PS7 pass never erases a PS5.1 failure.
   proof-gate:
     name: Windows 0.3.2 proof gate
-    needs: [inputs, department, secondary-ps7, lib-ps51, lib-ps7]
+    needs: [inputs, department, secondary-ps7, lib-ps51, lib-ps7, app-ps51]
     if: always()
     runs-on: ubuntu-latest
     steps:

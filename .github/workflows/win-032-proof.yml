@@ -912,17 +912,20 @@ jobs:
           # derived from the tree's own contract (tauri.conf.json externalBin + resources; package name from Cargo.toml),
           # so the same job works for cys-app/cysd,cys and wave-app/wave,waved,cys,cysd,cys-app trees. Never a host path.
           $tauriDir = (Resolve-Path 'src-tauri').Path
+          $repoRoot = (Resolve-Path '.').Path
           $conf = Get-Content -Raw -LiteralPath (Join-Path $tauriDir 'tauri.conf.json') | ConvertFrom-Json
           $triple = 'x86_64-pc-windows-msvc'
           function Stage([string]$rel) {
             $target = [IO.Path]::GetFullPath((Join-Path $tauriDir $rel))
-            if (-not $target.StartsWith($tauriDir + [IO.Path]::DirectorySeparatorChar)) { throw "refusing to stage outside the checkout: $rel" }
+            if (-not $target.StartsWith($repoRoot + [IO.Path]::DirectorySeparatorChar)) { throw "refusing to stage outside the checkout: $rel" }
             if ($rel.EndsWith('/')) { New-Item -ItemType Directory -Force -Path $target | Out-Null; $target = Join-Path $target '.placeholder' }
             if (Test-Path -LiteralPath $target) { return }
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
             [IO.File]::WriteAllBytes($target, [byte[]](0x4d, 0x5a))
             Write-Host "STAGED $rel"
           }
+          $dist = [string]$conf.build.frontendDist
+          if ($dist -and $dist -notmatch '^https?://') { Stage ($dist.TrimEnd('/') + '/'); Stage ($dist.TrimEnd('/') + '/index.html') }
           foreach ($bin in @($conf.bundle.externalBin)) { if ($bin) { Stage "$bin-$triple.exe" } }
           if ($conf.bundle.resources) {
             $res = $conf.bundle.resources

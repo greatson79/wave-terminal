@@ -25,6 +25,12 @@ jobs:
       CYS_TARGET: aarch64-apple-darwin
     steps:
       - uses: actions/checkout@v4
+
+      - name: Release install/contact reference gate
+        shell: bash
+        run: |
+          python3 scripts/tests/test_release_links.py
+          python3 scripts/check-release-links.py
       - name: Verify native arm64 runner and record source
         shell: bash
         run: |

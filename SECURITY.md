@@ -2,9 +2,9 @@
 
 ## Reporting a vulnerability
 
-Please report security issues privately to **cysinsight@gmail.com**.
-Do not open public issues for vulnerabilities. You should receive a response
-within a few days; coordinated disclosure is appreciated.
+Report security issues through [Wave Terminal GitHub Issues](https://github.com/greatson79/wave-terminal/issues).
+Do not include credentials, personal information, or exploit details in a public issue;
+ask for a private reporting channel first.
 
 ## Scope notes
 

@@ -48,17 +48,9 @@
 
 가장 쉬운 방법은 명령 한 줄 설치입니다. 설치기가 설치팩을 받아 고정 SHA256으로 확인한 뒤 진행합니다.
 
-macOS(터미널):
-```bash
-curl -fsSL https://github.com/greatson79/wave-install/releases/download/v0.3.0/bootstrap.sh -o "$HOME/install-wave.sh" && bash "$HOME/install-wave.sh"
-```
+macOS·Windows의 최신 설치 명령은 [Wave Terminal 설치 안내](https://waveainetworks.com/get)에서 운영체제를 골라 확인하세요.
 
-Windows(PowerShell, 관리자 권한 불필요):
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/greatson79/wave-install/releases/download/v0.3.0/bootstrap.ps1 -OutFile ([Environment]::GetFolderPath('UserProfile')+'\install-wave.ps1'); powershell -NoProfile -ExecutionPolicy Bypass -File ([Environment]::GetFolderPath('UserProfile')+'\install-wave.ps1')"
-```
-
-설치 파일을 직접 받으려면 [최신 릴리스](https://github.com/greatson79/wave-terminal/releases/latest)에서 받습니다.
+설치 파일을 직접 받으려면 [최신 릴리스](https://waveainetworks.com/get)에서 받습니다.
 **데몬을 따로 설치할 필요가 없습니다** — 앱이 자동 기동하고 팩도 자동 설치됩니다.
 
 ### 2.1 macOS (Apple Silicon)

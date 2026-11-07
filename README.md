@@ -2,8 +2,7 @@
 
 **AI 에이전트 함대를 지휘하는 오케스트레이션 터미널.** macOS · Windows 크로스플랫폼.
 
-> Wave Terminal은 **CYSJavis(idoforgod)의 [cys-terminal](https://github.com/idoforgod/cys-terminal) (MIT)**을
-> 기반으로 Wave AI Networks가 빌드·배포하는 파생본입니다. 바이너리 이름 `cys`·`cysd`는 상류 호환성을 위해 유지합니다.
+> Wave Terminal은 Wave AI Networks가 빌드·배포합니다. 라이선스와 귀속 표기는 [LICENSE](LICENSE) 및 [LICENSES](LICENSES/)에 있습니다.
 
 터미널 멀티플렉서 + 로컬 데몬 + 관제 대시보드 + 멀티에이전트 운영체계(CYSJavis 팩)가
 한 몸입니다. Claude Code·Codex 같은 CLI 에이전트 여러 개를 역할(마스터·워커·CSO·리뷰어)로
@@ -62,7 +61,7 @@
 
 ## 설치
 
-[Wave Terminal v0.1.0 Release](https://github.com/greatson79/wave-terminal/releases/tag/v0.1.0)에서 받으세요.
+[Wave Terminal 다운로드](https://waveainetworks.com/get)에서 받으세요.
 받는 사람은 **데몬을 따로 설치할 필요가 없습니다** — 앱이 자동 기동하고 팩도 자동 설치됩니다.
 
 - **macOS**: `wave-terminal-0.1.0-macos-arm64.dmg` (Apple Silicon) — 동봉된 **"Install cys.app" 도우미**가
@@ -541,4 +540,4 @@ UI 재시작·앱 재설치에도 세션 유지(재attach).
 ## 기여 · 라이선스
 
 기여는 [CONTRIBUTING.md](CONTRIBUTING.md), 서드파티 귀속은 [NOTICE.md](NOTICE.md) 참조.
-MIT License ([LICENSE](LICENSE)) · 문의: **cysinsight@gmail.com**
+MIT License ([LICENSE](LICENSE)) · 문의: [GitHub Issues](https://github.com/greatson79/wave-terminal/issues)

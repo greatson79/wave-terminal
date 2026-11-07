@@ -1,0 +1,42 @@
+{
+  "LICENSE": {
+    "reason": "Required upstream MIT copyright",
+    "line_sha256": [
+      "45a16ba2127b37b237ece46b658e40345f2ed64cc355bba7a958c2f1afe398e1"
+    ]
+  },
+  "LICENSES/cys-terminal-MIT.txt": {
+    "reason": "Required upstream MIT copyright",
+    "line_sha256": [
+      "45a16ba2127b37b237ece46b658e40345f2ed64cc355bba7a958c2f1afe398e1"
+    ]
+  },
+  "cysjavis-pack/bin/javis_org.py": {
+    "reason": "Synthetic account-handle fixtures in isolated organization tests",
+    "line_sha256": [
+      "37923c0df82c481e86f894a823ba4663b8e83dd9cc5d4871f2184abdc022c872",
+      "48deb21f16d989905a328c3d811b606c80a3575075be026bf69610865ac0460f",
+      "8cf9b12beac2bb52c65484de90740298ad4698bf8946c9667cd4be78b7d92039",
+      "f81c2d75d94418e10e14a9bd4f8c81a434a8f517c9f6dfd88ea994c6b4016959",
+      "5f13245612661bab2ca8a1126455b9a5a58965c7d689e0ed6dd8fefbf8d81c81",
+      "99c22d6d5268ff73291a15b2a410c3cdd7e96ce03178f0737cdf46722b5879a3",
+      "9ad5558ac9e18accdc8b7622a4eac51121adc78bb5f87e50fd137dc40a487f9f",
+      "1c8af815d0804efcfd040fb423055f2d460617efb25668cd6be62f184e430693",
+      "5dfdfed07a0fb1118d447a856e97d2d14b7f25d388724f82d3f88291b4f9771c",
+      "99df32d4f4ed4483d8d37e560835bcfe370ccd2eca74a77695116b73096376c7",
+      "3c07759e62da62f998fdcdd2a2beb136a3191e3948c61ce35e224d62e6616378",
+      "e79310fb2ca33cbde6bda101c9f78f9ad66b3b2f2b6bd7872ff367f9b95493e0",
+      "047d45e5ad29b7d249e0856a0a4d05599cb4cdee3fcc3614afb14ea5f3b8305c",
+      "6431bd8f9599b02d023dee70c90bc17debbf4a0360d90728b29d84e19b050e7a",
+      "da63e857ef8f875622b07a7ad30970e23d17f1fee747cc58acac39933883fc9a",
+      "1f754b7f0433dd455f4072dfc09431db1a509e023e7bdf631eb61810ea0e41f6"
+    ]
+  },
+  "cysjavis-pack/bin/javis_org_e2e.sh": {
+    "reason": "Synthetic account-handle fixtures in isolated organization tests",
+    "line_sha256": [
+      "a604707875e1dbeb13df5954647a915cbede7f8f728c724d528166a930b1300e",
+      "050313ef0b4e91649e6b0b1c76f8ae775d9459abd9ea3121d6daf12295a530a8"
+    ]
+  }
+}

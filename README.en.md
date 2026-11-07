@@ -2,9 +2,7 @@
 
 **An orchestration terminal for commanding fleets of AI agents.** Cross-platform: macOS & Windows.
 
-> Wave Terminal is a derivative built and distributed by Wave AI Networks based on
-> **CYSJavis (idoforgod)'s [cys-terminal](https://github.com/idoforgod/cys-terminal) (MIT)**.
-> The `cys` and `cysd` binary names remain for upstream compatibility.
+> Wave Terminal is built and distributed by Wave AI Networks. See [LICENSE](LICENSE) and [LICENSES](LICENSES/) for licenses and attribution.
 
 A terminal multiplexer, a local daemon, a mission-control dashboard, and a multi-agent
 operating system (the CYSJavis pack) in one body. Run several CLI agents (Claude Code,
@@ -74,7 +72,7 @@ releases back up gets written down.
 
 ## Install
 
-Download [Wave Terminal v0.1.0](https://github.com/greatson79/wave-terminal/releases/tag/v0.1.0).
+Download [Wave Terminal download](https://waveainetworks.com/get).
 Recipients **do not install a daemon separately** — the app boots it and installs the
 pack automatically.
 
@@ -540,4 +538,4 @@ Report vulnerabilities per [SECURITY.md](SECURITY.md); details in
 ## Contributing · License
 
 See [CONTRIBUTING.md](CONTRIBUTING.md); third-party attributions in [NOTICE.md](NOTICE.md).
-MIT License ([LICENSE](LICENSE)) · Contact: **cysinsight@gmail.com**
+MIT License ([LICENSE](LICENSE)) · Contact: [GitHub Issues](https://github.com/greatson79/wave-terminal/issues)

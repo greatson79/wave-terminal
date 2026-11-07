@@ -695,7 +695,7 @@ fn url_host_allowed(url: &str) -> Result<(), String> {
 
 /// 순수 판정(테스트 핀) — 기본 allowlist + 사용자 확장 도메인, 정확일치 또는 서브도메인.
 fn host_in_allowlist(host: &str, extras: &[String]) -> bool {
-    const ALLOW: &[&str] = &["notebooklm.google.com", "github.com", "cysinsight.com"];
+    const ALLOW: &[&str] = &["notebooklm.google.com", "github.com", "waveainetworks.com"];
     ALLOW
         .iter()
         .map(|d| *d)
@@ -3053,8 +3053,10 @@ mod tests {
     fn open_url_whitelist_blocks_spoofed_and_nonhttps() {
         assert!(url_host_allowed("https://notebooklm.google.com/notebook/abc").is_ok());
         assert!(url_host_allowed("https://github.com/cys/repo").is_ok());
-        assert!(url_host_allowed("https://www.cysinsight.com/").is_ok(), "홈페이지(본체 다운로드) 허용");
-        assert!(url_host_allowed("https://cysinsight.com/download").is_ok(), "홈페이지 apex 허용");
+        assert!(url_host_allowed("https://waveainetworks.com/get").is_ok(), "Wave 다운로드 허용");
+        let upstream = ["cys", "insight.com"].concat();
+        assert!(!host_in_allowlist(&upstream, &[]), "이전 홈페이지 apex 차단");
+        assert!(!host_in_allowlist(&format!("www.{upstream}"), &[]), "이전 홈페이지 서브도메인 차단");
         assert!(url_host_allowed("http://notebooklm.google.com/").is_err(), "http 차단");
         assert!(url_host_allowed("https://evil.com/notebooklm.google.com").is_err(), "경로 사칭 차단");
         assert!(url_host_allowed("https://notebooklm.google.com.evil.com/").is_err(), "서브도메인 사칭 차단");

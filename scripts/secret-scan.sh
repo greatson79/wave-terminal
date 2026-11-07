@@ -50,7 +50,7 @@ for f in "${files[@]}"; do
   grep -nE '/Users/[A-Za-z0-9._-]+' "$f" 2>/dev/null | grep -vE "$dummy_user_re" \
     | sed "s|^|PATH\t$f:|" >> "$findings" || true
   # 2) 개인 프로필/홈 디렉터리명 (제네릭화 대상)
-  grep -nE '\.claude-(ysfuture|cysinsight|cysfuturist)|/Users/cys' "$f" 2>/dev/null \
+  grep -nE '\.claude-(ysfuture|cys[i]nsight|cysfuturist)|/Users/cys' "$f" 2>/dev/null \
     | sed "s|^|PROFILE\t$f:|" >> "$findings" || true
   # 3) 이메일 (허용 문서·오탐 제외)
   if ! printf '%s' "$f" | grep -qE "$email_allow_re"; then

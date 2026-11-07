@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import io
 import contextlib
+from unittest import mock
 import textwrap
 
 DEPT = Path(__file__).resolve().parents[1] / "cys-dept"
@@ -134,6 +135,37 @@ graceful_kill 101
         backend.refresh(known)
         self.assertEqual(list(known), [101])
         self.assertEqual(backend.kernel.closed, [1020])
+
+    def _open_with_error(self, code, listed_pids):
+        ns = load_stop()
+        backend = ns["WindowsProcesses"].__new__(ns["WindowsProcesses"])
+        class Kernel:
+            def OpenProcess(self, access, inherit, pid): return 0
+        backend.kernel = Kernel()
+        backend.rows = lambda: ([(pid, 1) for pid in listed_pids], 40)
+        with mock.patch.object(ns["ctypes"], "get_last_error", return_value=code, create=True):
+            try:
+                return backend.open(101), None
+            except ns["StopFailure"] as failure:
+                return None, str(failure)
+
+    def test_open_error_5_for_a_pid_that_has_exited_is_treated_as_exited(self):
+        record, failure = self._open_with_error(5, [4, 200])
+        self.assertIsNone(record)
+        self.assertIsNone(failure)
+
+    def test_open_error_5_for_a_pid_that_is_still_listed_fails_closed_with_the_code(self):
+        record, failure = self._open_with_error(5, [4, 101, 200])
+        self.assertIsNone(record)
+        self.assertIsNotNone(failure)
+        self.assertIn("5", failure)
+
+    def test_open_missing_pid_errors_still_mean_exited_without_a_listing(self):
+        for code in (87, 1168):
+            with self.subTest(code=code):
+                record, failure = self._open_with_error(code, [101])
+                self.assertIsNone(record)
+                self.assertIsNone(failure)
 
     def test_native_capture_refuses_reused_root_identity_and_foreign_executable(self):
         ns = load_stop()

@@ -13,20 +13,24 @@ BASH = os.environ.get("CYS_TEST_BASH", "bash")
 SOCK = r"\\.\pipe\cys-dept-dept-1"
 
 
+def _stub(path, body):
+    path.write_bytes(body.encode("utf-8"))  # LF only: no CR in the shebang on Windows
+
+
 def run(pipe, alive_pids=(), recorded=None, windows=True):
     """Run the real down-sock verb; only the OS probes (pipe list, tasklist) and identity are stubbed."""
     with tempfile.TemporaryDirectory(prefix="dept-crash-") as tmp:
         home = Path(tmp); bin_dir = home / ".local/bin"; bin_dir.mkdir(parents=True)
-        (bin_dir / "cys").write_text("#!/bin/sh\necho \"$@\" >> \"$HOME/cys-calls\"\nexit 1\n")  # identify fails
-        (bin_dir / "uname").write_text("#!/bin/sh\nprintf 'MINGW64_NT\\n'\n")
-        (bin_dir / "cygpath").write_text('#!/bin/sh\nprintf "%s\\n" "$2"\n')
-        (bin_dir / "tasklist").write_text("#!/bin/sh\n" + "".join(
+        _stub(bin_dir / "cys", "#!/bin/sh\necho \"$@\" >> \"$HOME/cys-calls\"\nexit 1\n")  # identify fails
+        _stub(bin_dir / "uname", "#!/bin/sh\nprintf 'MINGW64_NT\\n'\n")
+        _stub(bin_dir / "cygpath", '#!/bin/sh\nprintf "%s\\n" "$2"\n')
+        _stub(bin_dir / "tasklist", "#!/bin/sh\n" + "".join(
             'case "$*" in *"PID eq %d"*) printf \'"x.exe","%d"\\r\\n\';; esac\n' % (p, p) for p in alive_pids))
         for f in bin_dir.iterdir(): f.chmod(0o700)
         source = DEPT.read_text(encoding="utf-8")
         source = re.sub(r"^dept_pipe_present\(\)\{.*?^\}\n", "dept_pipe_present(){ printf '%s\\r\\n' " + pipe + "; }\n", source, flags=re.S | re.M)
         if not windows:
-            (bin_dir / "uname").write_text("#!/bin/sh\nprintf 'Linux\\n'\n")
+            _stub(bin_dir / "uname", "#!/bin/sh\nprintf 'Linux\\n'\n")
         script = home / "cys-dept"; script.write_text(source, encoding="utf-8")
         reg = home / ".cys/depts.json"; reg.parent.mkdir()
         entry = {"socket": SOCK}

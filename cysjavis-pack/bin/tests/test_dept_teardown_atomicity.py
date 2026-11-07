@@ -107,6 +107,17 @@ check("C1 비표준 exit 0", code == 0)
 check("C2 묘비 미기록(보수)", "tombstone" not in phoenix_log(tmp))
 shutil.rmtree(tmp)
 
+# ── D. Windows 거부 계약: 기록된 pid를 읽을 수 없으면 정리하지 않는다(exit 9·등록 유지·묘비 없음) ──
+if os.name == "nt":
+    tmp = tempfile.mkdtemp(prefix="dt-d-")
+    sockD = r"\\.\pipe\cys-dept-dept-5"
+    env, home, reg = setup(tmp, {"dept-5": {"socket": sockD, "pids": ["oops"]}})
+    code, out = run(env, "down-sock", sockD)
+    check("D1 Windows 거부(unreadable pid) exit 9", code == 9, out[-150:])
+    check("D2 Windows 거부: 등록 유지", "dept-5" in json.load(open(reg, encoding="utf-8"))["depts"])
+    check("D3 Windows 거부: 묘비 미기록", "tombstone" not in phoenix_log(tmp))
+    shutil.rmtree(tmp)
+
 # ── 정적 트립와이어: 배선 소실 검출 ──
 src = open(DEPT, encoding="utf-8").read()
 check("W1 launch 배선", src.count("dept_tombstone_remove \"$name\"") >= 3,

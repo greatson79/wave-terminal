@@ -5,6 +5,7 @@ import unittest
 import os
 import json
 import subprocess
+import tempfile
 import io
 import contextlib
 import textwrap
@@ -85,9 +86,14 @@ kill(){ return 1; }
 sleep(){ :; }
 graceful_kill 101
 '''
-        result = subprocess.run([os.environ.get("CYS_TEST_BASH", "bash"), "-c", program],
-                                env={**os.environ, "TZ":"UTC"}, capture_output=True, text=True,
-                                encoding="utf-8", timeout=5)
+        # Run from a LF-only script file: a ~180-line program with a heredoc does not survive the Windows
+        # command line + MSYS argv parsing of `bash -c` (the PY_STOP terminator was lost -> EOF warning, rc 2).
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "graceful_kill_test.sh"
+            script.write_bytes(program.replace("\r\n", "\n").encode("utf-8"))
+            result = subprocess.run([os.environ.get("CYS_TEST_BASH", "bash"), str(script)],
+                                    env={**os.environ, "TZ":"UTC"}, capture_output=True, text=True,
+                                    encoding="utf-8", timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
         receipt = json.loads(result.stdout.removeprefix("CYS_DEPT_STOP_RESULT "))
         self.assertEqual(receipt, {"schema_version":1, "verified":True, "daemon_pid":101,

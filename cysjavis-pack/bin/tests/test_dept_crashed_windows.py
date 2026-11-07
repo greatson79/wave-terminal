@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -13,14 +14,18 @@ BASH = os.environ.get("CYS_TEST_BASH", "bash")
 SOCK = r"\\.\pipe\cys-dept-dept-1"
 
 
+def _stub(path, body):
+    path.write_bytes(body.encode("utf-8"))  # LF only: no CR in the shebang on Windows
+
+
 def run(pipe, alive_pids=(), recorded=None, windows=True, scan="", proc_start=None):
     """Run the real down-sock verb; only the OS probes (pipe list, tasklist) and identity are stubbed."""
     with tempfile.TemporaryDirectory(prefix="dept-crash-") as tmp:
         home = Path(tmp); bin_dir = home / ".local/bin"; bin_dir.mkdir(parents=True)
-        (bin_dir / "cys").write_text("#!/bin/sh\necho \"$@\" >> \"$HOME/cys-calls\"\nexit 1\n")  # identify fails
-        (bin_dir / "uname").write_text("#!/bin/sh\nprintf 'MINGW64_NT\\n'\n")
-        (bin_dir / "cygpath").write_text('#!/bin/sh\nprintf "%s\\n" "$2"\n')
-        (bin_dir / "tasklist").write_text("#!/bin/sh\n" + "".join(
+        _stub(bin_dir / "cys", "#!/bin/sh\necho \"$@\" >> \"$HOME/cys-calls\"\nexit 1\n")  # identify fails
+        _stub(bin_dir / "uname", "#!/bin/sh\nprintf 'MINGW64_NT\\n'\n")
+        _stub(bin_dir / "cygpath", '#!/bin/sh\nprintf "%s\\n" "$2"\n')
+        _stub(bin_dir / "tasklist", "#!/bin/sh\n" + "".join(
             'case "$*" in *"PID eq %d"*) printf \'"x.exe","%d"\\r\\n\';; esac\n' % (p, p) for p in alive_pids))
         for f in bin_dir.iterdir(): f.chmod(0o700)
         source = DEPT.read_text(encoding="utf-8")
@@ -29,8 +34,8 @@ def run(pipe, alive_pids=(), recorded=None, windows=True, scan="", proc_start=No
         if proc_start is not None:
             source = re.sub(r"^dept_proc_start\(\)\{.*?^\}\n", "dept_proc_start(){ printf '%s\\r\\n' " + proc_start + "; }\n", source, flags=re.S | re.M)
         if not windows:
-            (bin_dir / "uname").write_text("#!/bin/sh\nprintf 'Linux\\n'\n")
-        script = home / "cys-dept"; script.write_text(source, encoding="utf-8")
+            _stub(bin_dir / "uname", "#!/bin/sh\nprintf 'Linux\\n'\n")
+        script = home / "cys-dept"; script.write_bytes(source.replace("\r\n", "\n").encode("utf-8"))  # LF only
         reg = home / ".cys/depts.json"; reg.parent.mkdir()
         entry = {"socket": SOCK}
         if recorded is not None: entry["pids"] = recorded
@@ -116,21 +121,25 @@ class ScanBoundaryTests(unittest.TestCase):
         body = re.search(r"dept_scan_procs\(\)\{.*?<<'PY_SCAN'\n(.*?)^PY_SCAN\n", source, re.S | re.M).group(1)
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = Path(tmp)
-            (bin_dir / "powershell.exe").write_text("#!/bin/sh\ncat <<'EOF'\n" + "".join(r + "\n" for r in rows) + "EOF\n")
-            (bin_dir / "powershell.exe").chmod(0o700)
-            r = subprocess.run(["python3", "-c", body] + keys, capture_output=True, text=True, encoding="utf-8", timeout=20,
-                               env={**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"]})
+            # A PATH-stubbed powershell.exe cannot run on Windows (CreateProcess ignores shebangs), so the
+            # command list is redirected to a Python one-liner that prints the same CIM-style rows.
+            rows_file = bin_dir / "rows.txt"
+            rows_file.write_bytes("".join(r + "\n" for r in rows).encode("utf-8"))
+            literal = "['powershell.exe','-NoProfile','-NonInteractive','-Command',ps]"
+            self.assertIn(literal, body)
+            body = body.replace(literal, "[sys.executable,'-c','import sys;sys.stdout.write(open(sys.argv[1],encoding=\"utf-8\").read())',%r]" % str(rows_file))
+            r = subprocess.run([sys.executable, "-c", body] + keys, capture_output=True, text=True, encoding="utf-8", timeout=20)
             self.assertEqual(r.returncode, 0, r.stderr)
             return r.stdout.splitlines()
 
     def test_dept_1_key_does_not_match_dept_10_but_matches_itself(self):
-        rows = ["10\tnode.exe\tnode C:\\Users\\u\\AppData\\Local\\cys\\cys-dept-dept-10\\x.js",
+        rows = ["10\tnode.exe\tnode C:\\Users\\user\\AppData\\Local\\cys\\cys-dept-dept-10\\x.js",
                 "11\tcysd.exe\tcysd \\\\.\\pipe\\cys-dept-dept-10",
-                "12\tbash.exe\tbash C:\\Users\\u\\.cys\\pack-dept-dept-10\\run.sh",
-                "20\tnode.exe\tnode C:\\Users\\u\\AppData\\Local\\cys\\cys-dept-dept-1\\x.js",
+                "12\tbash.exe\tbash C:\\Users\\user\\.cys\\pack-dept-dept-10\\run.sh",
+                "20\tnode.exe\tnode C:\\Users\\user\\AppData\\Local\\cys\\cys-dept-dept-1\\x.js",
                 "21\tcysd.exe\t\"C:\\x\\cysd.exe\" --pipe \\\\.\\pipe\\cys-dept-dept-1",
-                "22\tbash.exe\tbash C:\\Users\\u\\.cys\\pack-dept-dept-1"]
-        found = self.scan(["cys-dept-dept-1", "C:/Users/u/.cys/pack-dept-dept-1"], rows)
+                "22\tbash.exe\tbash C:\\Users\\user\\.cys\\pack-dept-dept-1"]
+        found = self.scan(["cys-dept-dept-1", "C:/Users/user/.cys/pack-dept-dept-1"], rows)
         self.assertEqual([line.split("\t")[0] for line in found], ["20", "21", "22"])
 
     def test_dept_10_key_does_not_match_dept_1(self):
@@ -146,7 +155,7 @@ class PidWriterTests(unittest.TestCase):
             with self.subTest(identity=identity), tempfile.TemporaryDirectory() as tmp:
                 reg = Path(tmp) / "depts.json"
                 reg.write_text(json.dumps({"depts": {"dept-1": {"socket": "s"}}}))
-                program = ("REG=" + str(reg) + "\nnative_path(){ printf '%s\\n' \"$1\"; }\nreg_init(){ :; }\n"
+                program = ("REG='" + reg.as_posix() + "'\nnative_path(){ printf '%s\\n' \"$1\"; }\nreg_init(){ :; }\n"
                            "daemon_identity(){ printf '%s\\r\\n' '" + identity + "'; }\n") + fn + "\nreg_set_pids dept-1 sock\n"
                 r = subprocess.run([BASH, "-c", program], capture_output=True, text=True, encoding="utf-8", timeout=10)
                 self.assertEqual(r.returncode, 0, r.stderr)

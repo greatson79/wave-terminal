@@ -12,6 +12,11 @@ DEPT = Path(__file__).resolve().parents[1] / "cys-dept"
 BASH = os.environ.get("CYS_TEST_BASH", "bash")
 
 
+def _stub(path, body):
+    # Bytes, not write_text: Windows text mode would turn the shebang line into "#!/bin/sh\r".
+    path.write_bytes(body.encode("utf-8"))
+
+
 class DepartmentPathTests(unittest.TestCase):
     def test_registry_readers_keep_windows_escape_sequences_as_data(self):
         source = DEPT.read_text(encoding="utf-8")
@@ -40,13 +45,13 @@ class DepartmentPathTests(unittest.TestCase):
         boundary = source.split(marker, 1)[1].split("# HOTFIX-PYTHON-BOUNDARY-END", 1)[0]
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "uname").write_text("#!/bin/sh\nprintf 'MINGW64_NT\\n'\n", encoding="utf-8")
-            (root / "cygpath").write_text("#!/bin/sh\nprintf 'C:/%s\\n' \"${2#/c/}\"\n", encoding="utf-8")
-            (root / "python3").write_text("#!/bin/sh\nprintf '%s\\n' \"$MSYS2_ARG_CONV_EXCL\" \"$@\"\n", encoding="utf-8")
+            _stub(root / "uname", "#!/bin/sh\nprintf 'MINGW64_NT\\n'\n")
+            _stub(root / "cygpath", "#!/bin/sh\nprintf 'C:/%s\\n' \"${2#/c/}\"\n")
+            _stub(root / "python3", "#!/bin/sh\nprintf '%s\\n' \"$MSYS2_ARG_CONV_EXCL\" \"$@\"\n")
             for executable in root.iterdir(): executable.chmod(0o700)
             code = "import json; print('not a /c/path')"
-            program = boundary + '\npython3 -c "$TEST_CODE" "$(native_path "/c/Users/최형석/내 팀/depts.json")" "\\\\\\\\.\\\\pipe\\\\cys-dept-dept-1"\n'
-            result = subprocess.run([BASH, "-c", program], env={**os.environ, "PATH": str(root)+os.pathsep+os.environ.get("PATH", ""), "TEST_CODE":code},
+            program = boundary + '\npython3 -c "$TEST_CODE" "$(native_path "/c/Users/최형석/내 팀/depts.json")" "$TEST_PIPE"\n'
+            result = subprocess.run([BASH, "-c", program], env={**os.environ, "PATH": str(root)+os.pathsep+os.environ.get("PATH", ""), "TEST_CODE":code, "TEST_PIPE": r"\\.\pipe\cys-dept-dept-1"},
                                     text=True, encoding="utf-8", capture_output=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.splitlines(), ["*", "-c", code, "C:/Users/최형석/내 팀/depts.json", r"\\.\pipe\cys-dept-dept-1"])
@@ -58,9 +63,9 @@ class DepartmentPathTests(unittest.TestCase):
         boundary = source.split("# HOTFIX-PYTHON-BOUNDARY-BEGIN", 1)[1].split("# HOTFIX-PYTHON-BOUNDARY-END", 1)[0]
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "uname").write_text("#!/bin/sh\nprintf 'MINGW64_NT\\n'\n", encoding="utf-8")
-            (root / "cygpath").write_text("#!/bin/sh\nprintf 'C:/%s\\n' \"${2#/c/}\"\n", encoding="utf-8")
-            (root / "python3").write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n", encoding="utf-8")
+            _stub(root / "uname", "#!/bin/sh\nprintf 'MINGW64_NT\\n'\n")
+            _stub(root / "cygpath", "#!/bin/sh\nprintf 'C:/%s\\n' \"${2#/c/}\"\n")
+            _stub(root / "python3", "#!/bin/sh\nprintf '%s\\n' \"$@\"\n")
             for executable in root.iterdir(): executable.chmod(0o700)
             program = boundary + '\npython3 /x /regex/i --opt=/y "/Team Name" "$(native_path /c/Users/user/depts.json)"\n'
             result = subprocess.run([BASH, "-c", program], env={**os.environ, "PATH": str(root)+os.pathsep+os.environ.get("PATH", "")},
@@ -74,11 +79,11 @@ class DepartmentPathTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             ran = root / "python-ran"
-            (root / "uname").write_text("#!/bin/sh\nprintf 'MINGW64_NT\\n'\n", encoding="utf-8")
-            (root / "cygpath").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
-            (root / "python3").write_text("#!/bin/sh\n: > '%s'\n" % ran, encoding="utf-8")
+            _stub(root / "python3", "#!/bin/sh\n: > '%s'\n" % ran)
             for executable in root.iterdir(): executable.chmod(0o700)
-            program = boundary + '\npython3 -c code "$(native_path /c/Users/user/depts.json)" other\n'
+            # uname/cygpath as shell functions: they win over PATH executables (Git's real cygpath.exe on Windows).
+            fakes = "uname(){ printf 'MINGW64_NT\\n'; }\ncygpath(){ return 1; }\n"
+            program = fakes + boundary + '\npython3 -c code "$(native_path /c/Users/user/depts.json)" other\n'
             result = subprocess.run([BASH, "-c", program], env={**os.environ, "PATH": str(root)+os.pathsep+os.environ.get("PATH", "")},
                                     text=True, encoding="utf-8", capture_output=True, timeout=10)
             self.assertNotEqual(result.returncode, 0)

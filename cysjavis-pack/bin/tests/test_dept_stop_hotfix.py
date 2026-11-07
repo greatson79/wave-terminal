@@ -143,7 +143,8 @@ graceful_kill 101
             def OpenProcess(self, access, inherit, pid): return 0
         backend.kernel = Kernel()
         backend.rows = lambda: ([(pid, 1) for pid in listed_pids], 40)
-        with mock.patch.object(ns["ctypes"], "get_last_error", return_value=code, create=True):
+        with mock.patch.object(ns["ctypes"], "get_last_error", return_value=code, create=True), \
+                mock.patch.object(ns["time"], "sleep"):
             try:
                 return backend.open(101), None
             except ns["StopFailure"] as failure:
@@ -159,6 +160,20 @@ graceful_kill 101
         self.assertIsNone(record)
         self.assertIsNotNone(failure)
         self.assertIn("5", failure)
+
+    def test_open_error_5_on_a_listed_pid_that_stays_denied_then_vanishes_is_treated_as_exited(self):
+        # A tree member that is mid-exit is still listed for a moment and denies access; it must not fail the stop.
+        ns = load_stop()
+        backend = ns["WindowsProcesses"].__new__(ns["WindowsProcesses"])
+        errors = iter([5, 5, 5, 87])
+        class Kernel:
+            def OpenProcess(self, access, inherit, pid): return 0
+        backend.kernel = Kernel()
+        listings = iter([[101], [101], [101]])
+        backend.rows = lambda: ([(pid, 1) for pid in next(listings)], 40)
+        with mock.patch.object(ns["ctypes"], "get_last_error", side_effect=lambda: next(errors), create=True), \
+                mock.patch.object(ns["time"], "sleep"):
+            self.assertIsNone(backend.open(101))
 
     def test_open_missing_pid_errors_still_mean_exited_without_a_listing(self):
         for code in (87, 1168):

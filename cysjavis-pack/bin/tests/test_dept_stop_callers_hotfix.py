@@ -49,7 +49,9 @@ class CallerTests(unittest.TestCase):
             socket = str(home / ".local/state/cys-dept-dept-1/cys.sock")
             registry = home / ".cys/depts.json"
             registry.parent.mkdir()
-            original = json.dumps({"depts":{"dept-1":{"socket":socket}}}).encode()
+            entry = {"socket":socket}
+            if windows and not identify: entry["pids"] = ["oops"]  # unreadable record = cannot prove the dept is gone -> refuse
+            original = json.dumps({"depts":{"dept-1":entry}}).encode()
             registry.write_bytes(original)
             args = [BASH, str(script), verb, socket if verb == "down-sock" else "dept-1"]
             result = subprocess.run(args, env={**os.environ, "HOME":str(home), "CYS_ROLE":"cso",

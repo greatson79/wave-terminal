@@ -63,9 +63,44 @@ fn rollback_plan(had_owner:bool,original_serving:bool,platform_ok:bool,registrat
     if all_saved && (platform_ok || (registration_restored && links_ok)) {RollbackPlan::RecoverSeats} else {RollbackPlan::KeepMarker}
 }
 
+#[derive(Debug,PartialEq,Eq)]
+enum ResumePlan { Refuse, StartRestored, Recover }
+
+/// Restart with a durable rollback-recovery receipt: never forward activation. Pure.
+fn resume_plan(platform:&Value,all_saved:bool,had_owner:bool,original_alive:bool,owner_present:bool,links_ok:bool)->ResumePlan{
+    if original_alive { return ResumePlan::Refuse; }
+    if rollback_plan(had_owner,false,platform["rollback_succeeded"]==true,
+        platform["old_registration_restored"]==true,links_ok,all_saved)!=RollbackPlan::RecoverSeats {
+        return ResumePlan::Refuse;
+    }
+    if !owner_present && platform["restored_owner_start_requested"]!=true {ResumePlan::StartRestored} else {ResumePlan::Recover}
+}
+
+/// `record()` rebuilds the marker; the rollback receipt and diagnostic must survive every rebuild.
+fn carry_rollback_receipt(previous:&Value,next:&mut Value){
+    for key in ["rollback_recovery_pending","rollback_diagnostic"] {
+        if let Some(value)=previous["rename_handover"].get(key) { next["rename_handover"][key]=value.clone(); }
+    }
+}
+
+/// The unresolved registration cleanup stays visible through the layout notice the UI already shows.
+fn with_rollback_notice(snapshot:&Value,diagnostic:Option<&str>)->Value{
+    let mut snapshot=snapshot.clone();
+    let Some(diagnostic)=diagnostic else { return snapshot; };
+    let line=format!("기존 좌석은 복구했지만 자동 시작 등록 정리는 끝나지 않았습니다: {diagnostic}");
+    let notice=match snapshot["notice"].as_str() {
+        Some(existing) if existing.contains(&line) => return snapshot,
+        Some(existing) if !existing.is_empty() => format!("{existing}\n{line}"),
+        _ => line,
+    };
+    snapshot["notice"]=json!(notice);
+    snapshot
+}
+
 impl Native {
     /// Verified-owner → restore → finish; the marker is never cleared here (layout ack completes it).
     async fn recover_seats(&mut self,snapshot:&Value,before:&Observation)->Result<(),String>{
+        let snapshot=&with_rollback_notice(snapshot,self.marker["rename_handover"]["rollback_diagnostic"].as_str());
         let mut found=None;
         for _ in 0..300 {
             if let Some(owner)=self.owner().await? {found=Some(owner);break;}
@@ -284,10 +319,12 @@ impl Backend for Native {
         Ok(snapshot)
     }
     async fn record(&mut self,phase:&str,before:&Observation,snapshot:&Value)->Result<(),String> {
+        let previous=std::mem::take(&mut self.marker);
         self.marker=json!({"rename_handover":{"phase":phase,"socket":self.socket,
             "old_identity":before.owner.as_ref().map(|o|&o.identity),"before_owner":before.owner,
             "snapshot":snapshot,"revision":self.platform["attempt_id"],"new_owner":self.new_owner,"surface_map":self.surface_map}});
         self.marker["rename_handover"]["snapshot"]["platform"]=self.platform.clone();
+        carry_rollback_receipt(&previous,&mut self.marker);
         if phase=="prepared" { rename_handover::prepare_marker(&self.socket,&self.marker,before.owner.as_ref().map(|o|&o.identity)) }
         else { rename_handover::write_marker(Some(&self.marker)) }
     }
@@ -428,6 +465,11 @@ impl Backend for Native {
             rename_handover::write_marker(Some(&self.marker))?;
         }
         let platform_result=self.platform_change(platform::rollback);
+        if let Err(error)=&platform_result {
+            // Keep the OS error as durable data, not only a transient return string.
+            self.marker["rename_handover"]["rollback_diagnostic"]=json!(error);
+            rename_handover::write_marker(Some(&self.marker))?;
+        }
         let links_ok=!cfg!(target_os="macos") || self.platform["links_rolled_back"]==true;
         match rollback_plan(before.owner.is_some(),original_serving,platform_result.is_ok(),
             self.platform["old_registration_restored"]==true,links_ok,snapshot["checkpoint"]["all_saved"]==true) {
@@ -445,6 +487,31 @@ impl Backend for Native {
                 platform_result.map_err(|os|format!("기존 좌석은 복구했지만 등록 정리는 끝나지 않았습니다: {os}"))
             }
         }
+    }
+}
+
+impl Native {
+    /// Resume an interrupted rollback recovery from its durable receipt (review #3). Never forward-activates.
+    async fn resume_rollback_recovery(&mut self,snapshot:&Value,before:&Observation,owner_present:bool)->Result<Outcome,String>{
+        let diagnostic=self.marker["rename_handover"]["rollback_diagnostic"].as_str().map(str::to_string);
+        let original_alive=match before.owner.as_ref() {
+            Some(old)=>rename_handover::identity_alive(&old.identity)?,
+            None=>false,
+        };
+        let links_ok=!cfg!(target_os="macos") || self.platform["links_rolled_back"]==true;
+        let plan=resume_plan(&self.platform,snapshot["checkpoint"]["all_saved"]==true,before.owner.is_some(),
+            original_alive,owner_present,links_ok);
+        if plan==ResumePlan::Refuse {
+            let refusal="기존 등록 복구 영수증이 확인되지 않아 서비스를 시작하지 않습니다. 복원 기록을 유지합니다.";
+            return Err(diagnostic.map_or(refusal.to_string(),|d|format!("{d}\n{refusal}")));
+        }
+        if plan==ResumePlan::StartRestored { self.platform_change(platform::start_restored_owner)?; }
+        self.recover_seats(snapshot,before).await?;
+        // Seats are back; the layout acknowledgement completes it. Never an unqualified update success.
+        Err(match diagnostic {
+            Some(d)=>format!("기존 좌석은 복구했지만 등록 정리는 끝나지 않았습니다: {d}"),
+            None=>"업데이트를 되돌리고 기존 좌석을 복구했습니다. 앱을 다시 열면 배치를 저장합니다.".into(),
+        })
     }
 }
 
@@ -470,6 +537,9 @@ pub(super) async fn run(settings_file:PathBuf)->Result<Outcome,String>{
         }
         return Ok(Outcome::AlreadyReady);
     }
+    if record["rollback_recovery_pending"]==true {
+        return native.resume_rollback_recovery(&snapshot,&before,current.is_some()).await;
+    }
     if (phase=="prepared" && original.is_none() && current.is_none())
         || current.as_ref().is_some_and(|owner|original.as_ref().is_some_and(|old|owner.identity==old.identity)) {
         native.rollback(&snapshot,&before).await?;
@@ -481,10 +551,6 @@ pub(super) async fn run(settings_file:PathBuf)->Result<Outcome,String>{
     }
     if let Some(old)=original.as_ref() {
         if rename_handover::identity_alive(&old.identity)? { return Err("기존 프로세스 신원이 남아 있어 새 서비스를 시작하지 않습니다.".into()); }
-    }
-    if current.is_none() && record["rollback_recovery_pending"]==true {
-        // A restored old registration is responsible for starting; never force the canonical forward activation.
-        return Err("복구된 기존 등록이 서비스를 시작하길 기다리는 중입니다. 새 서비스를 직접 시작하지 않고 복원 기록을 유지합니다.".into());
     }
     let owner=if let Some(owner)=current {
         if !owner.canonical||owner.version!=env!("CARGO_PKG_VERSION"){return Err("복구할 서비스의 실행 경로와 버전이 다릅니다.".into());}
@@ -603,6 +669,48 @@ mod tests {
         for ((a,b,c,d,e,f),want) in rows {
             assert_eq!(rollback_plan(a,b,c,d,e,f),want,"{a} {b} {c} {d} {e} {f}");
         }
+    }
+    #[test]
+    fn restart_with_rollback_receipt_routes_to_recovery_never_forward_activation(){
+        use ResumePlan::*;
+        let safe=json!({"old_registration_restored":true,"links_rolled_back":true});
+        // (platform, all_saved, had_owner, original_alive, owner_present, links_ok) -> plan
+        assert_eq!(resume_plan(&safe,true,true,false,false,true),StartRestored);   // restored legacy job must start the owner
+        assert_eq!(resume_plan(&safe,true,true,false,true ,true),Recover);         // owner already back (alias -> canonical)
+        let requested=json!({"old_registration_restored":true,"restored_owner_start_requested":true});
+        assert_eq!(resume_plan(&requested,true,true,false,false,true),Recover);    // ONE start request only; then just poll
+        assert_eq!(resume_plan(&safe,true,true,true ,false,true),Refuse);          // original identity still alive
+        assert_eq!(resume_plan(&json!({}),true,true,false,false,true),Refuse);     // Err before a safe receipt: no start
+        assert_eq!(resume_plan(&safe,true,true,false,false,false),Refuse);         // Mac links not rolled back: unsafe start
+        assert_eq!(resume_plan(&safe,false,true,false,false,true),Refuse);         // no verified checkpoint
+        assert_eq!(resume_plan(&safe,true,false,false,false,true),Refuse);         // no original owner: never pretend a registration
+        assert_eq!(resume_plan(&json!({"rollback_succeeded":true}),true,true,false,true,true),Recover);
+    }
+    #[test]
+    fn rollback_receipt_and_diagnostic_survive_every_marker_rebuild(){
+        let previous=json!({"rename_handover":{"phase":"starting-new","rollback_recovery_pending":true,
+            "rollback_diagnostic":"알 수 없는 새 등록 파일을 보존했습니다."}});
+        let mut next=json!({"rename_handover":{"phase":"restoring"}});
+        carry_rollback_receipt(&previous,&mut next);
+        assert_eq!(next["rename_handover"]["rollback_recovery_pending"],true);
+        assert_eq!(next["rename_handover"]["rollback_diagnostic"],"알 수 없는 새 등록 파일을 보존했습니다.");
+        assert_eq!(next["rename_handover"]["phase"],"restoring");
+        let mut fresh=json!({"rename_handover":{"phase":"prepared"}});
+        carry_rollback_receipt(&Value::Null,&mut fresh);
+        assert!(fresh["rename_handover"].get("rollback_recovery_pending").is_none());
+        assert!(fresh["rename_handover"].get("rollback_diagnostic").is_none());
+    }
+    #[test]
+    fn recovered_layout_keeps_unresolved_registration_visible_without_duplicates(){
+        let snapshot=json!({"notice":"사용자 지정 명령으로 실행 중이던 좌석은 일반 셸로 복원됩니다.","checkpoint":{"all_saved":true}});
+        let once=with_rollback_notice(&snapshot,Some("등록 정리 실패"));
+        let text=once["notice"].as_str().unwrap();
+        assert!(text.contains("일반 셸") && text.contains("등록 정리 실패") && text.contains("끝나지 않았습니다"));
+        assert_eq!(with_rollback_notice(&once,Some("등록 정리 실패")),once);
+        assert_eq!(once["checkpoint"],snapshot["checkpoint"]);
+        assert_eq!(with_rollback_notice(&snapshot,None),snapshot);
+        let empty=with_rollback_notice(&json!({"notice":null}),Some("x"));
+        assert!(empty["notice"].as_str().unwrap().contains("x"));
     }
     #[cfg(unix)]
     fn transport_root()->PathBuf{

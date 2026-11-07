@@ -364,13 +364,13 @@ fn acquire_startup_lock(
     state_dir: &std::path::Path,
 ) -> Option<std::fs::File> {
     use std::os::unix::io::AsRawFd;
-    let mut file = match std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(lock_path)
-    {
+    let mut file = match open_startup_lock(lock_path) {
         Ok(f) => f,
+        // H3: a symlink/FIFO/directory lock is never "no lock" — fail closed before flock/claim.
+        Err(error) if lock_open_is_fatal(&error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
         Err(_) => return None, // 락 파일 생성 실패 — 기존 connect 점검만으로 진행
     };
     let try_flock =
@@ -423,6 +423,131 @@ fn acquire_startup_lock(
             log_lock_loss(state_dir, lock_path, "unknown-holder-pid");
             std::process::exit(1);
         }
+    }
+}
+
+/// Why the startup lock could not be opened. `Refused` = the lock path is not a regular file this daemon
+/// may claim (symlink/FIFO/directory/other non-regular): never continue without the lock (H3, fail closed).
+#[cfg(unix)]
+#[derive(Debug)]
+enum StartupLockError { Refused(String), Io(String) }
+
+#[cfg(unix)]
+impl std::fmt::Display for StartupLockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self { Self::Refused(message) | Self::Io(message) => f.write_str(message) }
+    }
+}
+
+/// A refused lock path is always fatal; other open errors keep the caller's existing policy.
+#[cfg(unix)]
+fn lock_open_is_fatal(error: &StartupLockError) -> bool {
+    matches!(error, StartupLockError::Refused(_))
+}
+
+/// Open the existing startup lock path without following a final symlink; claim_lock truncates it.
+#[cfg(unix)]
+fn open_startup_lock(lock_path: &std::path::Path) -> Result<std::fs::File, StartupLockError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    // O_NOFOLLOW matches the rename_handover startup guard; O_NONBLOCK keeps a FIFO from hanging the open.
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(lock_path)
+        .map_err(|error| match error.raw_os_error() {
+            // ELOOP = final symlink (O_NOFOLLOW) · EISDIR = directory · ENXIO = FIFO without reader (O_NONBLOCK)
+            // · EOPNOTSUPP = socket: the lock path is not a regular file.
+            Some(libc::ELOOP | libc::EISDIR | libc::ENXIO | libc::EOPNOTSUPP) => StartupLockError::Refused(
+                format!("데몬 시작 잠금이 일반 파일이 아니어서 사용하지 않습니다: {error}")),
+            _ => StartupLockError::Io(format!("데몬 시작 잠금을 열 수 없습니다: {error}")),
+        })?;
+    let meta = file.metadata()
+        .map_err(|error| StartupLockError::Io(format!("데몬 시작 잠금 확인 실패: {error}")))?;
+    if !meta.is_file() {
+        return Err(StartupLockError::Refused("데몬 시작 잠금이 일반 파일이 아니어서 사용하지 않습니다.".into()));
+    }
+    Ok(file)
+}
+
+#[cfg(all(test, unix))]
+mod startup_lock_open_tests {
+    use std::path::PathBuf;
+
+    /// Rooted fixture: WAVE_TEST_ROOT must be a provisioned private disposable directory (C9).
+    fn fixture(check: impl FnOnce(&std::path::Path)) {
+        use std::os::unix::fs::MetadataExt;
+        let root = PathBuf::from(std::env::var_os("WAVE_TEST_ROOT").expect("WAVE_TEST_ROOT must be explicitly injected"));
+        let text = root.to_string_lossy().to_string();
+        assert!(root.is_absolute() && !text.contains(".."), "WAVE_TEST_ROOT must be absolute without traversal");
+        assert!(text.starts_with("/private/tmp/wave-test-") || text.starts_with("/tmp/wave-test-"),
+            "WAVE_TEST_ROOT must be a provisioned disposable test directory");
+        let mut prefix = PathBuf::new();
+        for part in root.components() {
+            prefix.push(part.as_os_str());
+            let meta = prefix.symlink_metadata().expect("test root ancestor unavailable");
+            assert!(meta.is_dir() && !meta.file_type().is_symlink(), "test root ancestor symlink refused");
+        }
+        let meta = root.symlink_metadata().unwrap();
+        assert_eq!(meta.uid(), unsafe { libc::geteuid() }, "test root must be owned by test user");
+        assert_eq!(meta.mode() & 0o077, 0, "test root must be private");
+        let dir = root.join(format!("waved-lock-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        check(&dir);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn startup_lock_open_refuses_symlink_and_non_regular_and_keeps_target() {
+        fixture(|dir| {
+            let target = dir.join("owner-data");
+            std::fs::write(&target, "KEEP").unwrap();
+            let lock = dir.join("cys.lock");
+            std::os::unix::fs::symlink(&target, &lock).unwrap();
+            let refused = |path: &std::path::Path| match super::open_startup_lock(path) {
+                Err(error) => super::lock_open_is_fatal(&error),
+                Ok(_) => false,
+            };
+            assert!(refused(&lock), "symlinked lock must be refused fail-closed");
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), "KEEP");
+            assert!(std::fs::symlink_metadata(&lock).unwrap().file_type().is_symlink());
+
+            let dangling = dir.join("dangling.lock");
+            std::os::unix::fs::symlink(dir.join("absent"), &dangling).unwrap();
+            assert!(refused(&dangling), "dangling symlink must not create its target");
+            assert!(!dir.join("absent").exists());
+
+            let directory = dir.join("dir.lock");
+            std::fs::create_dir(&directory).unwrap();
+            assert!(refused(&directory), "directory lock must be refused fail-closed");
+
+            let fifo = dir.join("fifo.lock");
+            let raw = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
+            assert!(refused(&fifo), "FIFO lock must be refused fail-closed without hanging");
+
+            // Other open errors keep the caller's existing policy (not an H3 refusal).
+            let missing = dir.join("no-such-dir/cys.lock");
+            match super::open_startup_lock(&missing) {
+                Err(error) => assert!(!super::lock_open_is_fatal(&error), "plain I/O error is not a refusal: {error}"),
+                Ok(_) => panic!("missing parent must not open"),
+            }
+        });
+    }
+
+    #[test]
+    fn startup_lock_open_keeps_existing_regular_inode_without_truncating() {
+        use std::os::unix::fs::MetadataExt;
+        fixture(|dir| {
+            let lock = dir.join("cys.lock");
+            assert!(super::open_startup_lock(&lock).unwrap().metadata().unwrap().is_file());
+            std::fs::write(&lock, "4242").unwrap();
+            let before = std::fs::metadata(&lock).unwrap().ino();
+            let file = super::open_startup_lock(&lock).unwrap();
+            assert_eq!(file.metadata().unwrap().ino(), before);
+            assert_eq!(std::fs::read_to_string(&lock).unwrap(), "4242");
+        });
     }
 }
 

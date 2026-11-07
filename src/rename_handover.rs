@@ -56,10 +56,30 @@ fn read_marker_at(marker: &Path) -> Result<Option<serde_json::Value>, String> {
     Ok(Some(value))
 }
 
+/// One endpoint-equality predicate for every marker comparison (Windows named pipes are case-insensitive).
+fn same_endpoint(recorded: Option<&str>, requested: &Path) -> bool {
+    same_endpoint_with(recorded, requested, cfg!(windows))
+}
+
+/// Lexical only: never canonicalize/resolve (a named pipe is not a filesystem path).
+/// An unrepresentable requested endpoint fails closed as a match (blocks; never authorizes a start).
+fn same_endpoint_with(recorded: Option<&str>, requested: &Path, windows: bool) -> bool {
+    let Some(recorded) = recorded else { return false; };
+    let Some(requested) = requested.to_str() else { return true; };
+    if !windows { return recorded == requested; }
+    const PIPE: &str = r"\\.\pipe\";
+    let pipe_name = |value: &str| value.get(..PIPE.len()).filter(|p| p.eq_ignore_ascii_case(PIPE))
+        .map(|_| value[PIPE.len()..].to_uppercase());
+    match (pipe_name(recorded), pipe_name(requested)) {
+        (Some(a), Some(b)) => a == b,
+        _ => recorded == requested,
+    }
+}
+
 fn autostart_blocked_at(marker: &Path, socket: &Path) -> Result<bool, String> {
     Ok(read_marker_at(marker)?.is_some_and(|v| {
         v["rename_handover"]["phase"] != "awaiting-layout"
-            && v["rename_handover"]["socket"].as_str() == socket.to_str()
+            && same_endpoint(v["rename_handover"]["socket"].as_str(), socket)
     }))
 }
 
@@ -284,7 +304,7 @@ fn canonical_start_allowed_for(
     socket: &Path,
     alive: impl FnOnce(&ProcessIdentity) -> Result<bool, String>,
 ) -> Result<bool, String> {
-    if record["socket"].as_str() != socket.to_str() { return Ok(true); }
+    if !same_endpoint(record["socket"].as_str(), socket) { return Ok(true); }
     if record["phase"] == "awaiting-layout" { return Ok(true); }
     if record["phase"] != "starting-new" { return Ok(false); }
     let old = record.get("old_identity")
@@ -446,6 +466,37 @@ mod tests {
         let invalid = serde_json::json!({"phase":"starting-new","socket":"main","old_identity":{
             "pid":0,"start_time":0,"executable":"relative"}});
         assert!(canonical_start_allowed_for(&invalid, Path::new("main"), |_| panic!("invalid identity")).is_err());
+    }
+
+    #[test]
+    fn windows_pipe_case_variant_is_the_same_marker_endpoint() {
+        let pipe = Some(r"\\.\pipe\cys");
+        assert!(same_endpoint_with(pipe, Path::new(r"\\.\pipe\CYS"), true));
+        assert!(same_endpoint_with(pipe, Path::new(r"\\.\PIPE\Cys"), true));
+        assert!(same_endpoint_with(pipe, Path::new(r"\\.\pipe\cys"), true));
+        assert!(!same_endpoint_with(pipe, Path::new(r"\\.\pipe\cys-dept-dev"), true));
+        assert!(!same_endpoint_with(pipe, Path::new(r"\\.\pipe\cys2"), true));
+        assert!(!same_endpoint_with(Some(r"\\.\pipe\cys-dept-dev"), Path::new(r"\\.\pipe\CYS"), true));
+        assert!(!same_endpoint_with(None, Path::new(r"\\.\pipe\cys"), true));
+    }
+
+    #[test]
+    fn unix_marker_endpoint_stays_exact_and_case_sensitive() {
+        let sock = Some("/fixture/state/cys/cys.sock");
+        assert!(same_endpoint_with(sock, Path::new("/fixture/state/cys/cys.sock"), false));
+        assert!(!same_endpoint_with(sock, Path::new("/fixture/state/cys/CYS.sock"), false));
+        assert!(!same_endpoint_with(sock, Path::new("/fixture/state/cys-dept-dev/cys.sock"), false));
+        // A pipe-shaped string on Unix is an ordinary path: no case folding.
+        assert!(!same_endpoint_with(Some(r"\\.\pipe\cys"), Path::new(r"\\.\pipe\CYS"), false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unrepresentable_requested_endpoint_fails_closed_as_a_match() {
+        use std::os::unix::ffi::OsStrExt;
+        let raw = Path::new(std::ffi::OsStr::from_bytes(b"/fixture/\xff.sock"));
+        assert!(same_endpoint_with(Some("/fixture/other.sock"), raw, false));
+        assert!(same_endpoint_with(Some("/fixture/other.sock"), raw, true));
     }
 
     #[test]

@@ -1349,8 +1349,10 @@ fn poll_socket_ready() -> Option<ConnStream> {
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn primary_launchd_check(_socket: &std::path::Path, check: impl FnOnce() -> bool) -> bool {
-    check()
+/// Primary launchd policy applies only to a primary endpoint; a department socket never
+/// queries or kickstarts either primary label (core rename_handover exempts it the same way).
+fn primary_launchd_check(socket: &std::path::Path, check: impl FnOnce() -> bool) -> bool {
+    !cys::is_dept_socket(socket) && check()
 }
 
 /// 온보딩④: 연결 실패 시 형제 cysd를 자동 기동 후 재시도 — 신규 머신 zero-setup.
@@ -1362,11 +1364,12 @@ fn connect() -> Result<ConnStream, String> {
     match connect_raw() {
         Ok(s) => Ok(s),
         Err(first) => {
-            if cys::rename_handover::autostart_blocked(&socket_path())? {
+            let selected = socket_path();
+            if cys::rename_handover::autostart_blocked(&selected)? {
                 return Err("업데이트 이름 변경이 진행 중입니다. 앱의 복원 안내를 확인하세요.".into());
             }
             #[cfg(target_os = "macos")]
-            if primary_launchd_check(&socket_path(), || !matches!(
+            if primary_launchd_check(&selected, || !matches!(
                 cys::launchd::state_for_label(cys::launchd::LEGACY_LAUNCHD_LABEL), cys::launchd::LaunchdState::NotLoaded
             )) {
                 return Err("기존 자동 시작 등록을 이관해야 합니다. Wave Terminal 앱을 열어 업데이트를 완료하세요.".into());
@@ -1383,7 +1386,7 @@ fn connect() -> Result<ConnStream, String> {
             // launchd 위임 우선(macOS·적재 시). 실패 시 아래 sibling 경로로 폴백.
             #[cfg(target_os = "macos")]
             {
-                if primary_launchd_check(&socket_path(), || cys::launchd::should_delegate_autostart(cys::launchd::is_loaded())) {
+                if primary_launchd_check(&selected, || cys::launchd::should_delegate_autostart(cys::launchd::is_loaded())) {
                     eprintln!("[wave] waved not serving — delegating to launchd (launchctl kickstart)");
                     if cys::launchd::kickstart() {
                         if let Some(s) = poll_socket_ready() {

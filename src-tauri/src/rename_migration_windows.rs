@@ -63,6 +63,19 @@ pub(super) fn rollback(snapshot: &mut Value, persist: &mut dyn FnMut(&Value) -> 
     persist(snapshot)
 }
 
+/// One `/Run` through the exact old task this attempt's rollback restored (verified in the script).
+pub(super) fn start_restored_owner(snapshot: &mut Value, persist: &mut dyn FnMut(&Value) -> Result<(), String>) -> Result<(), String> {
+    if snapshot["old_registration_restored"] != true || snapshot["old"].is_null() {
+        return Err("복원 영수증에 기존 작업이 없어 서비스를 시작하지 않습니다. 복원 기록을 유지합니다.".into());
+    }
+    if snapshot["restored_owner_start_requested"] == true { return Ok(()); }
+    run("start_restored_check", snapshot)?;
+    snapshot["restored_owner_start_requested"] = json!(true);
+    persist(snapshot)?;
+    run("start_restored", snapshot)?;
+    Ok(())
+}
+
 fn run(operation: &str, snapshot: &Value) -> Result<Value, String> {
     let mut command = Command::new("powershell.exe");
     command.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", SCRIPT])
@@ -319,6 +332,14 @@ try {
       }
     }
     $reply.old_registration_restored = $true
+  } elseif ($op -eq 'start_restored_check' -or $op -eq 'start_restored') {
+    if ($s.old_registration_restored -ne $true -or $null -eq $s.old) { throw '복원 영수증에 기존 작업이 없어 서비스를 시작하지 않습니다.' }
+    $new = Task 'waved'
+    if ($null -ne $new -and ($new.Enabled -or $new.State -in @(2,4))) { throw '정식 작업이 활성 상태라 기존 작업을 시작하지 않습니다. 두 데몬을 시작하지 않습니다.' }
+    # Exact restored definition and source; Unchanged also rejects a foreign/custom task.
+    $old = Unchanged 'cysd' $s.old
+    if (!$old.Enabled -or ![bool]$s.old.enabled) { throw '복원된 기존 작업이 비활성이라 시작하지 않습니다.' }
+    if ($op -eq 'start_restored' -and $old.State -notin @(2,4)) { Schtasks -arguments @('/Run','/TN','cysd') }
   } else { throw '알 수 없는 등록 전환 단계입니다.' }
   $reply | ConvertTo-Json -Depth 12 -Compress
 } catch {

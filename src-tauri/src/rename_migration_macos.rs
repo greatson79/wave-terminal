@@ -59,11 +59,15 @@ fn read_exact(path: &Path) -> Result<Option<String>, String> {
 
 fn job(label: &str, path: &Path, expected: &[PathBuf]) -> Result<Value, String> {
     #[cfg(test)] {
-        let _ = (path, expected);
+        let _ = expected;
         return TEST_SANDBOX.with(|sandbox| {
-            let sandbox = sandbox.borrow();
-            Ok(sandbox.as_ref().ok_or("explicit validated sandbox root required")?.jobs
-                .get(label).cloned().unwrap_or_else(|| json!({"kind":"absent"})))
+            let mut sandbox = sandbox.borrow_mut();
+            let sandbox = sandbox.as_mut().ok_or("explicit validated sandbox root required")?;
+            if label == cys::launchd::LAUNCHD_LABEL && sandbox.foreign_load_after_publish && path.exists() {
+                sandbox.foreign_load_after_publish = false;
+                sandbox.jobs.insert(label.into(), json!({"kind":"idle","definition":"foreign-canonical"}));
+            }
+            Ok(sandbox.jobs.get(label).cloned().unwrap_or_else(|| json!({"kind":"absent"})))
         });
     }
     #[cfg(not(test))] {
@@ -370,14 +374,18 @@ pub(super) fn activate(snapshot: &mut Value, persist: &mut dyn FnMut(&Value) -> 
     cleanup_plist_stage(&snapshot["new_publication"], snapshot["staged_xml"].as_str().ok_or("준비 등록 오류")?)?;
     owns_file(&new, snapshot["new_publication"]["inode"].as_str().ok_or("등록 inode 영수증 오류")?)?;
     unchanged(&new, snapshot["staged_xml"].as_str())?;
-    if new_job(snapshot)?["kind"] == "absent" {
+    // Only this attempt's own load creates the load receipt rollback later relies on.
+    if snapshot["loaded_new_job"].is_null() {
+        if new_job(snapshot)?["kind"] != "absent" {
+            return Err("이 시도가 적재하지 않은 정식 자동 시작 작업이 나타나 변경하지 않습니다. 복원 기록을 유지합니다.".into());
+        }
         run("/bin/launchctl", &["load", "-w", new.to_str().ok_or("새 등록 경로 오류")?])?;
+        owns_file(&new, snapshot["new_publication"]["inode"].as_str().ok_or("등록 inode 영수증 오류")?)?;
+        let observed = new_job(snapshot)?;
+        if observed["kind"] == "absent" { return Err("새 자동 시작 등록을 확인하지 못했습니다.".into()); }
+        snapshot["loaded_new_job"] = observed;
+        persist(snapshot)?;
     }
-    owns_file(&new, snapshot["new_publication"]["inode"].as_str().ok_or("등록 inode 영수증 오류")?)?;
-    let observed = new_job(snapshot)?;
-    if observed["kind"] == "absent" { return Err("새 자동 시작 등록을 확인하지 못했습니다.".into()); }
-    snapshot["loaded_new_job"] = observed;
-    persist(snapshot)?;
     if let Some(xml) = snapshot["old_xml"].as_str().map(str::to_string).filter(|_| old_present.is_some()) {
         snapshot["old_removal_intent"] = json!(true);
         persist(snapshot)?;
@@ -460,6 +468,33 @@ pub(super) fn rollback(snapshot: &mut Value, persist: &mut dyn FnMut(&Value) -> 
     if let Some(error) = preserved_error { return Err(error); }
     snapshot["rollback_succeeded"] = json!(true);
     persist(snapshot)
+}
+
+/// One start request through the exact legacy registration this attempt's rollback restored.
+pub(super) fn start_restored_owner(snapshot: &mut Value, persist: &mut dyn FnMut(&Value) -> Result<(), String>) -> Result<(), String> {
+    if snapshot["old_registration_restored"] != true || snapshot["links_rolled_back"] != true || snapshot["old_loaded"] != true {
+        return Err("복원 영수증에 이 시도가 되살린 기존 자동 시작 작업이 없어 서비스를 시작하지 않습니다. 복원 기록을 유지합니다.".into());
+    }
+    if snapshot["restored_owner_start_requested"] == true { return Ok(()); }
+    if new_job(snapshot)?["kind"] != "absent" {
+        return Err("정식 자동 시작 작업이 있어 기존 작업을 시작하지 않습니다. 두 서비스를 시작하지 않습니다.".into());
+    }
+    let (old, _) = paths();
+    unchanged(&old, snapshot["old_xml"].as_str())?;
+    let current = old_job(snapshot)?;
+    snapshot["restored_owner_start_requested"] = json!(true);
+    persist(snapshot)?;
+    match current["kind"].as_str() {
+        Some("absent") => run("/bin/launchctl", &["load", "-w", old.to_str().ok_or("복구 등록 경로 오류")?])?,
+        // Non-forcing: never `-k`, so an owner that is already starting is not killed.
+        Some("idle") => run("/bin/launchctl", &["kickstart",
+            &format!("gui/{}/{}", unsafe {libc::getuid()}, cys::launchd::LEGACY_LAUNCHD_LABEL)])?,
+        _ => {}
+    }
+    if old_job(snapshot)?["kind"] == "absent" {
+        return Err("복원된 기존 자동 시작 작업을 확인하지 못했습니다. 복원 기록을 유지합니다.".into());
+    }
+    Ok(())
 }
 
 fn old_job(snapshot: &Value) -> Result<Value, String> {
@@ -597,6 +632,8 @@ struct Sandbox {
     owners: usize,
     peak_owners: usize,
     active_handover: bool,
+    /// Test seam: another actor loads the canonical label right after this attempt publishes its plist.
+    foreign_load_after_publish: bool,
 }
 
 #[cfg(test)]
@@ -620,6 +657,20 @@ fn sandbox_command(program: &str, args: &[&str]) -> Result<(), String> {
                 sandbox.jobs.insert(cys::launchd::LEGACY_LAUNCHD_LABEL.into(), json!({"kind":"idle","definition":"sandbox-old"}));
                 sandbox.owners += 1;
                 sandbox.peak_owners = sandbox.peak_owners.max(sandbox.owners);
+            }
+            ["kickstart", target] if target.ends_with(&format!("/{}", cys::launchd::LEGACY_LAUNCHD_LABEL)) => {
+                sandbox.jobs.insert(cys::launchd::LEGACY_LAUNCHD_LABEL.into(), json!({"kind":"running","definition":"sandbox-old"}));
+                sandbox.owners += 1;
+                sandbox.peak_owners = sandbox.peak_owners.max(sandbox.owners);
+            }
+            ["load", "-w", path] if Path::new(path) == sandbox.root.join("LaunchAgents/new.plist") => {
+                sandbox.jobs.insert(cys::launchd::LAUNCHD_LABEL.into(), json!({"kind":"idle","definition":"sandbox-new"}));
+                sandbox.owners += 1;
+                sandbox.peak_owners = sandbox.peak_owners.max(sandbox.owners);
+            }
+            ["bootout", target] if target.ends_with(&format!("/{}", cys::launchd::LAUNCHD_LABEL)) => {
+                sandbox.jobs.remove(cys::launchd::LAUNCHD_LABEL);
+                sandbox.owners = sandbox.owners.saturating_sub(1);
             }
             _ => return Err("이 샌드박스에서는 새 데몬 또는 실제 등록을 실행하지 않습니다.".into()),
         }
@@ -658,7 +709,7 @@ mod tests {
             let fixture = private_directory(&root).unwrap();
             TEST_SANDBOX.with(|sandbox| *sandbox.borrow_mut() = Some(Sandbox {
                 root:fixture.clone(), jobs:std::collections::HashMap::new(), commands:vec![],
-                owners:0, peak_owners:0, active_handover:false,
+                owners:0, peak_owners:0, active_handover:false, foreign_load_after_publish:false,
             }));
             for directory in bin_directories().unwrap() { std::fs::create_dir(directory).unwrap(); }
             Self(fixture)
@@ -754,6 +805,34 @@ mod tests {
     }
 
     #[test]
+    fn privileged_link_scripts_never_force_clobber_or_remove_unverified_entries() {
+        // Maintenance contract (rename-r1 22:22): detect + fail closed; never force-replace or delete
+        // an entry whose kind/target/inode was not re-verified in the same privileged shell.
+        let fixture = LinkFixture::new();
+        let base = fixture.0.join("bundle");
+        let directory = bin_directories().unwrap()[0].clone();
+        let attempt = "0123456789abcdef0123456789abcdef";
+        let stage = directory.join(format!(".wave-stage-{attempt}.ABCDEFGH/entry"));
+        let snapshot = json!({"daemon":base.join("waved"), "attempt_id":attempt, "links":[{
+            "path":directory.join("wave"), "before":null, "after":base.join("wave"),
+            "stage":stage, "inode":"1:2"}]});
+        for action in ["publish", "rollback", "cleanup"] {
+            let script = link_script(&snapshot, action).unwrap();
+            for forbidden in ["mv -f", "mv -fh", "ln -sf", "ln -f", "rm -f", "rm -r"] {
+                assert!(!script.contains(forbidden), "{action} uses {forbidden}");
+            }
+            for (index, line) in script.lines().enumerate() {
+                if line.contains("/bin/rm ") {
+                    let guarded = script.lines().take(index + 1).collect::<Vec<_>>().join("\n");
+                    assert!(guarded.contains("readlink") && guarded.contains("%d:%i"), "{action}: unverified rm");
+                }
+            }
+        }
+        assert!(link_script(&snapshot, "rollback").unwrap().contains("/bin/mv -nh"));
+        TEST_SANDBOX.with(|sandbox| assert!(sandbox.borrow().as_ref().unwrap().commands.is_empty()));
+    }
+
+    #[test]
     fn injected_root_refuses_unset_and_system_locations_before_io() {
         assert!(validated_sandbox_root(None).is_err());
         for path in ["", ".", "/Applications", "/usr/local/bin", "/opt/homebrew/bin", "/Users/fixture/.cys"] {
@@ -777,7 +856,7 @@ mod tests {
         TEST_SANDBOX.with(|sandbox| *sandbox.borrow_mut() = Some(Sandbox {
             root:fixture.clone(), jobs:std::collections::HashMap::from([
                 (cys::launchd::LEGACY_LAUNCHD_LABEL.into(), json!({"kind":"idle","definition":"sandbox-old"}))]),
-            commands:vec![], owners:0, peak_owners:0, active_handover:false,
+            commands:vec![], owners:0, peak_owners:0, active_handover:false, foreign_load_after_publish:false,
         }));
         let (old, new) = paths();
         std::fs::write(&old, "captured-old-registration").unwrap();
@@ -814,5 +893,168 @@ mod tests {
             assert_eq!(sandbox.commands.len(), 2); // only old bootout, then captured old load
             assert!(sandbox.commands.iter().all(|args| !args.iter().any(|arg| arg == new.to_str().unwrap())));
         });
+    }
+
+    /// Rooted sandbox with a captured, loaded legacy job; the legacy job is disabled by this attempt.
+    struct Attempt { fixture: PathBuf, marker: PathBuf, snapshot: Value }
+    impl Drop for Attempt {
+        fn drop(&mut self) {
+            TEST_SANDBOX.with(|s| *s.borrow_mut() = None);
+            std::fs::remove_dir_all(&self.fixture).unwrap();
+        }
+    }
+    impl Attempt {
+        fn disabled_legacy(foreign_load_after_publish: bool) -> Self {
+            let root = validated_sandbox_root(std::env::var_os("WAVE_TEST_ROOT")).expect("reviewed explicit private root required");
+            let fixture = private_directory(&root).unwrap();
+            std::fs::create_dir(fixture.join("LaunchAgents")).unwrap();
+            TEST_SANDBOX.with(|sandbox| *sandbox.borrow_mut() = Some(Sandbox {
+                root:fixture.clone(), jobs:std::collections::HashMap::from([
+                    (cys::launchd::LEGACY_LAUNCHD_LABEL.into(), json!({"kind":"idle","definition":"sandbox-old"}))]),
+                commands:vec![], owners:0, peak_owners:0, active_handover:false, foreign_load_after_publish,
+            }));
+            let (old, _) = paths();
+            std::fs::write(&old, "captured-old-registration").unwrap();
+            let snapshot = json!({"attempt_id":"0123456789abcdef0123456789abcdef",
+                "daemon":fixture.join("waved"), "old_xml":"captured-old-registration", "new_xml":null,
+                "old_inode":inode_at(&old).unwrap(), "new_inode":null, "staged_xml":"trusted-new-registration",
+                "old_job":{"kind":"idle","definition":"sandbox-old"}, "new_job":{"kind":"absent"},
+                "old_loaded":true, "new_loaded":false, "links":[], "old_owner_stopped":true});
+            let mut attempt = Attempt { marker: fixture.join("receipt.json"), fixture, snapshot };
+            let mut snapshot = attempt.snapshot.take();
+            disable_legacy(&mut snapshot, &mut attempt.persist()).unwrap();
+            attempt.snapshot = snapshot;
+            attempt
+        }
+        fn persist(&self) -> impl FnMut(&Value) -> Result<(), String> + '_ {
+            move |value: &Value| std::fs::write(&self.marker, serde_json::to_vec(value).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())
+        }
+        fn step(&mut self, action: fn(&mut Value, &mut dyn FnMut(&Value) -> Result<(), String>) -> Result<(), String>) -> Result<(), String> {
+            let mut snapshot = self.snapshot.take();
+            let result = action(&mut snapshot, &mut self.persist());
+            self.snapshot = snapshot;
+            result
+        }
+        fn kept(&self) -> Value { serde_json::from_slice(&std::fs::read(&self.marker).unwrap()).unwrap() }
+        fn commands(&self) -> Vec<Vec<String>> {
+            TEST_SANDBOX.with(|s| s.borrow().as_ref().unwrap().commands.clone())
+        }
+    }
+
+    fn canonical_bootouts(commands: &[Vec<String>]) -> usize {
+        commands.iter().filter(|args| args[0] == "bootout"
+            && args[1].ends_with(&format!("/{}", cys::launchd::LAUNCHD_LABEL))).count()
+    }
+
+    #[test]
+    fn rollback_keeps_foreign_canonical_job_when_activation_was_refused() {
+        // Reviewer scenario: activation attempted, a foreign idle job with the known staged bytes appears,
+        // activate refuses at its first ownership check; rollback must not touch that job or file.
+        let mut attempt = Attempt::disabled_legacy(false);
+        let (_, new) = paths();
+        std::fs::write(&new, "trusted-new-registration").unwrap();
+        let foreign_inode = inode_at(&new).unwrap();
+        TEST_SANDBOX.with(|s| { s.borrow_mut().as_mut().unwrap().jobs.insert(
+            cys::launchd::LAUNCHD_LABEL.into(), json!({"kind":"idle","definition":"foreign-canonical"})); });
+        attempt.snapshot["activation_attempted"] = json!(true);
+        assert!(attempt.step(activate).is_err());
+        attempt.snapshot["new_owner_stopped"] = json!(true);
+        let error = attempt.step(rollback).unwrap_err();
+        assert!(error.contains("중지하지 않습니다"), "{error}");
+        assert_eq!(new_job(&attempt.snapshot).unwrap()["definition"], "foreign-canonical");
+        assert_eq!(inode_at(&new).unwrap(), foreign_inode);
+        assert_eq!(std::fs::read_to_string(&new).unwrap(), "trusted-new-registration");
+        assert_eq!(canonical_bootouts(&attempt.commands()), 0);
+        assert_ne!(attempt.kept()["rollback_succeeded"], true);
+    }
+
+    #[test]
+    fn foreign_load_after_publication_is_never_recorded_as_this_attempts_load() {
+        let mut attempt = Attempt::disabled_legacy(true);
+        let (_, new) = paths();
+        let activation = attempt.step(activate);
+        assert!(activation.is_err(), "a job this attempt did not load must not be adopted");
+        assert!(attempt.kept()["loaded_new_job"].is_null(), "no load receipt for a foreign load");
+        attempt.snapshot["new_owner_stopped"] = json!(true);
+        assert!(attempt.step(rollback).is_err());
+        assert_eq!(new_job(&attempt.snapshot).unwrap()["definition"], "foreign-canonical");
+        assert!(new.exists(), "the plist a loaded foreign job uses is kept");
+        assert_eq!(canonical_bootouts(&attempt.commands()), 0);
+        assert!(!attempt.commands().iter().any(|args| args[0] == "load" && args[2] == new.to_str().unwrap()));
+    }
+
+    #[test]
+    fn rollback_unloads_and_removes_only_the_job_this_attempt_loaded() {
+        // Positive control: with this attempt's own load receipt, rollback restores the captured old job.
+        let mut attempt = Attempt::disabled_legacy(false);
+        let (old, new) = paths();
+        attempt.step(activate).unwrap();
+        assert_eq!(attempt.kept()["loaded_new_job"]["definition"], "sandbox-new");
+        assert!(!old.exists(), "activation removed the old plist this attempt owned");
+        attempt.snapshot["new_owner_stopped"] = json!(true);
+        attempt.step(rollback).unwrap();
+        assert_eq!(new_job(&attempt.snapshot).unwrap()["kind"], "absent");
+        assert!(!new.exists());
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), "captured-old-registration");
+        assert_ne!(old_job(&attempt.snapshot).unwrap()["kind"], "absent");
+        assert_eq!(canonical_bootouts(&attempt.commands()), 1);
+        TEST_SANDBOX.with(|s| assert_eq!(s.borrow().as_ref().unwrap().peak_owners, 1));
+        assert_eq!(attempt.kept()["rollback_succeeded"], true);
+    }
+
+    fn restored_receipt(attempt: &mut Attempt) {
+        for key in ["old_registration_restored", "links_rolled_back", "new_owner_stopped"] { attempt.snapshot[key] = json!(true); }
+    }
+
+    #[test]
+    fn restored_owner_start_loads_only_the_receipted_legacy_job_once() {
+        let mut attempt = Attempt::disabled_legacy(false);
+        let (old, _) = paths();
+        restored_receipt(&mut attempt);
+        let before = attempt.commands().len();
+        attempt.step(start_restored_owner).unwrap();
+        let commands = attempt.commands();
+        assert_eq!(commands[before..], [vec!["load".to_string(), "-w".into(), old.to_str().unwrap().into()]]);
+        assert_eq!(attempt.kept()["restored_owner_start_requested"], true);
+        attempt.step(start_restored_owner).unwrap();
+        assert_eq!(attempt.commands().len(), before + 1, "ONE start request only");
+    }
+
+    #[test]
+    fn restored_owner_start_kickstarts_an_idle_legacy_job_without_force() {
+        let mut attempt = Attempt::disabled_legacy(false);
+        restored_receipt(&mut attempt);
+        TEST_SANDBOX.with(|s| { s.borrow_mut().as_mut().unwrap().jobs.insert(
+            cys::launchd::LEGACY_LAUNCHD_LABEL.into(), json!({"kind":"idle","definition":"sandbox-old"})); });
+        let before = attempt.commands().len();
+        attempt.step(start_restored_owner).unwrap();
+        let last = &attempt.commands()[before];
+        assert_eq!(last[0], "kickstart");
+        assert!(!last.iter().any(|arg| arg == "-k"), "never force-restart");
+        assert!(last[1].ends_with(cys::launchd::LEGACY_LAUNCHD_LABEL));
+    }
+
+    #[test]
+    fn restored_owner_start_refuses_without_receipt_or_on_mismatch() {
+        // No receipt.
+        let mut attempt = Attempt::disabled_legacy(false);
+        let before = attempt.commands().len();
+        assert!(attempt.step(start_restored_owner).is_err());
+        // Receipt, but the legacy definition changed after restoration.
+        restored_receipt(&mut attempt);
+        std::fs::write(paths().0, "changed-by-someone").unwrap();
+        assert!(attempt.step(start_restored_owner).is_err());
+        std::fs::write(paths().0, "captured-old-registration").unwrap();
+        // Receipt, but a canonical job is loaded: never two owners.
+        TEST_SANDBOX.with(|s| { s.borrow_mut().as_mut().unwrap().jobs.insert(
+            cys::launchd::LAUNCHD_LABEL.into(), json!({"kind":"idle","definition":"foreign-canonical"})); });
+        assert!(attempt.step(start_restored_owner).is_err());
+        // Original was not a loaded registration (CLI-autostart original): never pretend one exists.
+        TEST_SANDBOX.with(|s| { s.borrow_mut().as_mut().unwrap().jobs.remove(cys::launchd::LAUNCHD_LABEL); });
+        attempt.snapshot["old_loaded"] = json!(false);
+        assert!(attempt.step(start_restored_owner).is_err());
+        assert_eq!(attempt.commands().len(), before, "no launchctl call on any refusal");
+        assert_ne!(attempt.snapshot["restored_owner_start_requested"], true);
     }
 }

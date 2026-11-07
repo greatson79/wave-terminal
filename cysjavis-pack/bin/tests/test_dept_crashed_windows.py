@@ -133,12 +133,12 @@ class ScanBoundaryTests(unittest.TestCase):
             return r.stdout.splitlines()
 
     def test_dept_1_key_does_not_match_dept_10_but_matches_itself(self):
-        rows = ["10\tnode.exe\tnode C:\\Users\\u\\AppData\\Local\\cys\\cys-dept-dept-10\\x.js",
+        rows = ["10\tnode.exe\tnode C:\\Users\\user\\AppData\\Local\\cys\\cys-dept-dept-10\\x.js",
                 "11\tcysd.exe\tcysd \\\\.\\pipe\\cys-dept-dept-10",
-                "12\tbash.exe\tbash C:\\Users\\u\\.cys\\pack-dept-dept-10\\run.sh",
-                "20\tnode.exe\tnode C:\\Users\\u\\AppData\\Local\\cys\\cys-dept-dept-1\\x.js",
+                "12\tbash.exe\tbash C:\\Users\\user\\.cys\\pack-dept-dept-10\\run.sh",
+                "20\tnode.exe\tnode C:\\Users\\user\\AppData\\Local\\cys\\cys-dept-dept-1\\x.js",
                 "21\tcysd.exe\t\"C:\\x\\cysd.exe\" --pipe \\\\.\\pipe\\cys-dept-dept-1",
-                "22\tbash.exe\tbash C:\\Users\\u\\.cys\\pack-dept-dept-1"]
+                "22\tbash.exe\tbash C:\\Users\\user\\.cys\\pack-dept-dept-1"]
         found = self.scan(["cys-dept-dept-1", "C:/Users/user/.cys/pack-dept-dept-1"], rows)
         self.assertEqual([line.split("\t")[0] for line in found], ["20", "21", "22"])
 

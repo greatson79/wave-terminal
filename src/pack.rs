@@ -1905,7 +1905,7 @@ mod tests {
         let _dirs = override_dirs_for_thread(&td, td.join("cysclaude"));
         let get = |rel: &str| PACK_ALL.iter().find(|(r, _)| *r == rel).unwrap().1;
         let student = ["agents.json", "acl.json", "skills/korean-humanizer/SKILL.md"];
-        let system = ["hooks/appbuild-gate.sh", "bin/javis_route.py"];
+        let system = ["hooks/appbuild-gate.sh", "bin/javis_route.py", "bin/cys-dept"];
         let mut manifest = serde_json::Map::new();
         for rel in student.into_iter().chain(system) {
             let path = td.join(rel);
@@ -1920,6 +1920,7 @@ mod tests {
             assert_eq!(std::fs::read_to_string(td.join(format!("{rel}.new"))).unwrap(), get(rel));
             assert!(!td.join(format!("{rel}.user")).exists());
         }
+        assert!(load_merge_pending(&td).contains_key("bin/cys-dept"), "modified helper must retain the existing pending-merge notice");
         let _ = std::fs::remove_dir_all(&td);
     }
 
@@ -1929,7 +1930,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&td);
         let _dirs = override_dirs_for_thread(&td, td.join("cysclaude"));
         let student = ["agents.json", "acl.json", "skills/korean-humanizer/SKILL.md",
-                       "hooks/appbuild-gate.sh", "bin/javis_route.py"];
+                       "hooks/appbuild-gate.sh", "bin/javis_route.py", "bin/cys-dept"];
         let mut manifest = serde_json::Map::new();
         for rel in student {
             let path = td.join(rel);

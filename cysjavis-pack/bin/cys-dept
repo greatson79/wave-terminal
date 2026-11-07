@@ -22,15 +22,20 @@ export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin${PATH:+:$PATH}"
 # HOTFIX-PYTHON-BOUNDARY-BEGIN
 # Native Windows Python cannot open MSYS /c paths; convert argv, never Python source text.
 dept_windows=0
+DEPT_PATH_FAILED='__CYS_DEPT_PATH_CONVERSION_FAILED__'
 case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) dept_windows=1 ;; esac
 native_path(){
-  if [ "$dept_windows" = 1 ] && [[ "$1" == /* ]]; then cygpath -m "$1"
+  if [ "$dept_windows" = 1 ] && [[ "$1" == /* ]]; then
+    # fail closed: stderr line + sentinel (a $(...) argument cannot stop its caller; python3() refuses the sentinel)
+    cygpath -m "$1" || { echo "[cys-dept] 경로 변환 실패 / path conversion failed: $1" >&2; printf '%s\n' "$DEPT_PATH_FAILED"; return 1; }
   else printf '%s\n' "$1"; fi
 }
 # Arguments pass through untouched (MSYS2_ARG_CONV_EXCL stops MSYS from guessing which '/x' is a path);
 # call sites convert the path arguments they own with native_path.
 python3(){
   if [ "$dept_windows" != 1 ]; then command python3 "$@"; return; fi
+  local value
+  for value in "$@"; do [ "$value" = "$DEPT_PATH_FAILED" ] && return 1; done
   MSYS2_ARG_CONV_EXCL='*' command python3 "$@"
 }
 # HOTFIX-PYTHON-BOUNDARY-END
@@ -43,9 +48,9 @@ CYSD="$(command -v cysd || { [ -x /opt/homebrew/bin/cysd ] && echo /opt/homebrew
 CYS="$(command -v cys || { [ -x /opt/homebrew/bin/cys ] && echo /opt/homebrew/bin/cys; } || echo cys)"
 # RC-6(codex R3.1 nit): 인라인 python heredoc이 cys를 literal이 아니라 **해소된 경로**로 실행하도록
 # CYS_BIN을 env로 전파(heredoc은 프로세스 env 상속). dept_classify_idle·alive_sock 등 subprocess가 사용.
-export CYS_BIN="$(native_path "$CYS")"
-if [ -n "${CYS_PACK_DIR:-}" ]; then export CYS_PACK_DIR="$(native_path "$CYS_PACK_DIR")"; fi
-if [ -n "${CYS_DEPTS_JSON:-}" ]; then export CYS_DEPTS_JSON="$(native_path "$CYS_DEPTS_JSON")"; fi
+CYS_BIN="$(native_path "$CYS")"; export CYS_BIN
+if [ -n "${CYS_PACK_DIR:-}" ]; then CYS_PACK_DIR="$(native_path "$CYS_PACK_DIR")"; export CYS_PACK_DIR; fi
+if [ -n "${CYS_DEPTS_JSON:-}" ]; then CYS_DEPTS_JSON="$(native_path "$CYS_DEPTS_JSON")"; export CYS_DEPTS_JSON; fi
 # RC-6(T3 발견): Windows 번들 embeddable Python은 open() 기본 인코딩이 cp1252(charmap)라 UTF-8(한글)
 # agents.json·directives 읽기가 UnicodeDecodeError로 크래시(부서 seed 실패 등). PYTHONUTF8=1로 전 python
 # heredoc·자식 python을 UTF-8 기본으로 강제(unix 무영향). 개별 open(encoding=) 누락도 이걸로 방어.

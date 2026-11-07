@@ -68,6 +68,23 @@ class DepartmentPathTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.splitlines(), ["/x", "/regex/i", "--opt=/y", "/Team Name", "C:/Users/a/depts.json"])
 
+    def test_path_conversion_failure_fails_closed_and_never_runs_python(self):
+        source = DEPT.read_text(encoding="utf-8")
+        boundary = source.split("# HOTFIX-PYTHON-BOUNDARY-BEGIN", 1)[1].split("# HOTFIX-PYTHON-BOUNDARY-END", 1)[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ran = root / "python-ran"
+            (root / "uname").write_text("#!/bin/sh\nprintf 'MINGW64_NT\\n'\n", encoding="utf-8")
+            (root / "cygpath").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            (root / "python3").write_text("#!/bin/sh\n: > '%s'\n" % ran, encoding="utf-8")
+            for executable in root.iterdir(): executable.chmod(0o700)
+            program = boundary + '\npython3 -c code "$(native_path /c/Users/a/depts.json)" other\n'
+            result = subprocess.run([BASH, "-c", program], env={**os.environ, "PATH": str(root)+os.pathsep+os.environ.get("PATH", "")},
+                                    text=True, encoding="utf-8", capture_output=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("경로 변환 실패 / path conversion failed: /c/Users/a/depts.json", result.stderr)
+            self.assertFalse(ran.exists(), "python must not run with a failed/empty path argument")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,11 +4,11 @@ name: Windows 0.3.2 proof (dept sidebar + teardown + lib tests)
 # Triggers: push to release/0.3.2-proof (GitHub only dispatches workflows present on the default branch)
 # with the inputs committed in .github/proof-inputs-032.json; workflow_dispatch inputs override the file.
 # Binding (job `inputs`): expected_sha = the APP commit windows-build built. This run's commit may differ from it ONLY
-# in the proof harness files (workflow + inputs file); the build run head_sha must equal expected_sha.
+# in the proof harness files (workflow + inputs file + the one test-only fixture file); the build run head_sha must equal expected_sha.
 on:
   push:
     branches: [release/0.3.2-proof]
-    paths: ['.github/proof-inputs-032.json', '.github/workflows/win-032-proof.yml']
+    paths: ['.github/proof-inputs-032.json', '.github/workflows/win-032-proof.yml', 'cysjavis-pack/bin/tests/test_dept_paths_hotfix.py']
   workflow_dispatch:
     inputs:
       build_run_id:
@@ -58,7 +58,7 @@ jobs:
           if not re.fullmatch(r"\d+\.\d+\.\d+", ver): sys.exit("expected_version must be x.y.z")
           head = os.environ["GITHUB_SHA"]
           subprocess.run(["git", "cat-file", "-e", sha + "^{commit}"], check=True)
-          allowed = {".github/proof-inputs-032.json", ".github/workflows/win-032-proof.yml"}
+          allowed = {".github/proof-inputs-032.json", ".github/workflows/win-032-proof.yml", "cysjavis-pack/bin/tests/test_dept_paths_hotfix.py"}  # last = test-only fixture fix
           changed = set(subprocess.run(["git", "diff", "--name-only", sha, head], check=True, capture_output=True, text=True).stdout.split())
           extra = changed - allowed
           if extra: sys.exit("Run commit differs from the built app commit beyond the proof harness: %s" % sorted(extra))
@@ -313,6 +313,8 @@ jobs:
           $env:CYS_SHELL = (Get-Command $ProbeShell -CommandType Application).Source
           foreach ($key in @('CYS_ROLE','CYS_SURFACE_ID','CYS_SOCKET','CYS_ACCOUNT_DIR','CYS_DEPT_NO_MASTER','CYS_DEPT_DEFAULT_ACCOUNT','CYS_DEPTS_JSON','CYS_PACK_DIR')) {
             [Environment]::SetEnvironmentVariable($key, $null, 'Process')
+            Remove-Item -LiteralPath "Env:$key" -ErrorAction SilentlyContinue
+            Assert (-not (Test-Path -LiteralPath "Env:$key")) "$key is still set (an empty value counts as set for cys fleet)"
           }
           try {
             . Step 'Native exit-capture self-check (before any product evidence)' {
@@ -448,7 +450,7 @@ jobs:
                   $fleet = $fleetJson | ConvertFrom-Json
                   $mine = @($fleet.departments | Where-Object { $_.dept -eq $name })
                   Assert ($mine.Count -eq 1) "Department $name is not listed as its own workspace"
-                  Assert ($null -eq $mine[0].PSObject.Properties['error']) "Department $name is listed but unreachable: $($mine[0].error)"
+                  Assert ($null -eq $mine[0].PSObject.Properties['error']) "Department $name is listed but org.status was unreachable (fleet entry has an error field)"
                   $expectedDisplay = if ($entry -eq 'create') { '검증 부서' } else { $name }
                   Assert ($mine[0].department -eq $expectedDisplay) "Workspace label '$($mine[0].department)' != '$expectedDisplay'"
                   Assert ($mine[0].socket -eq $socket) 'Workspace socket differs from registry socket'
@@ -752,7 +754,7 @@ jobs:
         run: |
           $head = (git rev-parse HEAD).Trim()
           $changed = @(git diff --name-only $env:EXPECTED_SHA $head)
-          $extra = @($changed | Where-Object { $_ -notin @('.github/proof-inputs-032.json','.github/workflows/win-032-proof.yml') })
+          $extra = @($changed | Where-Object { $_ -notin @('.github/proof-inputs-032.json','.github/workflows/win-032-proof.yml','cysjavis-pack/bin/tests/test_dept_paths_hotfix.py') })
           if ($extra.Count -ne 0) { throw "Checkout differs from the built app commit beyond the proof harness: $($extra -join ', ')" }
           Write-Host "LIB_TESTS_COMMIT head=$head app=$env:EXPECTED_SHA harness_only_diff=$($changed -join ',')"
 

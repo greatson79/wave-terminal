@@ -155,7 +155,7 @@ PY_HAS
 # 자기 자신(cys-dept 스크립트·스캔용 powershell)은 제외. 스캔 실패는 "unknown" 한 줄(=발견으로 취급·fail-closed).
 dept_scan_procs(){
   python3 - "$@" <<'PY_SCAN'
-import csv,io,subprocess,sys
+import re,subprocess,sys
 keys=[k.lower() for k in sys.argv[1:] if k]
 ps='Get-CimInstance Win32_Process | ForEach-Object { "{0}`t{1}`t{2}" -f $_.ProcessId,$_.Name,$_.CommandLine }'
 try:
@@ -169,7 +169,7 @@ for line in out.stdout.splitlines():
     if len(f)<3: continue
     cl=f[2].lower().replace('\\','/')
     if 'bin/cys-dept' in cl or 'get-ciminstance win32_process' in cl: continue
-    if any(k.replace('\\','/') in cl for k in keys): print('%s\t%s'%(f[0],f[1]))
+    if any(re.search(re.escape(k.replace('\\','/'))+r'(?![a-z0-9_-])',cl) for k in keys): print('%s\t%s'%(f[0],f[1]))   # 키 뒤가 영숫자·-·_면 다른 부서(dept-1 vs dept-10)
 PY_SCAN
 }
 dept_recorded_pid_alive(){

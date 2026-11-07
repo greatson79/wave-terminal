@@ -109,6 +109,35 @@ class CrashedDeptTests(unittest.TestCase):
         self.assertIn("dept-1", depts)
 
 
+class ScanBoundaryTests(unittest.TestCase):
+    def scan(self, keys, rows):
+        """Run the real dept_scan_procs python with a fake powershell.exe that prints CIM-style rows."""
+        source = DEPT.read_text(encoding="utf-8")
+        body = re.search(r"dept_scan_procs\(\)\{.*?<<'PY_SCAN'\n(.*?)^PY_SCAN\n", source, re.S | re.M).group(1)
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp)
+            (bin_dir / "powershell.exe").write_text("#!/bin/sh\ncat <<'EOF'\n" + "".join(r + "\n" for r in rows) + "EOF\n")
+            (bin_dir / "powershell.exe").chmod(0o700)
+            r = subprocess.run(["python3", "-c", body] + keys, capture_output=True, text=True, encoding="utf-8", timeout=20,
+                               env={**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"]})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return r.stdout.splitlines()
+
+    def test_dept_1_key_does_not_match_dept_10_but_matches_itself(self):
+        rows = ["10\tnode.exe\tnode C:\\Users\\u\\AppData\\Local\\cys\\cys-dept-dept-10\\x.js",
+                "11\tcysd.exe\tcysd \\\\.\\pipe\\cys-dept-dept-10",
+                "12\tbash.exe\tbash C:\\Users\\u\\.cys\\pack-dept-dept-10\\run.sh",
+                "20\tnode.exe\tnode C:\\Users\\u\\AppData\\Local\\cys\\cys-dept-dept-1\\x.js",
+                "21\tcysd.exe\t\"C:\\x\\cysd.exe\" --pipe \\\\.\\pipe\\cys-dept-dept-1",
+                "22\tbash.exe\tbash C:\\Users\\u\\.cys\\pack-dept-dept-1"]
+        found = self.scan(["cys-dept-dept-1", "C:/Users/u/.cys/pack-dept-dept-1"], rows)
+        self.assertEqual([line.split("\t")[0] for line in found], ["20", "21", "22"])
+
+    def test_dept_10_key_does_not_match_dept_1(self):
+        rows = ["20\tnode.exe\tnode C:\\a\\cys-dept-dept-1\\x.js"]
+        self.assertEqual(self.scan(["cys-dept-dept-10"], rows), [])
+
+
 class PidWriterTests(unittest.TestCase):
     def test_reg_set_pids_records_pid_and_start_and_warns_on_bad_identity(self):
         source = DEPT.read_text(encoding="utf-8")

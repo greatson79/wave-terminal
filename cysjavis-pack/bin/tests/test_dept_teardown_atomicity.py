@@ -19,6 +19,8 @@ import tempfile
 
 SELF = os.path.dirname(os.path.abspath(__file__))
 DEPT = os.path.join(SELF, "..", "cys-dept")
+# Windows runners put the WSL launcher (System32\bash.exe) first on PATH; CI passes Git bash here.
+BASH = os.environ.get("CYS_TEST_BASH", "bash")
 fails = []
 
 
@@ -62,7 +64,7 @@ def phoenix_log(tmp):
 
 
 def run(env, *args):
-    r = subprocess.run(["bash", DEPT] + list(args), capture_output=True, text=True,
+    r = subprocess.run([BASH, DEPT] + list(args), capture_output=True, text=True,
                        encoding="utf-8", env=env, timeout=60)
     return r.returncode, r.stdout + r.stderr
 

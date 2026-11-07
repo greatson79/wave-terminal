@@ -198,5 +198,14 @@ class UpdateVerifyInstalledApp(unittest.TestCase):
         self.assertTrue(forwarder and all("Test-Path" in l and "throw" in l for l in forwarder), forwarder)
 
 
+class TauriSidecarPackageName(unittest.TestCase):
+    """tauri-build refuses a sidecar whose name equals the src-tauri Cargo package name (CI run 42419276602)."""
+    def test_no_external_bin_shares_the_app_package_name(self):
+        package = re.search(r'^\[package\]\s*\nname = "([^"]+)"', read("src-tauri/Cargo.toml"), re.M).group(1)
+        sidecars = [p.rsplit("/", 1)[-1] for p in json.loads(read("src-tauri/tauri.conf.json"))["bundle"]["externalBin"]]
+        self.assertNotIn(package, sidecars, f"package {package!r} collides with a sidecar")
+        self.assertEqual(package, "wave-app")
+
+
 if __name__ == "__main__":
     unittest.main()

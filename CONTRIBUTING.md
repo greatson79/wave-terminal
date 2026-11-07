@@ -14,7 +14,7 @@ Thanks for your interest in cys-terminal.
 
 ```bash
 cargo test --bin cysd            # daemon unit tests
-cargo check -p cys-app           # desktop app
+cargo check -p wave-app          # desktop app
 bash ui/build.sh                 # UI bundle
 bash scripts/secret-scan.sh --all  # secret/PII gate (fail-closed)
 sh scripts/version-check.sh      # version SOT consistency (release PRs only)

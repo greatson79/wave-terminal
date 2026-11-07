@@ -1,5 +1,5 @@
 [package]
-name = "cys-app"
+name = "wave-app"
 autobins = false
 default-run = "wave-app"
 version = "0.3.2"

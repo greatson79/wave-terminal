@@ -8,7 +8,7 @@ name: Windows 0.3.2 proof (dept sidebar + teardown + lib tests)
 on:
   push:
     branches: [release/0.3.2-proof]
-    paths: ['.github/proof-inputs-032.json', '.github/workflows/win-032-proof.yml', 'cysjavis-pack/bin/tests/test_dept_paths_hotfix.py', 'cysjavis-pack/bin/tests/test_dept_stop_hotfix.py', 'cysjavis-pack/bin/tests/test_dept_teardown_atomicity.py']
+    paths: ['.github/proof-inputs-032.json', '.github/workflows/win-032-proof.yml', 'cysjavis-pack/bin/tests/test_dept_paths_hotfix.py', 'cysjavis-pack/bin/tests/test_dept_stop_hotfix.py', 'cysjavis-pack/bin/tests/test_dept_teardown_atomicity.py', 'cysjavis-pack/bin/tests/test_dept_crashed_windows.py']
   workflow_dispatch:
     inputs:
       build_run_id:
@@ -58,7 +58,7 @@ jobs:
           if not re.fullmatch(r"\d+\.\d+\.\d+", ver): sys.exit("expected_version must be x.y.z")
           head = os.environ["GITHUB_SHA"]
           subprocess.run(["git", "cat-file", "-e", sha + "^{commit}"], check=True)
-          allowed = {".github/proof-inputs-032.json", ".github/workflows/win-032-proof.yml", "cysjavis-pack/bin/tests/test_dept_paths_hotfix.py", "cysjavis-pack/bin/tests/test_dept_stop_hotfix.py", "cysjavis-pack/bin/tests/test_dept_teardown_atomicity.py"}  # last two = test-only fixture fixes
+          allowed = {".github/proof-inputs-032.json", ".github/workflows/win-032-proof.yml", "cysjavis-pack/bin/tests/test_dept_paths_hotfix.py", "cysjavis-pack/bin/tests/test_dept_stop_hotfix.py", "cysjavis-pack/bin/tests/test_dept_teardown_atomicity.py", "cysjavis-pack/bin/tests/test_dept_crashed_windows.py"}  # last three = test-only fixture fixes
           changed = set(subprocess.run(["git", "diff", "--name-only", sha, head], check=True, capture_output=True, text=True).stdout.split())
           extra = changed - allowed
           if extra: sys.exit("Run commit differs from the built app commit beyond the proof harness: %s" % sorted(extra))

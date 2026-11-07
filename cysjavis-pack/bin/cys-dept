@@ -524,7 +524,7 @@ a=d.get('accounts',{}).get(acct)
 if not a: sys.exit(2)
 print(os.path.expandvars(a))
 PY
-)" && [ -n "$b" ] && { echo "$b"; return 0; }
+)" && b="${b%$'\r'}" && [ -n "$b" ] && { echo "$b"; return 0; }
   fi
   [ -n "${HOME:-}" ] || return 1            # 규약 fallback도 불가 → fail-closed 신호
   echo "$HOME/.cys/claude-$acct"
@@ -607,6 +607,7 @@ for s in d.get("surfaces",[]):
     if s.get("role")=="master" and not s.get("exited"):
         print("yes" if s.get("agent") is not None else "no"); sys.exit(0)
 sys.exit(3)' 2>/dev/null) || true
+  has_agent="${has_agent%$'\r'}"
   if [ "$has_agent" = "yes" ]; then
     env -u CYS_SOCKET "$CYS" reinject --role master >/dev/null 2>&1 \
       && echo "[cys-dept] 원본 master 라이브 재주입($why) 완료" >&2 \
@@ -776,6 +777,7 @@ try:
 finally: _ulk(lf)
 PY
 ) || exit $?   # ★cap 거부(exit 8)·예약 실패 코드 그대로 전파
+    name="${name%$'\r'}"
     [ -n "$name" ] || { echo "[cys-dept] allocate: 번호 발급 실패" >&2; exit 1; }
     trap 'reg_remove "$name" 2>/dev/null || true' EXIT   # 예약 후 비정상종료=예약 회수(SIGKILL 제외)
     sock="$(dept_sock "$name")"; pack="$(dept_pack "$name")"
@@ -915,6 +917,7 @@ try:
 finally: _ulk(lf)
 PY
 ) || exit $?   # ★cap 거부(exit 8) 등 예약 실패 코드 그대로 전파
+    res="${res//$'\r'/}"
     verb="${res%% *}"; name="${res#* }"
     [ -n "$name" ] || { echo "[cys-dept] create: 예약 실패" >&2; exit 1; }
     sock="$(dept_sock "$name")"; pack="$(dept_pack "$name")"
@@ -1003,6 +1006,7 @@ for n,e in d.items():
     if e.get('socket')==s: print(n); break
 PY
 )
+    name="${name%$'\r'}"
     if [ -z "$name" ]; then
       # ★D8 봉쇄(BOOTSTRAP_HARDENING WP-3): 역인덱스 실패(rename 레이스·레지스트리 손상) 시
       # 소켓 슬러그(cys-dept-<name>[.sock 부모] · unix/named pipe 공통)에서 name을 파생 —
@@ -1049,7 +1053,7 @@ PY
       exit 9
     fi
     # 살아있음이 확인됐으니 identify는 실 데몬에 연결(autostart 없음). 구 버전(검증 게이트)·pid(kill 대상) 취득.
-    oldver="$(CYS_NO_AUTOSTART=1 CYS_SOCKET="$sock" "$CYS" identify 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('version',''))" 2>/dev/null || true)"
+    oldver="$(CYS_NO_AUTOSTART=1 CYS_SOCKET="$sock" "$CYS" identify 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('version',''))" 2>/dev/null || true)"; oldver="${oldver%$'\r'}"
     IFS=$'\t' read -r pid started_at <<<"$(daemon_identity "$sock" 2>/dev/null || true)" || true; started_at="${started_at%$'\r'}"
     # 방어적 재확인(ping↔identify 사이 경합으로 pid 비면 중단 — 위와 동일 근거).
     if [ -z "${pid:-}" ]; then
@@ -1070,7 +1074,7 @@ PY
     # launch stdout은 로그로 흘리고, 아래서 새 버전을 확정 출력한다.
     # CYS_DEPT_ROTATE=1: launch의 dept_tombstone_remove를 no-op으로 — rotate=묘비 불변 계약(WP-3).
     CYS_DEPT_ROTATE=1 bash "$0" launch "$name" || { echo "[cys-dept] ERROR: $name rotate 재기동 실패" >&2; exit 1; }
-    newver="$(CYS_NO_AUTOSTART=1 CYS_SOCKET="$sock" "$CYS" identify 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('version',''))" 2>/dev/null || true)"
+    newver="$(CYS_NO_AUTOSTART=1 CYS_SOCKET="$sock" "$CYS" identify 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('version',''))" 2>/dev/null || true)"; newver="${newver%$'\r'}"
     # ★검증 게이트(지시3): Rust/UI 성공 판정·사람 로그 확인용 — 마지막 줄에 확정 출력.
     echo "rotated $name: v${oldver:-?}→v${newver:-?}"
     ;;
@@ -1104,6 +1108,7 @@ try:
 finally: _ulk(lf)
 PY
 ) || { echo "[cys-dept] reap: 스냅샷 실패" >&2; exit 1; }
+    snap="${snap//$'\r'/}"
     # 분류+집행(flock 밖·probe). reg_remove/down-sock는 각자 자체 flock·원자. 현재 셸 루프(카운터 보존).
     nd=0; ni=0; ns=0; nf=0
     while IFS=$'\t' read -r nm sk rat; do

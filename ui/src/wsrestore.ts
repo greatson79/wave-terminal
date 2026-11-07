@@ -85,6 +85,14 @@ export interface RenameSurfaceMap {
   map: Readonly<Record<string, number>>;
   /** Korean notice from the backend capture (fallback / custom-command seats); optional. */
   notice?: string | null;
+  /** true = unusable snapshot: no old→new map exists and the existing restore re-creates seats after the ack. */
+  fallback?: boolean;
+}
+
+// Fallback handover: every saved primary SID is from the old daemon generation, so detach them all.
+// Panels, groups and department sockets stay; restored seats are adopted once the restore reports completion.
+export function detachPrimarySurfaceIds<T extends SavedWorkspace>(workspaces: T[]): T[] {
+  return workspaces.map((ws) => (ws.socket !== undefined || ws.tree === null ? ws : { ...ws, tree: null }));
 }
 
 // The caller persists this document before acknowledging the replayable backend map.
@@ -99,8 +107,16 @@ export function prepareRenameLayout<T extends { workspaces: SavedWorkspace[]; re
     if (Object.keys(handover.map).length) throw new Error("업데이트 레이아웃 확인 번호가 없습니다. 저장된 레이아웃을 유지합니다.");
     return saved;
   }
+  if (handover.fallback !== undefined && typeof handover.fallback !== "boolean") {
+    throw new Error("업데이트 복원 방식 정보가 올바르지 않습니다. 저장된 레이아웃을 유지합니다.");
+  }
+  if (handover.fallback && Object.keys(handover.map).length) {
+    throw new Error("기존 복원 방식인데 좌석 대응표가 있습니다. 저장된 레이아웃을 유지합니다.");
+  }
   if (saved.renameRevision === handover.revision) return saved;
-  return { ...saved, workspaces: remapPrimarySurfaceIds(saved.workspaces, handover.map), renameRevision: handover.revision };
+  const workspaces = handover.fallback ? detachPrimarySurfaceIds(saved.workspaces)
+    : remapPrimarySurfaceIds(saved.workspaces, handover.map);
+  return { ...saved, workspaces, renameRevision: handover.revision };
 }
 
 export interface RenameStartup<T> {

@@ -29,7 +29,53 @@ async fn take_rename_surface_map(app: AppHandle) -> Result<Value, String> {
     if record["phase"] != "awaiting-layout" { return Err("업데이트 좌석 복원이 아직 끝나지 않았습니다.".into()); }
     rename_migration::validate_layout_owner(&marker,user_settings_file(&app)?).await?;
     if cys::rename_handover::read_marker()?.as_ref()!=Some(&marker) { return Err("배치 저장 기록이 확인 중 바뀌어 기존 기록을 유지합니다.".into()); }
-    Ok(json!({"revision":record["revision"],"map":record["surface_map"],"notice":record["snapshot"]["notice"]}))
+    Ok(rename_handover_payload(record))
+}
+
+/// Carry 1 R2: `fallback` tells the UI that no old→new map exists, so it detaches every old primary SID.
+fn rename_handover_payload(record: &Value) -> Value {
+    json!({"revision":record["revision"],"map":record["surface_map"],"notice":record["snapshot"]["notice"],
+        "fallback":record["snapshot"]["restore_fallback"] == true})
+}
+
+/// Carry 1 (C4d): after a fallback handover's layout ack has cleared the marker, the EXISTING restore runs.
+fn fallback_restore_after_ack(record: &Value, marker_now: &Result<Option<Value>, String>) -> bool {
+    record["snapshot"]["restore_fallback"] == true && matches!(marker_now, Ok(None))
+}
+
+#[cfg(test)]
+mod fallback_restore_after_ack_tests {
+    use serde_json::json;
+    #[test]
+    fn fallback_restore_runs_existing_restore_only_after_ack() {
+        let fallback = json!({"phase":"awaiting-layout","snapshot":{"restore_fallback":true,"notice":"안내"}});
+        assert!(super::fallback_restore_after_ack(&fallback, &Ok(None)), "marker gone + fallback → existing restore");
+        assert!(!super::fallback_restore_after_ack(&fallback, &Ok(Some(json!({"rename_handover":{}})))), "marker still present");
+        assert!(!super::fallback_restore_after_ack(&fallback, &Err("unreadable".into())), "unknown marker state");
+        let normal = json!({"phase":"awaiting-layout","snapshot":{"notice":null}});
+        assert!(!super::fallback_restore_after_ack(&normal, &Ok(None)), "Native already restored the seats");
+        let other = json!({"phase":"awaiting-layout","snapshot":{"restore_fallback":"yes"}});
+        assert!(!super::fallback_restore_after_ack(&other, &Ok(None)), "only an explicit true");
+    }
+
+    #[test]
+    fn empty_legacy_marker_after_ack_routes_to_existing_restore() {
+        // write_marker(None) leaves the empty legacy marker; the existing restore must Apply even at the current stamp.
+        let current = env!("CARGO_PKG_VERSION");
+        assert!(matches!(super::decide_pending_update(true, Some(current), current, true), super::PendingUpdatePlan::Apply));
+    }
+
+    #[test]
+    fn handover_payload_flags_only_an_explicit_fallback() {
+        let fallback = json!({"revision":"r1","surface_map":{},"snapshot":{"restore_fallback":true,"notice":"안내"}});
+        assert_eq!(super::rename_handover_payload(&fallback),
+            json!({"revision":"r1","map":{},"notice":"안내","fallback":true}));
+        let normal = json!({"revision":"r2","surface_map":{"1":11},"snapshot":{"notice":null}});
+        assert_eq!(super::rename_handover_payload(&normal)["fallback"], false);
+        assert_eq!(super::rename_handover_payload(&normal)["map"], json!({"1":11}));
+        let other = json!({"revision":"r3","surface_map":{},"snapshot":{"restore_fallback":"yes"}});
+        assert_eq!(super::rename_handover_payload(&other)["fallback"], false);
+    }
 }
 
 #[tauri::command]
@@ -46,7 +92,21 @@ async fn ack_rename_surface_map(app: AppHandle, revision: String) -> Result<(), 
             // Consume only after the frontend's durable layout write (this ack); keep the snapshot file.
             // A failed consume keeps the marker for retry instead of clearing the only receipt.
             rename_migration::consume_layout_snapshot_with(record,|r|cys::update_snapshot::mark_consumed(r))?;
-            cys::rename_handover::write_marker(None)
+            cys::rename_handover::write_marker(None)?;
+            // Carry 1: once per ack (a later ack finds no marker), only for a fallback handover whose marker is gone.
+            if fallback_restore_after_ack(record, &cys::rename_handover::read_marker()) {
+                let app2 = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    // Existing restore (init-pack + org restore). Its restore-progress done/error is the UI's
+                    // completion signal; if the restore never started, still end with an error so the UI is not left waiting.
+                    let started = tokio::task::spawn_blocking({ let app3 = app2.clone(); move || maybe_apply_pending_update(&app3) }).await;
+                    if !matches!(started, Ok(true)) {
+                        let _ = app2.emit("restore-progress", json!({"phase":"error",
+                            "detail":"기존 좌석 복원을 시작하지 못했습니다. 앱은 계속 사용할 수 있으며 다시 열면 복원을 재시도합니다."}));
+                    }
+                });
+            }
+            Ok(())
         }
         Some(_) => Err("배치 저장 기록이 확인 중 바뀌어 복원 기록을 유지합니다.".into()),
     }
@@ -1062,11 +1122,12 @@ fn take_update_preserved_notices(state: State<PreservedNotices>) -> Vec<String> 
 ///  ② 자동복귀 — 팩 반영 성공 시에만 조직 전체(본부+등록 부서) 노드를 복원(T2 spawn_org_restore).
 ///     init-pack 실패 시 마커·스탬프를 보존하고 복원을 보류해, 노드가 구 디렉티브로 조용히 각성하는
 ///     침묵 실패를 막는다(적대검증 fatal). restore는 멱등(run_restore).
-fn maybe_apply_pending_update(app: &AppHandle) {
+/// Returns true only when the org restore was started (its restore-progress events follow).
+fn maybe_apply_pending_update(app: &AppHandle) -> bool {
     // The GUI must durably remap its saved layout before acknowledging this completed handover.
     match cys::rename_handover::read_marker() {
-        Ok(Some(_)) => return,
-        Err(error) => { let _ = app.emit("update-error", error); return; },
+        Ok(Some(_)) => return false,
+        Err(error) => { let _ = app.emit("update-error", error); return false; },
         Ok(None) => (),
     }
     let marker = pending_restore_path();
@@ -1079,11 +1140,11 @@ fn maybe_apply_pending_update(app: &AppHandle) {
     // 기존 설치 증거 — 디스크 팩 버전 파일(check_pack_update:1711·install_pack_update:1895와 동일 SOT).
     let prior_state = cys::pack::pack_dir().join(".pack-version").exists();
     match decide_pending_update(marker_exists, stamp.as_deref(), current, prior_state) {
-        PendingUpdatePlan::Skip => return,
+        PendingUpdatePlan::Skip => return false,
         PendingUpdatePlan::RecordStampOnly => {
             // 최초 설치 — 복원할 topology가 없다. 스탬프만 기록해 다음 재시작을 정상상태로 만든다.
             let _ = std::fs::write(&stamp_path, current);
-            return;
+            return false;
         }
         PendingUpdatePlan::Apply => {}
     }
@@ -1099,7 +1160,7 @@ fn maybe_apply_pending_update(app: &AppHandle) {
             "update-error",
             "새 팩 반영(init-pack) 실패 — 노드 복원 보류, 다음 재시작에 재시도",
         );
-        return;
+        return false;
     }
     if let Ok(out) = pack_output {
         emit_pack_preserved_notices(app, &String::from_utf8_lossy(&out.stdout));
@@ -1115,6 +1176,7 @@ fn maybe_apply_pending_update(app: &AppHandle) {
     let _ = std::fs::remove_file(&marker);
     let _ = std::fs::write(&stamp_path, current);
     spawn_org_restore(app.clone());
+    true
 }
 
 /// (T2) `cys restore --include-master`를 사이드카로 1회 실행한다. socket=Some이면 그 부서 소켓

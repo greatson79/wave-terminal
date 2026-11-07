@@ -266,3 +266,49 @@ test("no handover or an already applied revision changes nothing and writes no b
   expect(result.backup).toBeUndefined();
   expect(result.notice).toBeUndefined();
 });
+
+// Carry 1 R2 (Zen carry1-r1 blocking): a fallback handover has no old→new map, so every saved primary SID belongs
+// to the old daemon generation. None may attach to a fresh seat that only shares the integer.
+test("fallback handover: old primary SID 3 never attaches to new seat 3 from another origin", () => {
+  const saved = {
+    workspaces: [
+      { id: 1, name: "ops", groupId: 7, tree: { type: "split" as const, dir: "row" as const,
+        a: { type: "pane" as const, sid: 3 }, b: { type: "pane" as const, sid: 4 } } },
+      { id: 2, name: "dept", socket: "dept", tree: { type: "pane" as const, sid: 3 } },
+    ],
+    groups: [{ id: 7, name: "team" }], active: 1, custom: { kept: true },
+  };
+  const before = JSON.stringify(saved);
+  const handover = { revision: "fb-1", map: {}, fallback: true };
+  const result = applyRenameLayoutSafely(saved, handover);
+  expect(result.handover).toBe(handover); // still acknowledged, so the backend can run the existing restore
+  expect(result.backup).toBe(before);     // the exact old layout stays recoverable
+  const primary = result.layout.workspaces[0];
+  expect(primary.tree).toBeNull();        // detached: no old integer left to match
+  expect(primary.groupId).toBe(7);        // panel and group stay
+  expect(result.layout.workspaces[1]).toBe(saved.workspaces[1]); // department socket is a different origin, untouched
+  expect(result.layout.groups).toBe(saved.groups);
+  expect(result.layout.custom).toEqual({ kept: true });
+  expect(result.layout.renameRevision).toBe("fb-1");
+  // The fresh daemon's seat 3 (a different origin) is not owned by any primary pane after the fallback.
+  const owners = result.layout.workspaces.filter((ws) => ws.socket === undefined && treeSids(ws.tree).includes(3));
+  expect(owners).toEqual([]);
+  // Replay of the same revision after a crash changes nothing more.
+  expect(prepareRenameLayout(result.layout, handover)).toBe(result.layout);
+});
+
+test("fallback handover with a map or a non-boolean flag is refused and keeps the saved layout", () => {
+  const saved = { workspaces: [{ id: 1, name: "ops", tree: { type: "pane" as const, sid: 3 } }] };
+  for (const bad of [{ revision: "fb-2", map: { "3": 9 }, fallback: true }, { revision: "fb-3", map: {}, fallback: "yes" }]) {
+    const result = applyRenameLayoutSafely(saved, bad as never);
+    expect(result.layout).toBe(saved);
+    expect(result.handover).toBeNull();
+    expect(result.notice).toContain("저장된 레이아웃을 유지");
+  }
+});
+
+test("a normal handover without the fallback flag keeps today's remap", () => {
+  const saved = { workspaces: [{ id: 1, name: "ops", tree: { type: "pane" as const, sid: 3 } }] };
+  const result = applyRenameLayoutSafely(saved, { revision: "n-1", map: { "3": 30 }, fallback: false });
+  expect(treeSids(result.layout.workspaces[0].tree)).toEqual([30]);
+});

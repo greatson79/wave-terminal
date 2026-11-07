@@ -260,6 +260,20 @@ fn zero_owner_capture(load:cys::update_snapshot::Load)->(Vec<Value>,Option<Value
     }
 }
 
+/// Zero-owner capture into the snapshot. Pure apart from the injected topology read.
+fn apply_zero_owner_capture(snapshot:&mut Value,load:cys::update_snapshot::Load,topology:impl FnOnce()->Option<Value>){
+    let (seats,layout,notice)=zero_owner_capture(load);
+    if !seats.is_empty() {
+        // Captured BEFORE any replacement owner is activated; unreadable source stays null (fail closed).
+        snapshot["topology"]=topology().unwrap_or(Value::Null);
+    }
+    snapshot["surfaces"]=json!(seats);
+    // Unusable snapshot (missing/corrupt/unverifiable): the layout ack hands restoration to the existing restore.
+    if layout.is_none() { snapshot["restore_fallback"]=json!(true); }
+    snapshot["layout_snapshot"]=layout.unwrap_or(Value::Null);
+    snapshot["notice"]=notice.map(Value::from).unwrap_or(Value::Null);
+}
+
 fn ready_agent(original:&Value,seat:&Value)->Result<Option<u64>,String>{
     if seat["role"]!=original["role"] || seat["agent"]!=original["agent"] || seat["exited"]!=false {
         return Err("복원할 실행 좌석의 역할과 에이전트 신원이 다릅니다.".into());
@@ -307,14 +321,9 @@ impl Backend for Native {
             }
             self.same_owner(owner).await?;
         } else {
-            let (seats,layout,notice)=zero_owner_capture(cys::update_snapshot::load(&self.socket));
-            if !seats.is_empty() {
-                // Captured BEFORE any replacement owner is activated; unreadable source stays null (fail closed).
-                snapshot["topology"]=state_dir_for(&self.socket).and_then(|d|topology_saved_from(&d)).unwrap_or(Value::Null);
-            }
-            snapshot["surfaces"]=json!(seats);
-            snapshot["layout_snapshot"]=layout.unwrap_or(Value::Null);
-            snapshot["notice"]=notice.map(Value::from).unwrap_or(Value::Null);
+            let socket=self.socket.clone();
+            apply_zero_owner_capture(&mut snapshot,cys::update_snapshot::load(&self.socket),
+                ||state_dir_for(&socket).and_then(|d|topology_saved_from(&d)));
         }
         Ok(snapshot)
     }
@@ -669,6 +678,33 @@ mod tests {
         for ((a,b,c,d,e,f),want) in rows {
             assert_eq!(rollback_plan(a,b,c,d,e,f),want,"{a} {b} {c} {d} {e} {f}");
         }
+    }
+    #[test]
+    fn zero_owner_fallback_marks_restore_fallback_and_keeps_notice(){
+        // Carry 1: an unusable snapshot must be routed to the EXISTING restore after the layout ack.
+        let mut fallback=json!({});
+        apply_zero_owner_capture(&mut fallback,cys::update_snapshot::Load::Fallback("업데이트 좌석 기록을 읽지 못했습니다.".into()),
+            ||panic!("no seats: topology is not read"));
+        assert_eq!(fallback["surfaces"],json!([]));
+        assert!(fallback["layout_snapshot"].is_null());
+        assert_eq!(fallback["notice"],"업데이트 좌석 기록을 읽지 못했습니다.");
+        assert_eq!(fallback["restore_fallback"],true);
+
+        let ident=cys::rename_handover::ProcessIdentity{pid:1,start_time:1,executable:"/x".into()};
+        let reference=cys::update_snapshot::Reference{path:"/x".into(),id:"0".repeat(32),digest:"0".repeat(64)};
+        let mut corrupt=json!({});   // Ready file whose seat list fails the metadata-only check
+        apply_zero_owner_capture(&mut corrupt,cys::update_snapshot::Load::Ready(cys::update_snapshot::Pending{
+            reference:reference.clone(),daemon:ident.clone(),seats:vec![json!("not-a-seat-object")],drain_status:None}),||None);
+        assert_eq!(corrupt["surfaces"],json!([]));
+        assert_eq!(corrupt["restore_fallback"],true);
+        assert!(corrupt["notice"].as_str().is_some_and(|n|!n.is_empty()));
+
+        let mut ready=json!({});
+        apply_zero_owner_capture(&mut ready,cys::update_snapshot::Load::Ready(cys::update_snapshot::Pending{
+            reference,daemon:ident,seats:vec![seat()],drain_status:Some(0)}),||Some(json!({"saved":[]})));
+        assert!(ready.get("restore_fallback").is_none(),"usable snapshot: Native restores, no fallback");
+        assert_eq!(ready["topology"],json!({"saved":[]}));
+        assert_eq!(ready["surfaces"].as_array().map(Vec::len),Some(1));
     }
     #[test]
     fn restart_with_rollback_receipt_routes_to_recovery_never_forward_activation(){

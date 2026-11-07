@@ -4845,9 +4845,11 @@ async function start() {
       if (p.hq_ok === false) toast("health", "⚠ 본부 복원 실패 포함", `본부 노드 복원 실패 · 부서 성공 ${ok} · 실패 ${fail} — 상태를 점검하세요.`);
       else if (fail > 0) toast("health", "⚠ 직원 복귀 일부 실패", `부서 복원 성공 ${ok} · 실패 ${fail} — 상태를 점검하세요.`);
       else toast("watchdog", "✅ 직원 복귀 완료", `노드 세션 복원 완료 (부서 ${ok}).`);
+      void refreshPaneTitles(); // Carry 1 R2: bind restored seats once the restore has finished.
     } else if (p.phase === "error") {
       dismissToast("restore");
       toast("health", "복원 실패", p.detail ?? "노드 복원 실행에 실패했습니다.");
+      void refreshPaneTitles(); // Seats restored before the failure are still adopted.
     }
   });
 

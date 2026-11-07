@@ -155,7 +155,7 @@ class PidWriterTests(unittest.TestCase):
             with self.subTest(identity=identity), tempfile.TemporaryDirectory() as tmp:
                 reg = Path(tmp) / "depts.json"
                 reg.write_text(json.dumps({"depts": {"dept-1": {"socket": "s"}}}))
-                program = ("REG=" + str(reg) + "\nnative_path(){ printf '%s\\n' \"$1\"; }\nreg_init(){ :; }\n"
+                program = ("REG='" + reg.as_posix() + "'\nnative_path(){ printf '%s\\n' \"$1\"; }\nreg_init(){ :; }\n"
                            "daemon_identity(){ printf '%s\\r\\n' '" + identity + "'; }\n") + fn + "\nreg_set_pids dept-1 sock\n"
                 r = subprocess.run([BASH, "-c", program], capture_output=True, text=True, encoding="utf-8", timeout=10)
                 self.assertEqual(r.returncode, 0, r.stderr)

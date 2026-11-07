@@ -835,7 +835,7 @@ mod tests {
     #[test]
     fn injected_root_refuses_unset_and_system_locations_before_io() {
         assert!(validated_sandbox_root(None).is_err());
-        for path in ["", ".", "/Applications", "/usr/local/bin", "/opt/homebrew/bin", "/Users/fixture/.cys"] {
+        for path in ["", ".", "/Applications", "/usr/local/bin", "/opt/homebrew/bin", "/Users/user/.cys"] {
             assert!(validated_sandbox_root(Some(path.into())).is_err());
         }
     }

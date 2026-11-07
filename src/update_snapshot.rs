@@ -378,7 +378,7 @@ mod tests {
                 "model":null,"cmd":["/bin/zsh"],"env":{"API_KEY":"MUST-NOT-PERSIST"},
                 "claude_config_dir":"MUST-NOT-PERSIST","session":"MUST-NOT-PERSIST",
                 "launch_token":"MUST-NOT-PERSIST","transcript":"MUST-NOT-PERSIST",
-                "scrollback":"MUST-NOT-PERSIST","usage":{"secret":"MUST-NOT-PERSIST"}}]})
+                "scrollback":"MUST-NOT-PERSIST","usage":{"tokens":"MUST-NOT-PERSIST"}}]})
         }
     }
     impl Drop for Fixture { fn drop(&mut self) { std::fs::remove_dir_all(&self.0).unwrap(); } }
@@ -386,7 +386,7 @@ mod tests {
     #[test]
     fn root_refuses_unset_and_protected_locations_before_io() {
         assert!(test_root(None).is_err());
-        for path in [".","/Applications","/usr/local/bin","/opt/homebrew/bin","/Users/example/.cys"] {
+        for path in [".","/Applications","/usr/local/bin","/opt/homebrew/bin","/Users/user/.cys"] {
             assert!(test_root(Some(path.into())).is_err());
         }
     }

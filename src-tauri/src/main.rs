@@ -2024,9 +2024,9 @@ mod dept_name_from_socket_tests {
     #[test]
     fn dept_name_comes_only_from_the_anchored_department_endpoint() {
         // Q3: a primary socket under a user folder must never name a department (wrong tombstone target).
-        assert_eq!(super::dept_name_from_socket("/Users/cys-dept-kim/.local/state/cys/cys.sock"), None);
-        assert_eq!(super::dept_name_from_socket("/Users/wave-dept-kim/.local/state/cys/cys.sock"), None);
-        assert_eq!(super::dept_name_from_socket("/Users/kim/.local/state/cys-dept-dev/cys.sock").as_deref(), Some("dev"));
+        assert_eq!(super::dept_name_from_socket("/home/cys-dept-kim/.local/state/cys/cys.sock"), None);
+        assert_eq!(super::dept_name_from_socket("/home/wave-dept-kim/.local/state/cys/cys.sock"), None);
+        assert_eq!(super::dept_name_from_socket("/Users/user/.local/state/cys-dept-dev/cys.sock").as_deref(), Some("dev"));
         assert_eq!(super::dept_name_from_socket(r"\\.\pipe\cys-dept-3").as_deref(), Some("3"));
         assert_eq!(super::dept_name_from_socket("/tmp/x/cys-dept-dept-3.sock").as_deref(), Some("dept-3"));
         assert_eq!(super::dept_name_from_socket(r"\\.\pipe\cys"), None);

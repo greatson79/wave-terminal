@@ -115,8 +115,13 @@ class CrashedDeptTests(unittest.TestCase):
 
 
 class ScanBoundaryTests(unittest.TestCase):
-    def scan(self, keys, rows):
-        """Run the real dept_scan_procs python with a fake powershell.exe that prints CIM-style rows."""
+    # '@@SELF@@' in a row becomes the scanner's own pid (the stub's parent); the scanner's parent is this test process.
+    PRINT_ROWS = ('import sys,os;sys.stdout.write(open(sys.argv[1],encoding="utf-8").read()'
+                  '.replace("@@SELF@@",str(os.getppid())))')
+
+    def scan(self, keys, rows, stub=None):
+        """Run the real dept_scan_procs python with a fake powershell.exe that prints CIM-style rows
+        (pid<TAB>ppid<TAB>name<TAB>cmdline)."""
         source = DEPT.read_text(encoding="utf-8")
         body = re.search(r"dept_scan_procs\(\)\{.*?<<'PY_SCAN'\n(.*?)^PY_SCAN\n", source, re.S | re.M).group(1)
         with tempfile.TemporaryDirectory() as tmp:
@@ -127,24 +132,45 @@ class ScanBoundaryTests(unittest.TestCase):
             rows_file.write_bytes("".join(r + "\n" for r in rows).encode("utf-8"))
             literal = "['powershell.exe','-NoProfile','-NonInteractive','-Command',ps]"
             self.assertIn(literal, body)
-            body = body.replace(literal, "[sys.executable,'-c','import sys;sys.stdout.write(open(sys.argv[1],encoding=\"utf-8\").read())',%r]" % str(rows_file))
+            cmd = stub or [sys.executable, "-c", self.PRINT_ROWS, str(rows_file)]
+            body = body.replace(literal, repr(cmd))
             r = subprocess.run([sys.executable, "-c", body] + keys, capture_output=True, text=True, encoding="utf-8", timeout=20)
             self.assertEqual(r.returncode, 0, r.stderr)
             return r.stdout.splitlines()
 
     def test_dept_1_key_does_not_match_dept_10_but_matches_itself(self):
-        rows = ["10\tnode.exe\tnode C:\\Users\\user\\AppData\\Local\\cys\\cys-dept-dept-10\\x.js",
-                "11\tcysd.exe\tcysd \\\\.\\pipe\\cys-dept-dept-10",
-                "12\tbash.exe\tbash C:\\Users\\user\\.cys\\pack-dept-dept-10\\run.sh",
-                "20\tnode.exe\tnode C:\\Users\\user\\AppData\\Local\\cys\\cys-dept-dept-1\\x.js",
-                "21\tcysd.exe\t\"C:\\x\\cysd.exe\" --pipe \\\\.\\pipe\\cys-dept-dept-1",
-                "22\tbash.exe\tbash C:\\Users\\user\\.cys\\pack-dept-dept-1"]
+        rows = ["10\t1\tnode.exe\tnode C:\\Users\\user\\AppData\\Local\\cys\\cys-dept-dept-10\\x.js",
+                "11\t1\tcysd.exe\tcysd \\\\.\\pipe\\cys-dept-dept-10",
+                "12\t1\tbash.exe\tbash C:\\Users\\user\\.cys\\pack-dept-dept-10\\run.sh",
+                "20\t1\tnode.exe\tnode C:\\Users\\user\\AppData\\Local\\cys\\cys-dept-dept-1\\x.js",
+                "21\t1\tcysd.exe\t\"C:\\x\\cysd.exe\" --pipe \\\\.\\pipe\\cys-dept-dept-1",
+                "22\t1\tbash.exe\tbash C:\\Users\\user\\.cys\\pack-dept-dept-1"]
         found = self.scan(["cys-dept-dept-1", "C:/Users/user/.cys/pack-dept-dept-1"], rows)
         self.assertEqual([line.split("\t")[0] for line in found], ["20", "21", "22"])
 
     def test_dept_10_key_does_not_match_dept_1(self):
-        rows = ["20\tnode.exe\tnode C:\\a\\cys-dept-dept-1\\x.js"]
+        rows = ["20\t1\tnode.exe\tnode C:\\a\\cys-dept-dept-1\\x.js"]
         self.assertEqual(self.scan(["cys-dept-dept-10"], rows), [])
+
+    def test_scanner_and_its_ancestors_are_not_reported_but_a_foreign_dept_process_is(self):
+        keys = ["cys-dept-dept-3", "C:/Users/user/.cys/pack-dept-dept-3"]
+        carried = "cys-dept-dept-3 C:/Users/user/.cys/pack-dept-dept-3"
+        rows = ["@@SELF@@\t%d\tpython.exe\tpython.exe - %s" % (os.getpid(), carried),
+                "%d\t4000\tpython.exe\tpython.exe test_runner %s" % (os.getpid(), carried),
+                "4000\t1\tbash.exe\tbash launcher %s" % carried]
+        self.assertEqual(self.scan(keys, rows), [])
+        foreign = rows + ["9999\t1\tnode.exe\tnode C:\\Users\\user\\AppData\\Local\\cys\\cys-dept-dept-3\\x.js"]
+        self.assertEqual([line.split("\t")[0] for line in self.scan(keys, foreign)], ["9999"])
+
+    def test_unknown_scan_reports_return_code_and_masked_first_stderr_line(self):
+        stub = [sys.executable, "-c",
+                "import sys;sys.stderr.write('\\nCIM failed at C:\\\\secret\\\\dir for cys-dept-dept-3\\nsecond\\n');sys.exit(3)"]
+        (line,) = self.scan(["cys-dept-dept-3"], [], stub=stub)
+        self.assertTrue(line.startswith("unknown\t"), line)
+        self.assertIn("rc=3", line)
+        self.assertIn("CIM failed", line)
+        for leaked in ("secret", "C:", "cys-dept-dept-3", "second"):
+            self.assertNotIn(leaked, line)
 
 
 class PidWriterTests(unittest.TestCase):

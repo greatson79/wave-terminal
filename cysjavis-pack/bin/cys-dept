@@ -323,14 +323,20 @@ class WindowsProcesses:
 
     def open(self, pid):
         handle = self.kernel.OpenProcess(0x100000 | 0x1000, False, pid)
-        if not handle:
+        for _ in range(8):
+            if handle:
+                break
             code = ctypes.get_last_error()
             if code in (87, 1168):
                 return None
-            # Any other error (e.g. 5 while a tree member is exiting): re-check once against a fresh listing.
-            # Absent from the listing = it has exited; still listed = fail closed, never a blanket ignore.
+            # Any other error (e.g. 5 while a tree member is exiting): re-check against a fresh listing.
+            # Absent from the listing = it has exited. Still listed = it may be mid-exit, so retry for ~2 s;
+            # a process that stays listed and denied fails closed with the code, never a blanket ignore.
             if pid not in {row[0] for row in self.rows()[0]}:
                 return None
+            time.sleep(0.25)
+            handle = self.kernel.OpenProcess(0x100000 | 0x1000, False, pid)
+        if not handle:
             raise StopFailure("부서 프로세스 권한을 확인하지 못했습니다. (Win32 오류 %d)" % code)
         values = [wintypes.FILETIME() for _ in range(4)]
         if not self.kernel.GetProcessTimes(handle, *(ctypes.byref(v) for v in values)):

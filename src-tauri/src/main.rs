@@ -2910,6 +2910,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     #[test]
+    #[cfg(target_os = "macos")]
     #[ignore = "run through scripts/tests/test_bundle_python_seal.py with a copied runtime"]
     fn bundled_python_launch_probe() {
         let python = std::env::var_os("WAVE_TEST_PYTHON").expect("copied bundled Python required");

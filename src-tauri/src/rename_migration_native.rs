@@ -707,6 +707,16 @@ mod tests {
         assert_eq!(ready["surfaces"].as_array().map(Vec::len),Some(1));
     }
     #[test]
+    fn recorded_drain_failure_reaches_the_gui_as_notice_plus_fallback(){
+        // load() returns DRAIN_FAILED_NOTICE when drain recorded a snapshot failure; the GUI gets that notice and the carry-1 fallback.
+        let mut snapshot=json!({});
+        apply_zero_owner_capture(&mut snapshot,cys::update_snapshot::Load::Fallback(cys::update_snapshot::DRAIN_FAILED_NOTICE.into()),
+            ||panic!("no seats: topology is not read"));
+        assert_eq!(snapshot["notice"],"창 배치를 되살리지 못해 기본 배치로 열었습니다.");
+        assert_eq!(snapshot["restore_fallback"],true);
+        assert!(snapshot["layout_snapshot"].is_null());
+    }
+    #[test]
     fn restart_with_rollback_receipt_routes_to_recovery_never_forward_activation(){
         use ResumePlan::*;
         let safe=json!({"old_registration_restored":true,"links_rolled_back":true});

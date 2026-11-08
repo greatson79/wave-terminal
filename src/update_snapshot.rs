@@ -63,6 +63,49 @@ pub fn mark_consumed(reference: &Reference) -> Result<(), String> {
     mark_consumed_at(&default_dir()?, reference)
 }
 
+/// Shown on the first GUI start after a drain whose layout snapshot could not be recorded.
+pub const DRAIN_FAILED_NOTICE: &str = "창 배치를 되살리지 못해 기본 배치로 열었습니다.";
+const FAILED_NAME: &str = ".pending-rename-layout.failed";
+
+/// Plain-drain snapshot start. Never prints and never fails the caller: a failure is recorded as a marker.
+pub fn drain_begin(socket: &Path, capture: impl FnOnce() -> Result<(ProcessIdentity, Value), String>) -> Option<Reference> {
+    drain_begin_at(&default_dir().ok()?, socket, capture)
+}
+/// Plain-drain snapshot finish. Never prints and never changes the drain status.
+pub fn drain_finish(socket: &Path, reference: Option<Reference>, status: i32) {
+    let Some(reference) = reference else { return }; // begin already recorded its failure
+    if let Ok(dir) = default_dir() { drain_finish_at(&dir, socket, Some(reference), status) }
+}
+fn drain_begin_at(dir: &Path, socket: &Path, capture: impl FnOnce() -> Result<(ProcessIdentity, Value), String>) -> Option<Reference> {
+    let result = capture().and_then(|(daemon, surfaces)| write_at(dir, socket, &daemon, &surfaces));
+    if result.is_err() { let _ = record_failure_at(dir, socket, "begin"); }
+    result.ok()
+}
+fn drain_finish_at(dir: &Path, socket: &Path, reference: Option<Reference>, status: i32) {
+    let Some(reference) = reference else { return };
+    if finish_drain_at(dir, &reference, status).is_err() { let _ = record_failure_at(dir, socket, "finish"); }
+}
+/// Metadata-only failure marker (schema, socket, stage, time); the snapshot file itself is never touched.
+fn record_failure_at(dir: &Path, socket: &Path, stage: &str) -> Result<(), String> {
+    ensure_directory(dir)?;
+    let path = dir.join(FAILED_NAME);
+    let previous = raw_bytes(dir, &path)?;
+    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let bytes = serde_json::to_vec(&serde_json::json!({"schema":1,"socket":socket,"stage":stage,"at":at}))
+        .map_err(|_| "실패 표식을 만들지 못했습니다.")?;
+    publish_bytes(dir, &path, &bytes, previous.as_deref())
+}
+/// A recorded failure for this socket, or an unreadable marker, forces the fallback (fail closed).
+fn recorded_failure(dir: &Path, socket: &Path) -> bool {
+    match raw_bytes(dir, &dir.join(FAILED_NAME)) {
+        Ok(None) => false,
+        Ok(Some(bytes)) => serde_json::from_slice::<Value>(&bytes).ok()
+            .and_then(|v| v["socket"].as_str().map(PathBuf::from))
+            .is_none_or(|marked| marked == socket),
+        Err(_) => true,
+    }
+}
+
 fn write_at(dir: &Path, socket: &Path, daemon: &ProcessIdentity, surfaces: &Value) -> Result<Reference, String> {
     let mut envelope = Envelope {
         schema:1, id:random_id()?, socket:socket.into(), daemon:daemon.clone(),
@@ -84,6 +127,7 @@ fn write_at(dir: &Path, socket: &Path, daemon: &ProcessIdentity, surfaces: &Valu
         }
     };
     publish(dir, &path, &envelope, previous.as_ref().map(|(_, bytes)| bytes.as_slice()))?;
+    let _ = std::fs::remove_file(dir.join(FAILED_NAME)); // a fresh snapshot supersedes an earlier recorded failure
     Ok(reference(&path, &envelope))
 }
 
@@ -97,6 +141,7 @@ fn finish_drain_at(dir: &Path, reference: &Reference, status: i32) -> Result<Ref
 }
 
 fn load_at(dir: &Path, socket: &Path) -> Load {
+    if recorded_failure(dir, socket) { return Load::Fallback(DRAIN_FAILED_NOTICE.into()); }
     let mut notice = "업데이트 배치 기록이 없어 기존 복원을 사용합니다.";
     for path in [dir.join(format!("{FILE_NAME}.new")), dir.join(FILE_NAME)] {
         match read_owned(dir, &path) {
@@ -342,6 +387,12 @@ fn read_owned(dir: &Path, path: &Path) -> Result<Option<(Envelope, Vec<u8>)>, St
 fn publish(dir: &Path, path: &Path, envelope: &Envelope, previous: Option<&[u8]>) -> Result<(), String> {
     store::publish(dir, path, &encoding(envelope)?, previous)
 }
+#[cfg(unix)]
+fn raw_bytes(dir: &Path, path: &Path) -> Result<Option<Vec<u8>>, String> { store::raw_read(dir, path) }
+#[cfg(unix)]
+fn publish_bytes(dir: &Path, path: &Path, bytes: &[u8], previous: Option<&[u8]>) -> Result<(), String> {
+    store::publish(dir, path, bytes, previous)
+}
 #[cfg(all(test, unix))]
 use store::test_root;
 
@@ -351,6 +402,10 @@ fn random_id() -> Result<String, String> { Err(NO_STORAGE.into()) }
 fn ensure_directory(_dir: &Path) -> Result<(), String> { Err(NO_STORAGE.into()) }
 #[cfg(not(unix))]
 fn read_owned(_dir: &Path, _path: &Path) -> Result<Option<(Envelope, Vec<u8>)>, String> { Err(NO_STORAGE.into()) }
+#[cfg(not(unix))]
+fn raw_bytes(_dir: &Path, _path: &Path) -> Result<Option<Vec<u8>>, String> { Ok(None) } // no marker store: load keeps its existing notice
+#[cfg(not(unix))]
+fn publish_bytes(_dir: &Path, _path: &Path, _bytes: &[u8], _previous: Option<&[u8]>) -> Result<(), String> { Err(NO_STORAGE.into()) }
 #[cfg(not(unix))]
 fn publish(_dir: &Path, _path: &Path, _envelope: &Envelope, _previous: Option<&[u8]>) -> Result<(), String> { Err(NO_STORAGE.into()) }
 
@@ -364,8 +419,11 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             let root = test_root(std::env::var_os("WAVE_TEST_ROOT")).expect("explicit private test root required");
-            let directory = root.join(format!("update-snapshot-{}-{}", std::process::id(),
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            // Parallel tests: the clock alone can repeat (microsecond granularity on macOS), so add a counter.
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let directory = root.join(format!("update-snapshot-{}-{}-{}", std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
             std::fs::DirBuilder::new().mode(0o700).create(&directory).unwrap();
             Self(directory)
         }
@@ -438,6 +496,59 @@ mod tests {
         let escaped = Reference { path:target.clone(), ..reference };
         assert!(mark_consumed_at(&fixture.0, &escaped).is_err());
         assert_eq!(std::fs::read_to_string(target).unwrap(), "KEEP");
+    }
+
+    #[test]
+    fn drain_snapshot_failure_is_recorded_and_forces_the_fallback_notice() {
+        let fixture = Fixture::new();
+        let socket = fixture.0.join("socket");
+        let marker = fixture.0.join(FAILED_NAME);
+        // An earlier drain left a pending snapshot that was never applied.
+        drain_begin_at(&fixture.0, &socket, || Ok((fixture.daemon(), fixture.surfaces()))).expect("baseline snapshot");
+        assert!(matches!(load_at(&fixture.0, &socket), Load::Ready(_)));
+        // This drain cannot capture (daemon unreachable): no reference, failure recorded, stale snapshot not used.
+        assert!(drain_begin_at(&fixture.0, &socket, || Err("system.identify 실패".into())).is_none());
+        let Load::Fallback(notice) = load_at(&fixture.0, &socket) else { panic!("stale snapshot used after a recorded drain failure") };
+        assert_eq!(notice, DRAIN_FAILED_NOTICE);
+        let bytes = std::fs::read_to_string(&marker).expect("failure marker written");
+        assert_eq!(std::fs::metadata(&marker).unwrap().permissions().mode() & 0o777, 0o600);
+        let value: Value = serde_json::from_str(&bytes).unwrap();
+        assert_eq!(value["stage"], "begin");
+        assert_eq!(value.as_object().unwrap().keys().cloned().collect::<Vec<_>>(), ["at","schema","socket","stage"], "metadata only");
+        assert!(!bytes.contains("MUST-NOT-PERSIST"));
+        // The marker names its own service: another socket keeps its ordinary notice.
+        let other = fixture.0.join("other");
+        assert!(matches!(load_at(&fixture.0, &other), Load::Fallback(n) if n != DRAIN_FAILED_NOTICE));
+        // A later successful drain clears the marker; its finish keeps the snapshot usable.
+        let reference = drain_begin_at(&fixture.0, &socket, || Ok((fixture.daemon(), fixture.surfaces())));
+        assert!(!marker.exists());
+        drain_finish_at(&fixture.0, &socket, reference, 1);
+        let Load::Ready(pending) = load_at(&fixture.0, &socket) else { panic!("fresh snapshot must load") };
+        assert_eq!(pending.drain_status, Some(1));
+        // A write failure (both slots hold foreign bytes) is recorded the same way.
+        for name in [FILE_NAME.to_string(), format!("{FILE_NAME}.new")] { std::fs::write(fixture.0.join(name), "foreign").unwrap(); }
+        assert!(drain_begin_at(&fixture.0, &socket, || Ok((fixture.daemon(), fixture.surfaces()))).is_none());
+        assert!(matches!(load_at(&fixture.0, &socket), Load::Fallback(n) if n == DRAIN_FAILED_NOTICE));
+    }
+
+    #[test]
+    fn drain_finish_failure_is_recorded_and_a_corrupt_marker_fails_closed() {
+        let fixture = Fixture::new();
+        let socket = fixture.0.join("socket");
+        let reference = drain_begin_at(&fixture.0, &socket, || Ok((fixture.daemon(), fixture.surfaces()))).unwrap();
+        std::fs::write(&reference.path, "edited between begin and finish").unwrap();
+        drain_finish_at(&fixture.0, &socket, Some(reference.clone()), 0);
+        assert_eq!(std::fs::read_to_string(&reference.path).unwrap(), "edited between begin and finish");
+        let value: Value = serde_json::from_slice(&std::fs::read(fixture.0.join(FAILED_NAME)).unwrap()).unwrap();
+        assert_eq!(value["stage"], "finish");
+        assert!(matches!(load_at(&fixture.0, &socket), Load::Fallback(n) if n == DRAIN_FAILED_NOTICE));
+        // No reference (begin already failed and recorded): finish is a no-op.
+        std::fs::remove_file(fixture.0.join(FAILED_NAME)).unwrap();
+        drain_finish_at(&fixture.0, &socket, None, 1);
+        assert!(!fixture.0.join(FAILED_NAME).exists());
+        // An unreadable marker still forces the fallback.
+        std::fs::write(fixture.0.join(FAILED_NAME), "junk").unwrap();
+        assert!(matches!(load_at(&fixture.0, &socket), Load::Fallback(n) if n == DRAIN_FAILED_NOTICE));
     }
 
     #[test]

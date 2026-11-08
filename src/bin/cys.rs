@@ -1704,7 +1704,7 @@ fn run(command: Command) -> i32 {
                 std::process::exit(1);
             });
             // C4d: 평문 drain 로직 이전에 비밀 없는 좌석 배치 메타데이터를 비공개 파일로 남긴다.
-            // 실패는 조용히 무시한다 — stdout·종료 코드는 기존과 동일해야 한다.
+            // 실패는 출력 없이 실패 표식으로만 남긴다 — stdout·종료 코드는 기존과 동일해야 한다.
             let snapshot = drain_snapshot_begin();
             let mut n = 0;
             let mut failed = false;
@@ -1724,7 +1724,7 @@ fn run(command: Command) -> i32 {
                 std::thread::sleep(std::time::Duration::from_secs(8));
             }
             println!("drained {n} node(s)");
-            let status = if failed { 1 } else { 0 };
+            let status = drain_exit_status(failed);
             drain_snapshot_finish(snapshot, status);
             return status;
         }
@@ -6246,14 +6246,21 @@ fn drain_daemon_identity(identify: &Value) -> Option<cys::rename_handover::Proce
 
 /// 평문 drain 직전 비공개 배치 스냅샷 기록(best-effort, 출력 없음).
 fn drain_snapshot_begin() -> Option<cys::update_snapshot::Reference> {
-    let daemon = drain_daemon_identity(&request("system.identify", json!({})).ok()?)?;
-    let surfaces = request("surface.list", json!({})).ok()?;
-    cys::update_snapshot::write(&socket_path(), &daemon, &surfaces).ok()
+    cys::update_snapshot::drain_begin(&socket_path(), || {
+        let identify = request("system.identify", json!({})).map_err(|_| "system.identify 실패".to_string())?;
+        let daemon = drain_daemon_identity(&identify).ok_or("데몬 신원을 확인하지 못했습니다.")?;
+        let surfaces = request("surface.list", json!({})).map_err(|_| "surface.list 실패".to_string())?;
+        Ok((daemon, surfaces))
+    })
 }
 
+/// drain 종료 코드는 좌석 단계 실패(`failed`)만으로 정한다 — 스냅샷 성공·실패는 종료 코드·stdout 에 영향이 없다.
+fn drain_exit_status(failed: bool) -> i32 { if failed { 1 } else { 0 } }
+
 /// drain 종료 상태 기록. 종료 코드는 저장 성공의 증거가 아니므로 '검증됨'으로 표시하지 않는다.
+/// 실패는 출력 없이 실패 표식으로 남는다(다음 GUI 시작이 안내 + 기존 복원으로 연다).
 fn drain_snapshot_finish(reference: Option<cys::update_snapshot::Reference>, status: i32) {
-    if let Some(reference) = reference { let _ = cys::update_snapshot::finish_drain(&reference, status); }
+    cys::update_snapshot::drain_finish(&socket_path(), reference, status);
 }
 
 fn run_drain_verify(timeout: u64) -> i32 {
@@ -8992,6 +8999,16 @@ mod tests {
         }
         // No snapshot was started: finishing is a silent no-op and never reaches the real home.
         drain_snapshot_finish(None, 1);
+    }
+
+    #[test]
+    fn drain_exit_status_comes_only_from_seat_step_failures() {
+        use super::*;
+        assert_eq!(drain_exit_status(false), 0);
+        assert_eq!(drain_exit_status(true), 1);
+        // The snapshot finish returns nothing: whatever it records, the drain status is the value computed above.
+        let finish: fn(Option<cys::update_snapshot::Reference>, i32) = drain_snapshot_finish;
+        let _ = finish;
     }
 
     #[test]

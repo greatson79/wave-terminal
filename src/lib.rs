@@ -443,6 +443,32 @@ pub fn home_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// depts.json 경로: env CYS_DEPTS_JSON(비어 있으면 미설정과 동일) → 기본 ~/.cys/depts.json. 4개 호출부 공유.
+pub fn depts_json_path() -> PathBuf {
+    depts_json_path_from(std::env::var("CYS_DEPTS_JSON").ok().as_deref(), &home_dir())
+}
+
+fn depts_json_path_from(env: Option<&str>, home: &std::path::Path) -> PathBuf {
+    env.filter(|v| !v.trim().is_empty()).map(PathBuf::from).unwrap_or_else(|| home.join(".cys/depts.json"))
+}
+
+#[cfg(test)]
+mod depts_json_path_tests {
+    use super::depts_json_path_from;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn empty_or_blank_env_falls_back_to_default() {
+        let home = Path::new("/h");
+        let default = PathBuf::from("/h/.cys/depts.json");
+        for blank in ["", "  ", "\t\r"] {
+            assert_eq!(depts_json_path_from(Some(blank), home), default, "blank {blank:?}");
+        }
+        assert_eq!(depts_json_path_from(None, home), default);
+        assert_eq!(depts_json_path_from(Some("/x/d.json"), home), PathBuf::from("/x/d.json"));
+    }
+}
+
 /// (W1) claude CLAUDE_CONFIG_DIR 결정론 해소 — agents.json의 `${CYS_ACCOUNT_DIR:-$HOME/.cys/claude}`와
 /// 동일 규칙을 **현재 프로세스 env**로 전개한다. pane 셸(=데몬 자식)이 실제로 해소하는 값과 일치하려면
 /// 실제 전개 주체인 **데몬 프로세스에서 호출**하는 것이 권위다(state.rs의 CYS_ACCOUNT_DIR 전파와 정합).

@@ -6177,12 +6177,9 @@ fn drain_verify_fanout(
 /// depts.json + 본부 소켓을 순회해 verify 대상(살아있는 AI 역할 노드)을 수집한다(run_fleet 소스 동형).
 /// 도달불가(다운) 부서·본부는 스킵(정상 정보). live_cwd는 org.status의 노드별 cd 추적값을 그대로 쓴다.
 fn drain_verify_targets() -> Vec<VerifyTarget> {
-    let home = cys::home_dir().to_string_lossy().into_owned();
     let mut sockets: Vec<(std::path::PathBuf, String, String)> =
         vec![(socket_path(), "main".to_string(), "본부 · CEO".to_string())];
-    let reg = std::env::var("CYS_DEPTS_JSON")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from(&home).join(".cys/depts.json"));
+    let reg = cys::depts_json_path();
     if let Ok(s) = std::fs::read_to_string(&reg) {
         if let Ok(v) = serde_json::from_str::<Value>(&s) {
             if let Some(depts) = v["depts"].as_object() {
@@ -6291,14 +6288,11 @@ fn run_drain_verify(timeout: u64) -> i32 {
 /// master 능동 모니터링: 모든 부서의 모든 노드가 지금 하는 업무를 1콜로 본다. 도달불가 부서는 표기.
 fn run_fleet(as_json: bool) -> i32 {
     // RC-7: HOME 미설정(Windows) 함정 회피 — dirs 기반 공용 해소.
-    let home = cys::home_dir().to_string_lossy().into_owned();
     // v2 부서 한정 키(DESIGN-dept-qualified-keys-v2 §4a): 항목마다 dept(slug=레지스트리 키)·
     // socket(경로 문자열) additive. 본부는 고정 slug "main"·socket=null(기본 소켓 사용).
     let mut targets: Vec<(std::path::PathBuf, String, String, Value)> =
         vec![(socket_path(), "본부 · CEO".to_string(), "main".to_string(), Value::Null)];
-    let reg = std::env::var("CYS_DEPTS_JSON")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from(&home).join(".cys/depts.json"));
+    let reg = cys::depts_json_path();
     if let Ok(s) = std::fs::read_to_string(&reg) {
         if let Ok(v) = serde_json::from_str::<Value>(&s) {
             if let Some(depts) = v["depts"].as_object() {

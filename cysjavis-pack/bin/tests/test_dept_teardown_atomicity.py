@@ -18,7 +18,10 @@ import sys
 import tempfile
 
 SELF = os.path.dirname(os.path.abspath(__file__))
-DEPT = os.path.join(SELF, "..", "cys-dept")
+# normpath: the product scan excludes its own command line by the canonical "bin/cys-dept" substring.
+DEPT = os.path.normpath(os.path.join(SELF, "..", "cys-dept"))
+# Windows runners put the WSL launcher (System32\bash.exe) first on PATH; CI passes Git bash here.
+BASH = os.environ.get("CYS_TEST_BASH", "bash")
 fails = []
 
 
@@ -62,7 +65,7 @@ def phoenix_log(tmp):
 
 
 def run(env, *args):
-    r = subprocess.run(["bash", DEPT] + list(args), capture_output=True, text=True,
+    r = subprocess.run([BASH, DEPT] + list(args), capture_output=True, text=True,
                        encoding="utf-8", env=env, timeout=60)
     return r.returncode, r.stdout + r.stderr
 
@@ -104,6 +107,17 @@ code, out = run(env, "down-sock", "/tmp/custom-daemon.sock")
 check("C1 비표준 exit 0", code == 0)
 check("C2 묘비 미기록(보수)", "tombstone" not in phoenix_log(tmp))
 shutil.rmtree(tmp)
+
+# ── D. Windows 거부 계약: 기록된 pid를 읽을 수 없으면 정리하지 않는다(exit 9·등록 유지·묘비 없음) ──
+if os.name == "nt":
+    tmp = tempfile.mkdtemp(prefix="dt-d-")
+    sockD = r"\\.\pipe\cys-dept-dept-5"
+    env, home, reg = setup(tmp, {"dept-5": {"socket": sockD, "pids": ["oops"]}})
+    code, out = run(env, "down-sock", sockD)
+    check("D1 Windows 거부(unreadable pid) exit 9", code == 9, out[-150:])
+    check("D2 Windows 거부: 등록 유지", "dept-5" in json.load(open(reg, encoding="utf-8"))["depts"])
+    check("D3 Windows 거부: 묘비 미기록", "tombstone" not in phoenix_log(tmp))
+    shutil.rmtree(tmp)
 
 # ── 정적 트립와이어: 배선 소실 검출 ──
 src = open(DEPT, encoding="utf-8").read()

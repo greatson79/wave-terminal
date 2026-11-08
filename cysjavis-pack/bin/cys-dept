@@ -19,6 +19,27 @@ set -euo pipefail
 # 그 아래 사용자가 실행하는 claude)이 상속하도록 단일 지점에서 로그인 셸 표준 경로를 prepend.
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin${PATH:+:$PATH}"
 
+# HOTFIX-PYTHON-BOUNDARY-BEGIN
+# Native Windows Python cannot open MSYS /c paths; convert argv, never Python source text.
+dept_windows=0
+DEPT_PATH_FAILED='__CYS_DEPT_PATH_CONVERSION_FAILED__'
+case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) dept_windows=1 ;; esac
+native_path(){
+  if [ "$dept_windows" = 1 ] && [[ "$1" == /* ]]; then
+    # fail closed: stderr line + sentinel (a $(...) argument cannot stop its caller; python3() refuses the sentinel)
+    cygpath -m "$1" || { echo "[cys-dept] 경로 변환 실패 / path conversion failed: $1" >&2; printf '%s\n' "$DEPT_PATH_FAILED"; return 1; }
+  else printf '%s\n' "$1"; fi
+}
+# Arguments pass through untouched (MSYS2_ARG_CONV_EXCL stops MSYS from guessing which '/x' is a path);
+# call sites convert the path arguments they own with native_path.
+python3(){
+  if [ "$dept_windows" != 1 ]; then command python3 "$@"; return; fi
+  local value
+  for value in "$@"; do [ "$value" = "$DEPT_PATH_FAILED" ] && return 1; done
+  MSYS2_ARG_CONV_EXCL='*' command python3 "$@"
+}
+# HOTFIX-PYTHON-BOUNDARY-END
+
 REG="${CYS_DEPTS_JSON:-$HOME/.cys/depts.json}"
 PACK_DEFAULT="$HOME/.cys/pack"
 # RC-6: 폴백 경로 가드 — command -v 우선(Windows는 RC-5 runtime PATH로 cysd.exe/cys.exe 해소).
@@ -27,7 +48,9 @@ CYSD="$(command -v cysd || { [ -x /opt/homebrew/bin/cysd ] && echo /opt/homebrew
 CYS="$(command -v cys || { [ -x /opt/homebrew/bin/cys ] && echo /opt/homebrew/bin/cys; } || echo cys)"
 # RC-6(codex R3.1 nit): 인라인 python heredoc이 cys를 literal이 아니라 **해소된 경로**로 실행하도록
 # CYS_BIN을 env로 전파(heredoc은 프로세스 env 상속). dept_classify_idle·alive_sock 등 subprocess가 사용.
-export CYS_BIN="$CYS"
+CYS_BIN="$(native_path "$CYS")"; export CYS_BIN
+if [ -n "${CYS_PACK_DIR:-}" ]; then CYS_PACK_DIR="$(native_path "$CYS_PACK_DIR")"; export CYS_PACK_DIR; fi
+if [ -n "${CYS_DEPTS_JSON:-}" ]; then CYS_DEPTS_JSON="$(native_path "$CYS_DEPTS_JSON")"; export CYS_DEPTS_JSON; fi
 # RC-6(T3 발견): Windows 번들 embeddable Python은 open() 기본 인코딩이 cp1252(charmap)라 UTF-8(한글)
 # agents.json·directives 읽기가 UnicodeDecodeError로 크래시(부서 seed 실패 등). PYTHONUTF8=1로 전 python
 # heredoc·자식 python을 UTF-8 기본으로 강제(unix 무영향). 개별 open(encoding=) 누락도 이걸로 방어.
@@ -55,7 +78,7 @@ dept_tombstone(){
   env -u CYS_SOCKET "$CYS" tombstone "$1" --dept >/dev/null 2>&1 || true
   ph="${CYS_PACK_DIR:-$PACK_DEFAULT}/bin/javis_phoenix.py"
   [ -f "$ph" ] || return 0
-  python3 "$ph" tombstone "$1" --dept >/dev/null 2>&1 || true
+  python3 "$(native_path "$ph")" tombstone "$1" --dept >/dev/null 2>&1 || true
 }
 # ★재생성 묘비 해소(BOOTSTRAP_HARDENING WP-3·R6ⓒ): 삭제된 동명 부서를 다시 만들면 묘비를 해제해야
 # 새 부서가 피닉스 보호집합에 재편입된다(미해소=삭제→재생성 부서가 보호 영구 제외되는 역전 결함).
@@ -72,7 +95,7 @@ dept_tombstone_remove(){
     || echo "[cys-dept] WARN: 데몬 묘비 해소 미확정($1 — base 미도달) — 재시도 필요(잔존 시 재시작에서 부서 reap 위험)" >&2
   ph="${CYS_PACK_DIR:-$PACK_DEFAULT}/bin/javis_phoenix.py"
   [ -f "$ph" ] || return 0
-  python3 "$ph" tombstone "$1" --dept --remove >/dev/null 2>&1 || true
+  python3 "$(native_path "$ph")" tombstone "$1" --dept --remove >/dev/null 2>&1 || true
 }
 
 # RC-15(D7): 부서 로그·상태 디렉토리 — Windows named pipe 소켓(\\.\pipe\...)은 dirname/디렉토리 개념이
@@ -87,26 +110,382 @@ dept_logdir(){
   esac
 }
 
-# RC-6: OS중립 graceful kill — unix=SIGTERM→대기→SIGKILL, Windows(MSYS/Git-Bash)=taskkill(트리·강제).
-# Windows 프로세스는 unix 시그널을 안 받으므로 kill/kill -9가 무효 → taskkill //PID //T //F로 분기
-# (MSYS는 `/PID`를 경로로 변환하므로 `//PID` 형식 사용).
+# Windows 크래시 부서 정리용 "이미 종료" 검증(fail-closed: 판정 불가는 전부 '살아 있음'으로 본다).
+# 파이프는 이름 목록으로만 본다(연결 시도 없음). 레지스트리 엔트리에 기록된 pid(pids 목록)가 있으면 tasklist로 생존 확인.
+dept_pipe_present(){
+  python3 - "$1" <<'PY_PIPE'
+import os,sys
+name=sys.argv[1].replace('/','\\').rsplit('\\',1)[-1]
+try: print('present' if name in os.listdir('\\\\.\\pipe\\') else 'absent')
+except Exception: print('present')
+PY_PIPE
+}
+# 프로세스 생성 시각(epoch 초) | none(그 pid 없음) | unknown(판정 불가=살아 있음 취급). Windows 전용(크래시 부서 검증).
+dept_proc_start(){
+  python3 - "$1" <<'PY_PROC'
+import ctypes,sys
+from ctypes import wintypes
+try:
+    k=ctypes.WinDLL('kernel32',use_last_error=True)
+    k.OpenProcess.restype=wintypes.HANDLE
+    h=k.OpenProcess(0x1000,False,int(sys.argv[1]))   # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        print('none' if ctypes.get_last_error()==87 else 'unknown'); sys.exit(0)   # 87=ERROR_INVALID_PARAMETER(없는 pid)
+    code=wintypes.DWORD(); c=wintypes.FILETIME(); e=wintypes.FILETIME(); a=wintypes.FILETIME(); b=wintypes.FILETIME()
+    ok=k.GetExitCodeProcess(h,ctypes.byref(code)) and k.GetProcessTimes(h,ctypes.byref(c),ctypes.byref(e),ctypes.byref(a),ctypes.byref(b))
+    k.CloseHandle(h)
+    if not ok: print('unknown')
+    elif code.value!=259: print('none')           # STILL_ACTIVE 아님 = 종료됨
+    else: print(((c.dwHighDateTime<<32|c.dwLowDateTime)//10000000)-11644473600)
+except Exception: print('unknown')
+PY_PROC
+}
+# 레지스트리에 기록된 pid(pids: [{pid,start}] 신형 · [정수] 구형)가 "우리 것으로 살아 있으면" 0. 판정 불가=살아 있음(fail-closed).
+# 신형: 같은 pid여도 생성 시각이 다르면(pid 재사용) 우리 것이 아님=죽음. 구형(start 없음): pid가 살아 있으면 거부. 절대 kill 안 함.
+DEPT_PID_START_SLACK=30
+# PID 기록 없는(0.3.2 이전) 부서 전용 추가 가드 — 감지 전용(절대 kill 안 함). 레지스트리에 pids가 있으면 "yes".
+dept_has_pids(){
+  python3 - "$(native_path "$REG")" "$1" <<'PY_HAS'
+import json,sys
+try: print('yes' if json.load(open(sys.argv[1])).get('depts',{}).get(sys.argv[2],{}).get('pids') else 'no')
+except Exception: print('yes')   # 읽기 실패는 기록 있음으로 취급 → 이 가드를 쓰지 않고 pid 검사로 fail-closed
+PY_HAS
+}
+# 명령줄에 부서 런타임 키(cys-dept-<name>)나 부서 폴더가 들어 있는 살아 있는 프로세스를 "pid<TAB>이미지명"으로 출력(감지만).
+# 제외: 스캔 python 자신과 그 조상 프로세스 체인(키를 인자로 받으므로 자기 명령줄에 키가 들어 있다) · cys-dept 스크립트 · 스캔용 powershell.
+# 스캔 실패는 "unknown<TAB>rc=<코드> <stderr 첫 줄(경로·키 마스킹)>" 한 줄(=발견으로 취급·fail-closed).
+dept_scan_procs(){
+  python3 - "$@" <<'PY_SCAN'
+import os,re,subprocess,sys
+keys=[k.lower() for k in sys.argv[1:] if k]
+ps='Get-CimInstance Win32_Process | ForEach-Object { "{0}`t{1}`t{2}`t{3}" -f $_.ProcessId,$_.ParentProcessId,$_.Name,$_.CommandLine }'
+def mask(text):
+    text=re.sub(r'[A-Za-z]:[\\/].*|\\\\.*|/\S+','<path>',text)
+    for k in sys.argv[1:]:
+        if k: text=text.replace(k,'<key>')
+    return text[:120]
+try:
+    out=subprocess.run(['powershell.exe','-NoProfile','-NonInteractive','-Command',ps],capture_output=True,text=True,
+                       encoding='utf-8',errors='replace',timeout=30,stdin=subprocess.DEVNULL)
+    if out.returncode:
+        first=next((l.strip() for l in out.stderr.splitlines() if l.strip()),'')
+        print('unknown\trc=%d %s'%(out.returncode,mask(first))); sys.exit(0)
+except Exception as e:
+    print('unknown\trc=exec %s'%type(e).__name__); sys.exit(0)
+rows=[]
+parent={}
+for line in out.stdout.splitlines():
+    f=line.rstrip('\r').split('\t',3)
+    if len(f)<4: continue
+    rows.append(f)
+    parent[f[0]]=f[1]
+skip=set()
+pid=str(os.getpid())
+while pid and pid not in skip:
+    skip.add(pid); pid=parent.get(pid,'')
+for pid,ppid,name,cl in rows:
+    if pid in skip: continue
+    cl=cl.lower().replace('\\','/')
+    if 'bin/cys-dept' in cl or 'get-ciminstance win32_process' in cl: continue
+    if any(re.search(re.escape(k.replace('\\','/'))+r'(?![a-z0-9_-])',cl) for k in keys): print('%s\t%s'%(pid,name))   # 키 뒤가 영숫자·-·_면 다른 부서(dept-1 vs dept-10)
+PY_SCAN
+}
+dept_recorded_pid_alive(){
+  local pid start cur
+  while IFS=$'\t' read -r pid start; do
+    pid="${pid%$'\r'}"; start="${start%$'\r'}"
+    case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+    if [ -z "$start" ]; then
+      tasklist /FI "PID eq $pid" /FO CSV /NH 2>/dev/null | grep -q "\"$pid\"" && return 0
+      continue
+    fi
+    cur="$(dept_proc_start "$pid" | tr -d '\r')"
+    case "$cur" in none) continue ;; ''|*[!0-9]*) return 0 ;; esac
+    [ "$(( cur > start ? cur - start : start - cur ))" -le "$DEPT_PID_START_SLACK" ] && return 0
+  done < <(python3 - "$(native_path "$REG")" "$1" <<'PY_PIDS'
+import json,sys
+try: e=json.load(open(sys.argv[1])).get('depts',{}).get(sys.argv[2],{})
+except Exception: print('x\t'); sys.exit(0)
+for v in e.get('pids',[]):
+    if isinstance(v,dict) and isinstance(v.get('pid'),int) and isinstance(v.get('start'),int): print('%d\t%d'%(v['pid'],v['start']))
+    elif isinstance(v,int): print('%d\t'%v)
+    else: print('x\t')
+PY_PIDS
+)
+  return 1
+}
+daemon_identity(){
+  if [ "$dept_windows" = 1 ]; then
+    python3 - "$1" <<'PY_IDENTITY'
+import json,os,subprocess,sys
+try:
+    result = subprocess.run([os.environ['CYS_BIN'], 'identify'], env={**os.environ, 'CYS_SOCKET':sys.argv[1], 'CYS_NO_AUTOSTART':'1'},
+                            stdin=subprocess.DEVNULL, capture_output=True, timeout=3)
+    if result.returncode: sys.exit(1)
+    identity = json.loads(result.stdout)
+    print('%s\t%s' % (identity.get('daemon_pid',''), identity.get('started_at','')))
+except Exception:
+    sys.exit(1)
+PY_IDENTITY
+  else
+    CYS_NO_AUTOSTART=1 CYS_SOCKET="$1" "$CYS" identify 2>/dev/null | python3 -c 'import json,sys;d=json.load(sys.stdin);print("%s\t%s"%(d.get("daemon_pid",""),d.get("started_at","")))'
+  fi
+}
+
+# Windows has no shutdown RPC: attempt targeted non-force taskkill, then bounded fallback.
 graceful_kill(){
   local pid="$1"
-  case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*) taskkill //PID "$pid" //T //F >/dev/null 2>&1 || true ;;
-    *)
-      kill "$pid" 2>/dev/null || true
-      for _i in 1 2 3 4 5 6; do kill -0 "$pid" 2>/dev/null || break; sleep 0.3; done
-      kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true ;;
-  esac
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || { echo "[cys-dept] 종료할 프로세스 번호가 올바르지 않습니다." >&2; return 1; }
+  if [ "$dept_windows" = 1 ]; then
+    python3 - "$pid" "${2:-}" "$(native_path "$CYSD")" <<'PY_STOP'
+import ctypes
+from ctypes import wintypes
+import json
+import math
+import os
+import subprocess
+import sys
+import time
+
+
+class StopFailure(Exception):
+    pass
+
+
+def stop_tree(backend, root_pid, clock=time.monotonic, pause=time.sleep):
+    deadline = clock() + 18.0
+    known = backend.capture(root_pid)
+    try:
+        backend.refresh(known)
+        backend.kill(known[root_pid], False, min(2.0, deadline-clock()))
+        grace = min(deadline, clock()+2.0)
+        while True:
+            backend.refresh(known)
+            live = [record for record in known.values() if backend.alive(record)]
+            if not live:
+                backend.refresh(known)
+                if not any(backend.alive(record) for record in known.values()):
+                    return len(known)-1
+            if clock() >= grace:
+                break
+            pause(0.05)
+        # Children first: retain every captured identity even if its original parent exits.
+        forced = set()
+        while True:
+            backend.refresh(known)
+            live = [record for record in known.values() if backend.alive(record)]
+            if not live:
+                backend.refresh(known)
+                if not any(backend.alive(record) for record in known.values()):
+                    return len(known)-1
+            if clock() >= deadline:
+                raise StopFailure("부서 프로세스가 제한 시간 안에 종료되지 않았습니다.")
+            for record in reversed(live):
+                remaining = deadline-clock()
+                if remaining <= 0:
+                    raise StopFailure("부서 종료 확인 시간이 초과됐습니다.")
+                if record["pid"] not in forced and backend.current(record):
+                    backend.kill(record, True, min(2.0, remaining))
+                    forced.add(record["pid"])
+            pause(0.05)
+    finally:
+        backend.close(known)
+
+
+class WindowsProcesses:
+    def __init__(self, started_at, image):
+        self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        self.started_at = started_at
+        self.image = os.path.normcase(os.path.abspath(image))
+        self.kernel.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        self.kernel.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        self.kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        self.kernel.OpenProcess.restype = wintypes.HANDLE
+        self.kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        self.kernel.CloseHandle.restype = wintypes.BOOL
+        self.kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        self.kernel.WaitForSingleObject.restype = wintypes.DWORD
+        self.kernel.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)]*4
+        self.kernel.GetProcessTimes.restype = wintypes.BOOL
+        self.kernel.GetSystemTimeAsFileTime.argtypes = [ctypes.POINTER(wintypes.FILETIME)]
+        self.kernel.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+        self.kernel.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        directory = ctypes.create_unicode_buffer(32768)
+        self.kernel.GetSystemDirectoryW.argtypes = [wintypes.LPWSTR, wintypes.UINT]
+        length = self.kernel.GetSystemDirectoryW(directory, len(directory))
+        if not length or length >= len(directory):
+            raise StopFailure("Windows 종료 도구 경로를 확인하지 못했습니다.")
+        self.taskkill = os.path.join(directory.value, "taskkill.exe")
+
+    @staticmethod
+    def ticks(value):
+        return (value.dwHighDateTime << 32) | value.dwLowDateTime
+
+    def open(self, pid):
+        handle = self.kernel.OpenProcess(0x100000 | 0x1000, False, pid)
+        for _ in range(8):
+            if handle:
+                break
+            code = ctypes.get_last_error()
+            if code in (87, 1168):
+                return None
+            # Any other error (e.g. 5 while a tree member is exiting): re-check against a fresh listing.
+            # Absent from the listing = it has exited. Still listed = it may be mid-exit, so retry for ~2 s;
+            # a process that stays listed and denied fails closed with the code, never a blanket ignore.
+            if pid not in {row[0] for row in self.rows()[0]}:
+                return None
+            time.sleep(0.25)
+            handle = self.kernel.OpenProcess(0x100000 | 0x1000, False, pid)
+        if not handle:
+            raise StopFailure("부서 프로세스 권한을 확인하지 못했습니다. (Win32 오류 %d)" % code)
+        values = [wintypes.FILETIME() for _ in range(4)]
+        if not self.kernel.GetProcessTimes(handle, *(ctypes.byref(v) for v in values)):
+            self.kernel.CloseHandle(handle)
+            raise StopFailure("부서 프로세스의 생성 시각을 확인하지 못했습니다.")
+        return {"pid":pid, "created":self.ticks(values[0]), "handle":handle}
+
+    def capture(self, pid):
+        root = self.open(pid)
+        if root is None:
+            raise StopFailure("부서 프로세스를 확인하지 못했습니다. 다시 시도하세요.")
+        try:
+            image = ctypes.create_unicode_buffer(32768)
+            size = wintypes.DWORD(len(image))
+            if not self.kernel.QueryFullProcessImageNameW(root["handle"], 0, image, ctypes.byref(size)):
+                raise StopFailure("부서 실행 파일을 확인하지 못했습니다.")
+            created_seconds = (root["created"]-116444736000000000)/10000000.0
+            if os.path.normcase(os.path.abspath(image.value)) != self.image or created_seconds > self.started_at:
+                raise StopFailure("부서 프로세스 정보가 바뀌었습니다. 다른 프로세스는 종료하지 않습니다.")
+            self.root_started = (root["created"]-116444736000000000)//10000000
+            return {pid:root}
+        except Exception:
+            self.kernel.CloseHandle(root["handle"])
+            raise
+
+    def rows(self):
+        class Entry(ctypes.Structure):
+            _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                        ("pid", wintypes.DWORD), ("heap", ctypes.c_size_t),
+                        ("module", wintypes.DWORD), ("threads", wintypes.DWORD),
+                        ("parent", wintypes.DWORD), ("priority", wintypes.LONG),
+                        ("flags", wintypes.DWORD), ("exe", wintypes.WCHAR*260)]
+        first, following = self.kernel.Process32FirstW, self.kernel.Process32NextW
+        for function in (first, following):
+            function.argtypes = [wintypes.HANDLE, ctypes.POINTER(Entry)]
+            function.restype = wintypes.BOOL
+        stamp = wintypes.FILETIME()
+        self.kernel.GetSystemTimeAsFileTime(ctypes.byref(stamp))
+        snapshot = self.kernel.CreateToolhelp32Snapshot(2, 0)
+        if snapshot == ctypes.c_void_p(-1).value:
+            raise StopFailure("부서의 자식 프로세스를 확인하지 못했습니다.")
+        try:
+            entry = Entry()
+            entry.dwSize = ctypes.sizeof(entry)
+            result, rows = first(snapshot, ctypes.byref(entry)), []
+            while result:
+                rows.append((entry.pid, entry.parent))
+                result = following(snapshot, ctypes.byref(entry))
+            if ctypes.get_last_error() != 18:
+                raise StopFailure("부서 프로세스 목록을 끝까지 확인하지 못했습니다.")
+            return rows, self.ticks(stamp)
+        finally:
+            self.kernel.CloseHandle(snapshot)
+
+    def refresh(self, known):
+        rows, stamp = self.rows()
+        changed = True
+        while changed:
+            changed = False
+            for pid, parent in rows:
+                if pid in known or parent not in known:
+                    continue
+                record = self.open(pid)
+                if record is None:
+                    continue
+                lifetime = [wintypes.FILETIME() for _ in range(4)]
+                if not self.kernel.GetProcessTimes(known[parent]["handle"], *(ctypes.byref(v) for v in lifetime)):
+                    self.kernel.CloseHandle(record["handle"])
+                    raise StopFailure("부모 프로세스의 생성·종료 시각을 확인하지 못했습니다.")
+                parent_end = self.ticks(lifetime[1]) or stamp
+                if not (known[parent]["created"] <= record["created"] <= min(stamp, parent_end)):
+                    self.kernel.CloseHandle(record["handle"])
+                    continue
+                known[pid] = record
+                changed = True
+
+    def alive(self, record):
+        result = self.kernel.WaitForSingleObject(record["handle"], 0)
+        if result not in (0, 258):
+            raise StopFailure("부서 프로세스 종료 여부를 확인하지 못했습니다.")
+        return result == 258
+
+    def current(self, record):
+        if not self.alive(record):
+            return False
+        current = self.open(record["pid"])
+        if current is None:
+            return False
+        try:
+            return current["created"] == record["created"]
+        finally:
+            self.kernel.CloseHandle(current["handle"])
+
+    def kill(self, record, force, timeout):
+        if not self.current(record):
+            return
+        command = [self.taskkill, "/PID", str(record["pid"])]
+        if force:
+            command.append("/F")
+        try:
+            result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout)
+            if not force:
+                print("[cys-dept] graceful attempt " + ("accepted" if result.returncode == 0 else "not accepted"), file=sys.stderr)
+        except subprocess.TimeoutExpired:
+            if not force:
+                print("[cys-dept] graceful attempt timed out", file=sys.stderr)
+
+    def close(self, known):
+        for record in known.values():
+            self.kernel.CloseHandle(record["handle"])
+
+
+if __name__ == "__main__":
+    try:
+        pid, started, image = sys.argv[1:4]
+        pid, started = int(pid), float(started)
+        if pid <= 0 or not math.isfinite(started) or started <= 0:
+            raise StopFailure("부서 프로세스 정보가 올바르지 않습니다.")
+        backend = WindowsProcesses(started, image)
+        descendants = stop_tree(backend, pid)
+        print("CYS_DEPT_STOP_RESULT " + json.dumps({"schema_version":1, "verified":True,
+              "daemon_pid":pid, "daemon_start_time":backend.root_started,
+              "scope":"known-process-tree", "descendants":descendants}))
+    except Exception as error:
+        print("[cys-dept] 종료 확인 실패: %s" % error, file=sys.stderr)
+        sys.exit(1)
+PY_STOP
+  else
+    local process_start
+    process_start="$(LC_ALL=C ps -p "$pid" -o lstart= | python3 -c 'import sys,time;print(int(time.mktime(time.strptime(sys.stdin.read().strip(), "%a %b %d %H:%M:%S %Y"))))')" || return 1
+    kill "$pid" 2>/dev/null || true
+    for _i in 1 2 3 4 5 6; do kill -0 "$pid" 2>/dev/null || break; sleep 0.3; done
+    if kill -0 "$pid" 2>/dev/null; then kill -9 "$pid" 2>/dev/null || true; fi
+    for _i in 1 2 3 4 5 6; do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "[cys-dept] 프로세스 종료를 확인하지 못했습니다." >&2
+      return 1
+    fi
+    # The app independently tracks known shells and descendants before accepting this receipt.
+    python3 -c 'import json,sys;print("CYS_DEPT_STOP_RESULT "+json.dumps(dict(schema_version=1,verified=True,daemon_pid=int(sys.argv[1]),daemon_start_time=int(sys.argv[2]),scope="known-process-tree",descendants=0)))' "$pid" "$process_start"
+  fi
 }
 
 reg_init(){ [ -f "$REG" ] || { mkdir -p "$(dirname "$REG")"; printf '{"depts":{}}\n' > "$REG"; }; }
-reg_count(){ reg_init; python3 -c "import json;print(len(json.load(open('$REG'))['depts']))"; }
-reg_names(){ reg_init; python3 -c "import json;[print(k) for k in json.load(open('$REG'))['depts']]"; }
+reg_count(){ reg_init; python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["depts"]))' "$(native_path "$REG")"; }
+reg_names(){ reg_init; python3 -c 'import json,sys;[print(k) for k in json.load(open(sys.argv[1]))["depts"]]' "$(native_path "$REG")"; }
 # reg_upsert/reg_remove: 동시 부서 운용 시 lost-update 방지 — fcntl.flock으로 RMW 직렬화 +
 # temp+os.replace 원자 교체(읽는 쪽이 부분 파일을 보지 않음). macOS엔 flock(1) CLI가 없어 python fcntl 사용.
-reg_upsert(){ reg_init; python3 - "$REG" "$1" "$2" "$3" <<'PY'
+reg_upsert(){ reg_init; python3 - "$(native_path "$REG")" "$1" "$2" "$3" <<'PY'
 import json,sys,os
 try:
     import fcntl
@@ -133,7 +512,7 @@ try:
 finally: _ulk(lf)
 PY
 }
-reg_remove(){ reg_init; python3 - "$REG" "$1" <<'PY'
+reg_remove(){ reg_init; python3 - "$(native_path "$REG")" "$1" <<'PY'
 import json,sys,os
 try:
     import fcntl
@@ -159,7 +538,7 @@ PY
 }
 # reg_set_meta: 기존 엔트리에 display_name·account·mission_key 를 merge(socket/pack_dir/role 보존).
 # reg_upsert 시그니처 불변(launch 회귀0) — ＋부서 자동화(cys-dept create)용 신설. flock RMW·원자교체.
-reg_set_meta(){ reg_init; python3 - "$REG" "$1" "$2" "$3" <<'PY'
+reg_set_meta(){ reg_init; python3 - "$(native_path "$REG")" "$1" "$2" "$3" <<'PY'
 import json,sys,os
 try:
     import fcntl
@@ -184,6 +563,31 @@ try:
     with open(tmp,'w') as f: json.dump(d,f,ensure_ascii=False,indent=2); f.flush(); os.fsync(f.fileno())
     os.replace(tmp,p)
 finally: _ulk(lf)
+PY
+}
+# reg_set_pids: 가동 확인된 부서 데몬의 pid+프로세스 시작 시각을 엔트리에 기록(크래시 부서 정리 검증용). best-effort.
+reg_set_pids(){
+  local pid started_at
+  IFS=$'\t' read -r pid started_at <<<"$(daemon_identity "$2" 2>/dev/null || true)" || true; started_at="${started_at%$'\r'}"
+  case "$pid$started_at" in ''|*[!0-9]*) echo "[cys-dept] WARN: $1 데몬 pid 기록 실패(신원 미확인)" >&2; return 0 ;; esac
+  reg_init; python3 - "$(native_path "$REG")" "$1" "$pid" "$started_at" <<'PY'
+import json,sys,os
+try:
+    import fcntl
+    def _lk(f): fcntl.flock(f, fcntl.LOCK_EX)
+except ImportError:
+    import msvcrt
+    def _lk(f):
+        try: msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+        except OSError: pass
+p,n,pid,start=sys.argv[1:5]
+lf=open(p+'.lock','w'); _lk(lf)
+d=json.load(open(p)); e=d.get('depts',{}).get(n)
+if e is not None:
+    e['pids']=[{'pid':int(pid),'start':int(start)}]
+    tmp=p+'.tmp.%d'%os.getpid()
+    with open(tmp,'w') as f: json.dump(d,f,ensure_ascii=False,indent=2); f.flush(); os.fsync(f.fileno())
+    os.replace(tmp,p)
 PY
 }
 
@@ -211,7 +615,7 @@ seed_agents_account(){
   local pk="$1" acct_dir="$2"
   local src="${CYS_PACK_DIR:-$HOME/.cys/pack}/agents.json"
   mkdir -p "$pk"
-  python3 - "$src" "$pk/agents.json" "$acct_dir" <<'PY'
+  python3 - "$(native_path "$src")" "$(native_path "$pk/agents.json")" "$(native_path "$acct_dir")" <<'PY'
 import json,sys,os,re
 src,dst,acct=sys.argv[1:4]
 d=json.load(open(src,encoding="utf-8"))                 # RC-6(T3): Windows cp1252 기본 회피(한글 UTF-8)
@@ -251,7 +655,7 @@ ready(){ local s="$1" i; for i in $(seq 1 120); do CYS_SOCKET="$s" "$CYS" ping >
 resolve_default_base(){
   local acct="$1" cat="${CYS_DEPT_CATALOG:-$HOME/.cys/dept-catalog.json}" b
   if [ -f "$cat" ]; then
-    b="$(python3 - "$cat" "$acct" <<'PY'
+    b="$(python3 - "$(native_path "$cat")" "$acct" <<'PY'
 import json,sys,os
 cat,acct=sys.argv[1:3]
 try: d=json.load(open(cat))
@@ -260,7 +664,7 @@ a=d.get('accounts',{}).get(acct)
 if not a: sys.exit(2)
 print(os.path.expandvars(a))
 PY
-)" && [ -n "$b" ] && { echo "$b"; return 0; }
+)" && b="${b%$'\r'}" && [ -n "$b" ] && { echo "$b"; return 0; }
   fi
   [ -n "${HOME:-}" ] || return 1            # 규약 fallback도 불가 → fail-closed 신호
   echo "$HOME/.cys/claude-$acct"
@@ -343,6 +747,7 @@ for s in d.get("surfaces",[]):
     if s.get("role")=="master" and not s.get("exited"):
         print("yes" if s.get("agent") is not None else "no"); sys.exit(0)
 sys.exit(3)' 2>/dev/null) || true
+  has_agent="${has_agent%$'\r'}"
   if [ "$has_agent" = "yes" ]; then
     env -u CYS_SOCKET "$CYS" reinject --role master >/dev/null 2>&1 \
       && echo "[cys-dept] 원본 master 라이브 재주입($why) 완료" >&2 \
@@ -422,7 +827,7 @@ case "$cmd" in
 esac
 case "$cmd" in
   statusline-all)
-    python3 "${CYS_PACK_DIR:-$PACK_DEFAULT}/bin/javis_preflight.py" --statusline-depts
+    python3 "$(native_path "${CYS_PACK_DIR:-$PACK_DEFAULT}/bin/javis_preflight.py")" --statusline-depts
     if [ -f "$REG" ]; then
       base="$(resolve_default_base "${CYS_DEPT_DEFAULT_ACCOUNT:-default}")" || exit 5
       failed=0
@@ -431,8 +836,8 @@ case "$cmd" in
         case "$name" in ''|*[!a-zA-Z0-9_-]*) continue ;; esac
         target="${base%/}-$name"
         [ -d "$target" ] || continue
-        python3 "${CYS_PACK_DIR:-$PACK_DEFAULT}/bin/javis_preflight.py" --statusline-account "$target" || failed=1
-      done < <(python3 - "$REG" <<'PY'
+        python3 "$(native_path "${CYS_PACK_DIR:-$PACK_DEFAULT}/bin/javis_preflight.py")" --statusline-account "$(native_path "$target")" || failed=1
+      done < <(python3 - "$(native_path "$REG")" <<'PY'
 import json, sys
 for name, meta in json.load(open(sys.argv[1], encoding='utf-8')).get('depts', {}).items():
     if isinstance(meta, dict) and not meta.get('account_dir'):
@@ -456,6 +861,7 @@ PY
       # 기동 실패 시 reg_upsert 롤백 — 유령 부서(데몬 없는 레지스트리 항목) 잔류 방지
       ready "$sock" || { reg_remove "$name"; echo "[cys-dept] ERROR: $name 데몬 기동 실패"; exit 1; }
     fi
+    reg_set_pids "$name" "$sock"
     seed_schedule "$pack"   # owner-progress-report 제거(부서는 최상위 보고 안 함) — 데몬 30초 핫리로드로 반영
     ceo_promote
     dept_tombstone_remove "$name"   # WP-3·R6ⓒ: 재기동 성공 = 재생성 의도 확정 → 묘비 해소(rotate는 내부 가드로 no-op)
@@ -464,7 +870,7 @@ PY
   allocate)
     # 번호계산+예약을 단일 flock 블록에 묶어 TOCTOU 제거 — lowest-unused dept-N을 발급·예약(원자).
     # 시나리오2: 레지스트리엔 빠졌어도 소켓을 점유 중인(죽어가는) 데몬 번호는 alive() probe로 skip.
-    name=$(reg_init; python3 - "$REG" <<'PY'
+    name=$(reg_init; python3 - "$(native_path "$REG")" <<'PY'
 import json,sys,os,re,socket as S
 try:
     import fcntl
@@ -512,6 +918,7 @@ try:
 finally: _ulk(lf)
 PY
 ) || exit $?   # ★cap 거부(exit 8)·예약 실패 코드 그대로 전파
+    name="${name%$'\r'}"
     [ -n "$name" ] || { echo "[cys-dept] allocate: 번호 발급 실패" >&2; exit 1; }
     trap 'reg_remove "$name" 2>/dev/null || true' EXIT   # 예약 후 비정상종료=예약 회수(SIGKILL 제외)
     sock="$(dept_sock "$name")"; pack="$(dept_pack "$name")"
@@ -535,6 +942,7 @@ PY
       disown
       ready "$sock" || { reg_remove "$name"; echo "[cys-dept] ERROR: $name 데몬 기동 실패" >&2; exit 1; }
     fi
+    reg_set_pids "$name" "$sock"
     # ★데몬 up 확정 후 실패 trap을 풀teardown(kill+소켓+reg)으로 업그레이드 — 이후 단계 set -e 종료 시 orphan 0.
     trap '"$0" down "$name" >/dev/null 2>&1 || true' EXIT
     seed_schedule "$pack"
@@ -569,7 +977,7 @@ PY
     MISS="${CYS_DEPT_MISSIONS:-$HOME/.cys/dept-missions}"
     [ -f "$CAT" ] || { echo "[cys-dept] 카탈로그 부재: $CAT (GUI=레거시 allocate fallback)" >&2; exit 3; }  # fail-closed
     # 카탈로그 조회 + account dir 해석($HOME 전개). 파싱실패/키부재=fail-closed.
-    IFS=$'\t' read -r disp acctkey acctdir mkey cwd < <(python3 - "$CAT" "$key" <<'PY'
+    IFS=$'\t' read -r disp acctkey acctdir mkey cwd < <(python3 - "$(native_path "$CAT")" "$key" <<'PY'
 import json,sys,os
 cat,key=sys.argv[1:3]
 d=json.load(open(cat))                                   # 파싱실패=예외=비0=fail-closed
@@ -580,6 +988,7 @@ acct=dep['account']; acctdir=os.path.expandvars(d['accounts'][acct])
 print('\t'.join([dep['display'], acct, acctdir, dep['mission_key'], os.path.expandvars(dep['cwd'])]))
 PY
 ) || { echo "[cys-dept] 카탈로그 키 미정의/손상: $key" >&2; exit 4; }
+    cwd="${cwd%$'\r'}"   # 네이티브 Windows python은 CRLF 출력 → 마지막 필드에 CR이 남는다
     # 부서별 config dir 분리(오너 결정): primary(공유) 계정→부서별 dir(~/.cys/claude-<key>)로 config state 경합 완화.
     # primary 계정 키는 env CYS_PRIMARY_ACCOUNT로 외부화(기본 'owner')·오너는 자기 primary 핸들 값으로 설정하면 동일 동작 유지.
     # Max 계정 토큰은 macOS Keychain(계정단위)으로 공유 유지·dir만 분리. 단독 계정(부서 1개)은 이미 단독이라 불변.
@@ -588,7 +997,7 @@ PY
     # F3(codex): 멱등검사+예약을 단일 flock 원자. ★같은 mission_key 엔트리=청구됨 → REUSE(데몬 생사 무관·
     #   호출부가 ensure-ready). 신규는 lowest-unused 예약 + ★엔트리에 mission_key 기록(동시/부팅중 다른
     #   create가 즉시 발견 — codex: NEW 엔트리에 mission_key 누락 TOCTOU 해소).
-    res=$(reg_init; CYS_GRACE="${CYS_DEPT_RESERVE_GRACE:-25}" python3 - "$REG" "$mkey" "$cwd" "$acctdir" <<'PY'
+    res=$(reg_init; CYS_GRACE="${CYS_DEPT_RESERVE_GRACE:-25}" python3 - "$(native_path "$REG")" "$mkey" "$(native_path "$cwd")" "$(native_path "$acctdir")" <<'PY'
 import json,sys,os,re,time,socket as S
 try:
     import fcntl
@@ -650,6 +1059,7 @@ try:
 finally: _ulk(lf)
 PY
 ) || exit $?   # ★cap 거부(exit 8) 등 예약 실패 코드 그대로 전파
+    res="${res//$'\r'/}"
     verb="${res%% *}"; name="${res#* }"
     [ -n "$name" ] || { echo "[cys-dept] create: 예약 실패" >&2; exit 1; }
     sock="$(dept_sock "$name")"; pack="$(dept_pack "$name")"
@@ -672,6 +1082,7 @@ PY
       disown
       ready "$sock" || { if [ "$verb" = "NEW" ]; then reg_remove "$name"; fi; echo "[cys-dept] ERROR: $name 데몬 기동 실패" >&2; exit 1; }
     fi
+    reg_set_pids "$name" "$sock"
     # ★R3.1(CSO·codex R3-REG-SET-META-ORPHAN): 데몬 up 확정 후 실패 trap을 풀teardown(down=kill+소켓+reg)으로 업그레이드.
     #   이후 reg_set_meta fail-closed/시드/각성에서 set -e 종료해도 이미 뜬 데몬 orphan 0. NEW·REUSE_DEAD 공통.
     trap '"$0" down "$name" >/dev/null 2>&1 || true' EXIT
@@ -684,7 +1095,7 @@ PY
       "$0" down "$name" >/dev/null 2>&1 || true
       exit 6
     fi
-    if ! python3 "${CYS_PACK_DIR:-$PACK_DEFAULT}/bin/javis_preflight.py" --statusline-account "$acctdir"; then
+    if ! python3 "$(native_path "${CYS_PACK_DIR:-$PACK_DEFAULT}/bin/javis_preflight.py")" --statusline-account "$(native_path "$acctdir")"; then
       echo "[cys-dept] WARN: 사용량 상태줄 등록 실패 — 부서 생성은 계속" >&2
     fi
     trap - EXIT   # 격리 확정 — 이후 빈 셸 생성
@@ -709,10 +1120,13 @@ PY
     sock="$(dept_sock "$name")"
     # ★NO_AUTOSTART(감사 2026-07-10): 죽은 부서 down 시 identify가 cysd를 되살려 그걸 kill하던 낭비 spawn 제거
     # — 실패 시 pid 빈값이면 아래가 kill을 건너뛰고 rm+reg_remove로 진행(종국 상태 동일).
-    pid=$(CYS_NO_AUTOSTART=1 CYS_SOCKET="$sock" "$CYS" identify 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('daemon_pid',''))" 2>/dev/null || true)
+    IFS=$'\t' read -r pid started_at <<<"$(daemon_identity "$sock" 2>/dev/null || true)" || true; started_at="${started_at%$'\r'}"
     # orphan 방지(오너 ③): kill 후 데몬 사망 확인·잔존 시 SIGKILL(down이 데몬 살린 채 reg_remove→orphan 재발 차단).
     if [ -n "${pid:-}" ]; then
-      graceful_kill "$pid"
+      stop_receipt="$(graceful_kill "$pid" "${started_at:-}")"
+    elif [ "$dept_windows" = 1 ]; then
+      echo "[cys-dept] 부서 프로세스를 확인하지 못했습니다. 팀 정보를 유지합니다." >&2
+      exit 9
     fi
     rm -f "$sock" "$sock.lock" 2>/dev/null || true
     # ★R7(적대검증 W1): 묘비를 reg_remove **앞**에 — set -e 하에서 reg_remove 비0 종료
@@ -722,11 +1136,12 @@ PY
     reg_remove "$name"
     [ "$(reg_count)" = "0" ] && ceo_demote || true
     echo "[cys-dept] $name 종료·정리 완료. 부서 수=$(reg_count)"
+    [ -z "${stop_receipt:-}" ] || printf '%s\n' "$stop_receipt"
     ;;
   down-sock)
     # socket 기준 teardown — ws rename으로 name↔socket이 끊겨도 정확히 종료(레지스트리 역인덱스).
     sock="${2:?usage: cys-dept down-sock <socket>}"
-    name=$(reg_init; python3 - "$REG" "$sock" <<'PY'
+    name=$(reg_init; python3 - "$(native_path "$REG")" "$sock" <<'PY'
 import json,sys
 p,s=sys.argv[1:3]
 d=json.load(open(p)).get('depts',{})
@@ -734,6 +1149,7 @@ for n,e in d.items():
     if e.get('socket')==s: print(n); break
 PY
 )
+    name="${name%$'\r'}"
     if [ -z "$name" ]; then
       # ★D8 봉쇄(BOOTSTRAP_HARDENING WP-3): 역인덱스 실패(rename 레이스·레지스트리 손상) 시
       # 소켓 슬러그(cys-dept-<name>[.sock 부모] · unix/named pipe 공통)에서 name을 파생 —
@@ -742,16 +1158,31 @@ PY
       name=$(printf '%s' "$sock" | tr '\\' '/' | grep -o 'cys-dept-[^/]*' | head -1 | sed 's/^cys-dept-//') || true
       [ -n "$name" ] && echo "[cys-dept] down-sock: 역인덱스 실패 — 소켓 슬러그에서 name 파생($name)" >&2
     fi
-    pid=$(CYS_NO_AUTOSTART=1 CYS_SOCKET="$sock" "$CYS" identify 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('daemon_pid',''))" 2>/dev/null || true)
+    IFS=$'\t' read -r pid started_at <<<"$(daemon_identity "$sock" 2>/dev/null || true)" || true; started_at="${started_at%$'\r'}"
     if [ -n "${pid:-}" ]; then
-      graceful_kill "$pid"
+      stop_receipt="$(graceful_kill "$pid" "${started_at:-}")"
+    elif [ "$dept_windows" = 1 ]; then
+      # 신원 불명: 파이프가 없고 기록된 pid도 없을 때만 "이미 종료"(크래시 부서)로 정리. 그 외 = 기존 거부(exit 9).
+      if [ "$(dept_pipe_present "$sock" | tr -d '\r')" != absent ] || { [ -n "$name" ] && dept_recorded_pid_alive "$name"; }; then
+        echo "[cys-dept] 부서 프로세스를 확인하지 못했습니다. 팀 정보를 유지합니다." >&2
+        exit 9
+      fi
+      if [ "$(dept_has_pids "$name" | tr -d '\r')" = no ]; then
+        alive_procs="$(dept_scan_procs "cys-dept-$name" "$(native_path "$(dept_pack "$name")")" | tr -d '\r' | head -3 | tr '\t\n' ' :')"
+        if [ -n "$alive_procs" ]; then
+          echo "[cys-dept] 부서와 관련된 프로세스가 아직 살아 있습니다(pid ${alive_procs}). 팀 정보를 유지합니다." >&2
+          exit 9
+        fi
+      fi
+      echo "[cys-dept] 부서가 이미 종료되어 있어 정리했습니다 (등록 정보와 묘비만 정리, 팀 폴더는 그대로 둡니다)" >&2
     fi
     rm -f "$sock" "$sock.lock" 2>/dev/null || true
     # ★R7: 묘비 선기록(순서 통일 — down verb·GUI 제1행위와 동일 축)
     [ -n "$name" ] && dept_tombstone "$name" || true
-    [ -n "$name" ] && reg_remove "$name" || true
+    if [ -n "$name" ]; then reg_remove "$name"; fi
     [ "$(reg_count)" = "0" ] && ceo_demote || true
     echo "[cys-dept] socket teardown 완료(name=${name:-미등록}). 부서 수=$(reg_count)"
+    [ -z "${stop_receipt:-}" ] || printf '%s\n' "$stop_receipt"
     ;;
   rotate)
     # ★버전 스큐 세대교체(재기동, ★폐기 아님): 데몬 프로세스만 정지→새 on-disk cysd로 재기동한다.
@@ -776,8 +1207,8 @@ PY
       exit 9
     fi
     # 살아있음이 확인됐으니 identify는 실 데몬에 연결(autostart 없음). 구 버전(검증 게이트)·pid(kill 대상) 취득.
-    oldver="$(CYS_NO_AUTOSTART=1 CYS_SOCKET="$sock" "$CYS" identify 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('version',''))" 2>/dev/null || true)"
-    pid=$(CYS_NO_AUTOSTART=1 CYS_SOCKET="$sock" "$CYS" identify 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('daemon_pid',''))" 2>/dev/null || true)
+    oldver="$(CYS_NO_AUTOSTART=1 CYS_SOCKET="$sock" "$CYS" identify 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('version',''))" 2>/dev/null || true)"; oldver="${oldver%$'\r'}"
+    IFS=$'\t' read -r pid started_at <<<"$(daemon_identity "$sock" 2>/dev/null || true)" || true; started_at="${started_at%$'\r'}"
     # 방어적 재확인(ping↔identify 사이 경합으로 pid 비면 중단 — 위와 동일 근거).
     if [ -z "${pid:-}" ]; then
       echo "[cys-dept] $name pid 미확인 — rotate 중단(소유자 사망 미확인·유령 중복 방지)" >&2
@@ -785,7 +1216,7 @@ PY
     fi
     # 프로세스만 종료(down의 graceful_kill 재사용 — OS중립·Windows taskkill 분기 포함, 신설 분기 없음).
     # graceful_kill이 사망을 동기 확인하므로 아래 launch의 ready 프로브가 죽은 소켓을 새것으로 오인하지 않는다.
-    graceful_kill "$pid"
+    graceful_kill "$pid" "${started_at:-}"
     rm -f "$sock" "$sock.lock" 2>/dev/null || true
     # ★필수2(A·리뷰) TOCTOU 재확인: kill·rm 도중 CSO down(reg_remove+dept_tombstone)이 레이스로 끼어들어
     # 폐기됐으면 launch(부활) 금지 — 사전 게이트 이후 창을 최소화하려 launch 직전에 한 번 더 확인(미등재→exit 8).
@@ -797,7 +1228,7 @@ PY
     # launch stdout은 로그로 흘리고, 아래서 새 버전을 확정 출력한다.
     # CYS_DEPT_ROTATE=1: launch의 dept_tombstone_remove를 no-op으로 — rotate=묘비 불변 계약(WP-3).
     CYS_DEPT_ROTATE=1 bash "$0" launch "$name" || { echo "[cys-dept] ERROR: $name rotate 재기동 실패" >&2; exit 1; }
-    newver="$(CYS_NO_AUTOSTART=1 CYS_SOCKET="$sock" "$CYS" identify 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('version',''))" 2>/dev/null || true)"
+    newver="$(CYS_NO_AUTOSTART=1 CYS_SOCKET="$sock" "$CYS" identify 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('version',''))" 2>/dev/null || true)"; newver="${newver%$'\r'}"
     # ★검증 게이트(지시3): Rust/UI 성공 판정·사람 로그 확인용 — 마지막 줄에 확정 출력.
     echo "rotated $name: v${oldver:-?}→v${newver:-?}"
     ;;
@@ -809,7 +1240,7 @@ PY
     dry=0; [ "${2:-}" = "--dry" ] && dry=1
     reg_init
     # Phase 1 — flock 직렬화 스냅샷: 레지스트리(name·socket·reserved_at) 일관 덤프(read-only·짧은 락).
-    snap=$(python3 - "$REG" <<'PY'
+    snap=$(python3 - "$(native_path "$REG")" <<'PY'
 import json,sys
 try:
     import fcntl
@@ -831,9 +1262,11 @@ try:
 finally: _ulk(lf)
 PY
 ) || { echo "[cys-dept] reap: 스냅샷 실패" >&2; exit 1; }
+    snap="${snap//$'\r'/}"
     # 분류+집행(flock 밖·probe). reg_remove/down-sock는 각자 자체 flock·원자. 현재 셸 루프(카운터 보존).
-    nd=0; ni=0; ns=0
+    nd=0; ni=0; ns=0; nf=0
     while IFS=$'\t' read -r nm sk rat; do
+      rat="${rat%$'\r'}"
       [ -n "$nm" ] || continue
       if ! sock_alive "$sk"; then
         nd=$((nd+1))
@@ -847,14 +1280,16 @@ PY
       # ★[5] TOCTOU 차단: kill(down-sock) 직전 원자 재검증 — 스냅샷 이후 master/agent가 붙었으면 회수 취소.
       recls="ACTIVE:gone"; sock_alive "$sk" && recls="$(dept_classify_idle "$sk" "$rat")"
       if [ "$recls" = "IDLE" ]; then
-        ni=$((ni+1)); echo "[cys-dept] reap: IDLE $nm → down-sock teardown"; "$0" down-sock "$sk" >/dev/null 2>&1 || true
+        echo "[cys-dept] reap: IDLE $nm → down-sock teardown"
+        if "$0" down-sock "$sk"; then ni=$((ni+1)); else nf=$((nf+1)); fi
       else
         ns=$((ns+1)); echo "[cys-dept] reap: SKIP $nm — 집행직전 재검증서 활동전환($recls), teardown 취소(TOCTOU 보호)" >&2
       fi
     done <<EOF
 $snap
 EOF
-    echo "[cys-dept] reap 완료(dry=$dry): DEAD=$nd IDLE=$ni SKIP=$ns. 부서 수=$(reg_count)"
+    echo "[cys-dept] reap 완료(dry=$dry): DEAD=$nd IDLE=$ni SKIP=$ns FAIL=$nf. 부서 수=$(reg_count)"
+    [ "$nf" -eq 0 ] || exit 1
     ;;
   promote-ceo)
     # 오너 지명 경로(오너 2026-07-14): 오너/CSO가 기본 데몬 master를 CEO로 직접 지명 — 호출 자체가 동의.

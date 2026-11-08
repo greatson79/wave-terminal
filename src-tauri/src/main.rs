@@ -1269,23 +1269,9 @@ fn spawn_org_restore(app: AppHandle) {
                     if tombs.contains(name.as_str()) {
                         let mut detail = "삭제-의도 묘비 — 재기동 제외".to_string();
                         if alive {
-                            let _ = stop_dept_daemon_by_socket(
-                                sock.to_string_lossy().to_string(),
-                            )
-                            .await;
-                            // ★R4(D-IMPL-4): teardown 함수는 실패를 삼키므로(무조건 Ok) 재프로브로
-                            // 결과를 가시화 — 여전히 생존이면 WARN 라벨(차회 부팅 재시도가 수렴 경로).
-                            let still = tokio::time::timeout(
-                                std::time::Duration::from_secs(2),
-                                rpc_oneshot(&sock, "system.identify", json!({})),
-                            )
-                            .await
-                            .map(|r| r.is_ok())
-                            .unwrap_or(false);
-                            detail = if still {
-                                "삭제-의도 묘비 — teardown 미확정(WARN·차회 시작 시 재시도)".into()
-                            } else {
-                                "삭제-의도 묘비 — 잔존 데몬 정리 완료".into()
+                            detail = match stop_dept_daemon_by_socket(sock.to_string_lossy().to_string()).await {
+                                Ok(()) => "삭제-의도 묘비 — 잔존 데몬 정리 완료".into(),
+                                Err(error) => format!("삭제-의도 묘비 — 종료 확인 실패(재시도 필요): {error}"),
                             };
                         }
                         let _ = app.emit(
@@ -2030,11 +2016,7 @@ async fn stop_dept_daemon(name: String) -> Result<(), String> {
 /// 무비판 재-launch하지 않게 한다(옛 테스트 잔재·삭제된 부서 차단). 부재 시 빈 depts.
 #[tauri::command]
 fn list_depts() -> Result<Value, String> {
-    let reg = std::env::var("CYS_DEPTS_JSON")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            cys::home_dir().join(".cys/depts.json")
-        });
+    let reg = cys::depts_json_path();
     match std::fs::read_to_string(&reg) {
         Ok(s) => serde_json::from_str::<Value>(&s).map_err(|e| e.to_string()),
         Err(_) => Ok(json!({ "depts": {} })),
@@ -2044,11 +2026,7 @@ fn list_depts() -> Result<Value, String> {
 /// 부서 레지스트리(depts.json)에서 표시명 조회 — cys-dept reg_set_meta 가 기록한 display_name.
 /// create stdout 은 name only 이므로 표시명의 진실원은 레지스트리다. 부재/오류 시 None(=name 폴백).
 fn dept_display_name(name: &str) -> Option<String> {
-    let reg = std::env::var("CYS_DEPTS_JSON")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            cys::home_dir().join(".cys/depts.json")
-        });
+    let reg = cys::depts_json_path();
     let s = std::fs::read_to_string(&reg).ok()?;
     let v: Value = serde_json::from_str(&s).ok()?;
     v.get("depts")?

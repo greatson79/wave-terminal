@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""Hermetic path regressions: extracted real functions, no daemon or learner profile."""
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+import unittest
+
+DEPT = Path(__file__).resolve().parents[1] / "cys-dept"
+BASH = os.environ.get("CYS_TEST_BASH", "bash")
+
+
+def _stub(path, body):
+    # Bytes, not write_text: Windows text mode would turn the shebang line into "#!/bin/sh\r".
+    path.write_bytes(body.encode("utf-8"))
+
+
+class DepartmentPathTests(unittest.TestCase):
+    def test_registry_readers_keep_windows_escape_sequences_as_data(self):
+        source = DEPT.read_text(encoding="utf-8")
+        boundary = source.split("# HOTFIX-PYTHON-BOUNDARY-BEGIN", 1)[1].split("# HOTFIX-PYTHON-BOUNDARY-END", 1)[0]
+        definitions = boundary + "\n" + "\n".join(re.findall(r"^reg_(?:count|names)\(\).*", source, re.M))
+        for path in [r"C:\Users\최형석\내 팀\depts.json", r"D:\a\최형석\depts.json", "registry ' quoted.json"]:
+            with self.subTest(path=path), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                if os.name == "nt":
+                    target = root / "Users" / "최형석" / "a" / "내 팀" / "depts.json"
+                    target.parent.mkdir(parents=True)
+                    path = str(target)
+                else:
+                    target = root / path
+                target.write_text(json.dumps({"depts": {"dept-3": {}}}), encoding="utf-8")
+                program = 'reg_init(){ :; }\n' + definitions + '\nreg_count\nreg_names\n'
+                result = subprocess.run([BASH, "-c", program], env={**os.environ, "REG": path},
+                                        cwd=root, input="", text=True, encoding="utf-8", capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), ["1", "dept-3"])
+
+    def test_native_python_boundary_converts_msys_argv_without_rewriting_code_or_pipe(self):
+        source = DEPT.read_text(encoding="utf-8")
+        marker = "# HOTFIX-PYTHON-BOUNDARY-BEGIN"
+        self.assertIn(marker, source, "one native-Python argv boundary is required")
+        boundary = source.split(marker, 1)[1].split("# HOTFIX-PYTHON-BOUNDARY-END", 1)[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _stub(root / "uname", "#!/bin/sh\nprintf 'MINGW64_NT\\n'\n")
+            _stub(root / "cygpath", "#!/bin/sh\nprintf 'C:/%s\\n' \"${2#/c/}\"\n")
+            _stub(root / "python3", "#!/bin/sh\nprintf '%s\\n' \"$MSYS2_ARG_CONV_EXCL\" \"$@\"\n")
+            for executable in root.iterdir(): executable.chmod(0o700)
+            code = "import json; print('not a /c/path')"
+            program = boundary + '\npython3 -c "$TEST_CODE" "$(native_path "/c/Users/최형석/내 팀/depts.json")" "$TEST_PIPE"\n'
+            result = subprocess.run([BASH, "-c", program], env={**os.environ, "PATH": str(root)+os.pathsep+os.environ.get("PATH", ""), "TEST_CODE":code, "TEST_PIPE": r"\\.\pipe\cys-dept-dept-1"},
+                                    text=True, encoding="utf-8", capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.splitlines(), ["*", "-c", code, "C:/Users/최형석/내 팀/depts.json", r"\\.\pipe\cys-dept-dept-1"])
+
+    def test_non_path_slash_arguments_are_not_converted_on_windows(self):
+        # RED guard: a '/'-leading argument that is not a path (regex, option value, display name)
+        # must reach native Python untouched; only callers that pass a path convert it explicitly.
+        source = DEPT.read_text(encoding="utf-8")
+        boundary = source.split("# HOTFIX-PYTHON-BOUNDARY-BEGIN", 1)[1].split("# HOTFIX-PYTHON-BOUNDARY-END", 1)[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _stub(root / "uname", "#!/bin/sh\nprintf 'MINGW64_NT\\n'\n")
+            _stub(root / "cygpath", "#!/bin/sh\nprintf 'C:/%s\\n' \"${2#/c/}\"\n")
+            _stub(root / "python3", "#!/bin/sh\nprintf '%s\\n' \"$@\"\n")
+            for executable in root.iterdir(): executable.chmod(0o700)
+            program = boundary + '\npython3 /x /regex/i --opt=/y "/Team Name" "$(native_path /c/Users/user/depts.json)"\n'
+            result = subprocess.run([BASH, "-c", program], env={**os.environ, "PATH": str(root)+os.pathsep+os.environ.get("PATH", "")},
+                                    text=True, encoding="utf-8", capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.splitlines(), ["/x", "/regex/i", "--opt=/y", "/Team Name", "C:/Users/user/depts.json"])
+
+    def test_path_conversion_failure_fails_closed_and_never_runs_python(self):
+        source = DEPT.read_text(encoding="utf-8")
+        boundary = source.split("# HOTFIX-PYTHON-BOUNDARY-BEGIN", 1)[1].split("# HOTFIX-PYTHON-BOUNDARY-END", 1)[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ran = root / "python-ran"
+            _stub(root / "python3", "#!/bin/sh\n: > '%s'\n" % ran)
+            for executable in root.iterdir(): executable.chmod(0o700)
+            # uname/cygpath as shell functions: they win over PATH executables (Git's real cygpath.exe on Windows).
+            fakes = "uname(){ printf 'MINGW64_NT\\n'; }\ncygpath(){ return 1; }\n"
+            program = fakes + boundary + '\npython3 -c code "$(native_path /c/Users/user/depts.json)" other\n'
+            result = subprocess.run([BASH, "-c", program], env={**os.environ, "PATH": str(root)+os.pathsep+os.environ.get("PATH", "")},
+                                    text=True, encoding="utf-8", capture_output=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("경로 변환 실패 / path conversion failed: /c/Users/user/depts.json", result.stderr)
+            self.assertFalse(ran.exists(), "python must not run with a failed/empty path argument")
+
+
+if __name__ == "__main__":
+    unittest.main()

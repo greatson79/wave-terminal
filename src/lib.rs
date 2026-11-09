@@ -517,6 +517,44 @@ pub fn dept_socket_path(name: &str) -> PathBuf {
     }
 }
 
+/// 유닉스 소켓 경로 한도 메시지 — 모든 계층(GUI·CLI·데몬)이 이 한 문장만 쓴다.
+pub const SOCKET_PATH_TOO_LONG_MSG: &str = "부서 이름이나 사용자 폴더 경로가 너무 길어 연결 통로를 만들 수 없습니다. 더 짧은 부서 이름을 쓰세요.";
+
+/// `sockaddr_un.sun_path` 용량(NUL 포함, 바이트): macOS·BSD 104, 그 외 유닉스(Linux) 108.
+/// 단일 진실 — 다른 곳에 상수를 복제하지 않는다(cys-dept 쉘은 같은 값을 미러하고 테스트가 대조한다).
+pub const fn unix_sun_path_capacity() -> usize {
+    if cfg!(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "dragonfly")) { 104 } else { 108 }
+}
+
+/// 경로 UTF-8 바이트 길이 `len` 이 용량 `capacity`(NUL 포함)에 들어가는가: len + NUL <= capacity.
+pub const fn socket_path_fits(len: usize, capacity: usize) -> bool {
+    len < capacity
+}
+
+/// 소켓 경로 사전 검사. Windows(named pipe)는 항상 통과, 유닉스는 바이트 기준 한도 검사.
+/// bind/connect 전에 호출해 한국어 한 메시지로 거절한다.
+pub fn check_socket_path_len(path: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let _ = path;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        if socket_path_fits(path.as_os_str().len(), unix_sun_path_capacity()) {
+            Ok(())
+        } else {
+            Err(SOCKET_PATH_TOO_LONG_MSG.to_string())
+        }
+    }
+}
+
+/// 부서 소켓 경로를 만들며 한도를 함께 검사한다(생성 전 거절용).
+pub fn dept_socket_path_checked(name: &str) -> Result<PathBuf, String> {
+    let p = dept_socket_path(name);
+    check_socket_path_len(&p).map(|_| p)
+}
+
 /// Department name of a dept endpoint, matched only at the anchored department layout (Q3 · Theo 0207):
 /// Windows pipe `\\.\pipe\cys-dept-<name>` (final segment) · Unix runtime dir `cys-dept-<name>/cys.sock`
 /// (immediate parent + exact basename) · leaf `cys-dept-<name>.sock`. Never any other path part; lexical only.
@@ -654,6 +692,37 @@ mod tests {
             assert!(s.ends_with(".local/state/cys-dept-dept-3/cys.sock"), "unix .sock: {s}");
             assert!(!s.starts_with('/') || s.contains("/.local/state/"), "home 기반: {s}");
         }
+    }
+
+    #[test]
+    fn socket_path_limit_is_bytes_exact_and_korean_refused() {
+        let cap = unix_sun_path_capacity();
+        assert!(cap == 104 || cap == 108);
+        assert!(socket_path_fits(cap - 1, cap), "limit-1 bytes fits");
+        assert!(!socket_path_fits(cap, cap), "limit bytes (no room for NUL) refused");
+        #[cfg(not(windows))]
+        {
+            let ok = PathBuf::from(format!("/{}", "a".repeat(cap - 2)));
+            assert_eq!(ok.as_os_str().len(), cap - 1);
+            assert!(check_socket_path_len(&ok).is_ok(), "limit-1 ok");
+            let bad = PathBuf::from(format!("/{}", "a".repeat(cap - 1)));
+            assert_eq!(check_socket_path_len(&bad).unwrap_err(), SOCKET_PATH_TOO_LONG_MSG);
+            // Korean = 3 bytes/char: 40 chars = 120 bytes > limit even though only 40 chars.
+            let ko = PathBuf::from(format!("/Users/{}/.local/state/cys-dept-{}/cys.sock", "김".repeat(12), "미".repeat(11)));
+            assert!(ko.to_string_lossy().chars().count() < cap, "char count is under the limit, bytes are not");
+            assert!(check_socket_path_len(&ko).is_err(), "Korean path counted in bytes");
+            // a real short Korean dept path still works
+            assert!(check_socket_path_len(Path::new("/Users/kylechoi/.local/state/cys-dept-개발본부/cys.sock")).is_ok());
+        }
+        // Windows named pipe is never length-checked.
+        #[cfg(windows)]
+        assert!(check_socket_path_len(Path::new(&format!(r"\\.\pipe\cys-dept-{}", "김".repeat(200)))).is_ok());
+        #[cfg(not(windows))]
+        {
+            assert!(dept_socket_path_checked("dept-3").is_ok());
+            assert_eq!(dept_socket_path_checked(&"미".repeat(40)).unwrap_err(), SOCKET_PATH_TOO_LONG_MSG);
+        }
+        assert!(SOCKET_PATH_TOO_LONG_MSG.contains("너무 길어") && SOCKET_PATH_TOO_LONG_MSG.contains("짧은 부서 이름"));
     }
 
     #[test]

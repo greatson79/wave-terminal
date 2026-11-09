@@ -392,7 +392,7 @@ fn drain_verify_failure(exit_code: Option<i32>, stderr: &str) -> &'static str {
 #[tauri::command]
 async fn drain_verify(timeout: u64) -> Result<Value, String> {
     let out = tokio::task::spawn_blocking(move || {
-        let mut cmd = std::process::Command::new(resolve_sidecar(if cfg!(windows) { "cys.exe" } else { "cys" }));
+        let mut cmd = std::process::Command::new(resolve_sidecar(if cfg!(windows) { "wave.exe" } else { "wave" }));
         cmd.arg("drain").arg("--verify").arg("--timeout").arg(timeout.to_string());
         no_console(&mut cmd);
         cmd.output()
@@ -1149,7 +1149,7 @@ fn maybe_apply_pending_update(app: &AppHandle) -> bool {
         PendingUpdatePlan::Apply => {}
     }
     // ① 새 팩(새 기능) 반영 — 성공 여부를 검사한다(침묵 실패 차단).
-    let mut init_cmd = std::process::Command::new(resolve_sidecar(if cfg!(windows) { "cys.exe" } else { "cys" }));
+    let mut init_cmd = std::process::Command::new(resolve_sidecar(if cfg!(windows) { "wave.exe" } else { "wave" }));
     init_cmd.arg("init-pack").arg("--no-install-hook");
     no_console(&mut init_cmd);
     let pack_output = init_cmd.output();
@@ -1184,7 +1184,7 @@ fn maybe_apply_pending_update(app: &AppHandle) -> bool {
 /// autostart되는 것을 막는다(살아있는 대상에만 호출하므로 평시 무영향인 심층방어). 반환=성공 여부.
 async fn run_sidecar_restore(socket: Option<std::path::PathBuf>) -> bool {
     tokio::task::spawn_blocking(move || {
-        let mut cmd = std::process::Command::new(resolve_sidecar(if cfg!(windows) { "cys.exe" } else { "cys" }));
+        let mut cmd = std::process::Command::new(resolve_sidecar(if cfg!(windows) { "wave.exe" } else { "wave" }));
         cmd.arg("restore").arg("--include-master");
         cmd.env("CYS_NO_AUTOSTART", "1"); // 죽은 소켓에 빈 데몬 autostart 금지(사이드카 CLI 가드)
         if let Some(sock) = socket {
@@ -1377,7 +1377,7 @@ fn run_skill(name: String, ticket: String, agent: Option<String>, close_after: O
     if ticket.trim().is_empty() {
         return Err("ticket 비어 있음 — 무계약 실행 금지".into());
     }
-    let cys = resolve_sidecar(if cfg!(windows) { "cys.exe" } else { "cys" });
+    let cys = resolve_sidecar(if cfg!(windows) { "wave.exe" } else { "wave" });
     let mut cmd = std::process::Command::new(&cys);
     cmd.arg("skill").arg("run").arg(&name)
         .args(["--ticket", &ticket])
@@ -1915,6 +1915,8 @@ fn dept_socket_path(name: &str) -> std::path::PathBuf {
 /// 그 데몬용 이벤트 forwarder를 추가 spawn하고 socket·slug·identify를 반환한다.
 #[tauri::command]
 async fn launch_dept_daemon(app: AppHandle, name: String) -> Result<Value, String> {
+    // Too-long unix socket path (Korean home/dept name): refuse with the shared Korean message BEFORE anything is created.
+    cys::dept_socket_path_checked(&name)?;
     let tool = dept_tool();
     let n = name.clone();
     let out = tokio::task::spawn_blocking(move || {
@@ -2260,7 +2262,7 @@ async fn rotate_dept_daemon(app: AppHandle, name: String, force: bool, skip_drai
     if skip_drain != Some(true) {
         let dsock = sock.to_string_lossy().into_owned();
         let _ = tokio::task::spawn_blocking(move || {
-            let mut cmd = std::process::Command::new(resolve_sidecar(if cfg!(windows) { "cys.exe" } else { "cys" }));
+            let mut cmd = std::process::Command::new(resolve_sidecar(if cfg!(windows) { "wave.exe" } else { "wave" }));
             cmd.env(cys::ENV_SOCKET, &dsock);
             cmd.arg("drain");
             no_console(&mut cmd);
@@ -2494,7 +2496,7 @@ async fn install_update(app: AppHandle, force: bool) -> Result<(), String> {
     // 자체 watchdog(12s)로 hang 시에도 종료되므로 별도 timeout 없이 await해도 업데이트가 멈추지 않는다.
     let _ = app.emit("update-progress", json!({"phase": "drain"}));
     let _ = tokio::task::spawn_blocking(|| {
-        let mut cmd = std::process::Command::new(resolve_sidecar(if cfg!(windows) { "cys.exe" } else { "cys" }));
+        let mut cmd = std::process::Command::new(resolve_sidecar(if cfg!(windows) { "wave.exe" } else { "wave" }));
         cmd.arg("drain");
         no_console(&mut cmd);
         cmd.status()
@@ -2535,7 +2537,7 @@ async fn rotate_daemon(app: AppHandle, force: bool, skip_drain: Option<bool>) ->
     // drain(best-effort): 교대 전 살아있는 노드에 저장 신호 + 유예 (install_update 3단계 동형).
     if skip_drain != Some(true) {
         let _ = tokio::task::spawn_blocking(|| {
-            let mut cmd = std::process::Command::new(resolve_sidecar(if cfg!(windows) { "cys.exe" } else { "cys" }));
+            let mut cmd = std::process::Command::new(resolve_sidecar(if cfg!(windows) { "wave.exe" } else { "wave" }));
             cmd.arg("drain");
             no_console(&mut cmd);
             cmd.status()
@@ -2565,7 +2567,7 @@ async fn install_pack_update(
     from: Option<String>,
 ) -> Result<String, String> {
     let _ = app.emit("pack-progress", json!({"phase": "start"}));
-    let cys = resolve_sidecar(if cfg!(windows) { "cys.exe" } else { "cys" });
+    let cys = resolve_sidecar(if cfg!(windows) { "wave.exe" } else { "wave" });
     let mut cmd = std::process::Command::new(&cys);
     cmd.arg("pack-update");
     no_console(&mut cmd);
@@ -2909,6 +2911,18 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    /// 0.3.2: GUI-initiated CLI calls go to the canonical `wave` sidecar, never through the `cys` forwarder.
+    #[test]
+    fn gui_never_resolves_the_cys_forwarder_sidecar() {
+        let src = include_str!("main.rs");
+        let call = ["resolve_sidecar(", "if cfg!(windows) { \"cys", ".exe\" } else { \"cys\" })"].concat();
+        assert_eq!(src.matches(&call).count(), 0, "GUI still resolves the cys sidecar");
+        for name in ["cys.exe", "cys"] {
+            let direct = format!("resolve_sidecar(\"{name}\")");
+            assert!(!src.contains(&direct), "{direct}");
+        }
+    }
+
     #[test]
     #[cfg(target_os = "macos")]
     #[ignore = "run through scripts/tests/test_bundle_python_seal.py with a copied runtime"]

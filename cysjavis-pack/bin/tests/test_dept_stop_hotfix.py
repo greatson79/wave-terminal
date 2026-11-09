@@ -82,6 +82,8 @@ class StopTests(unittest.TestCase):
         function = source.split("graceful_kill(){", 1)[1].split("\nreg_init(){", 1)[0]
         program = "graceful_kill(){" + function + '''
 dept_windows=0
+dept_stop_images(){ printf '/x/waved'; }
+dept_live_image(){ printf '/x/waved\\n'; }
 ps(){ printf 'Fri Nov  6 12:00:00 2026\\n'; }
 kill(){ return 1; }
 sleep(){ :; }
@@ -194,7 +196,7 @@ graceful_kill 101
                         return True
                     def CloseHandle(self, handle): self.closed.append(handle)
                 backend.kernel, backend.started_at = Kernel(), 1.0
-                backend.image = os.path.normcase(os.path.abspath("cysd.exe"))
+                backend.images = {os.path.normcase(os.path.abspath("cysd.exe"))}
                 backend.open = lambda pid: {"pid":pid, "created":created, "handle":55}
                 with self.assertRaises(ns["StopFailure"]): backend.capture(101)
                 self.assertEqual(backend.kernel.closed, [55])
@@ -209,7 +211,7 @@ graceful_kill 101
                 return True
             def CloseHandle(self, handle): self.closed.append(handle)
         backend.kernel, backend.started_at = Kernel(), 1.0
-        backend.image = os.path.normcase(os.path.abspath("cysd.exe"))
+        backend.images = {os.path.normcase(os.path.abspath("cysd.exe"))}
         backend.open = lambda pid: {"pid":pid, "created":116444736005000000, "handle":55}
         known = backend.capture(101)
         self.assertEqual(backend.kernel.closed, [])

@@ -12,12 +12,33 @@
 ; prev 체인(prev→prev2→prev3): 직전 lame-duck이 아직 살아 prev 파일을 점유 중일 수 있어
 ; 고정 3칸으로 우회한다(연속 lame-duck 2개 초과는 실사용상 희귀 — 초과 시 폴백 kill).
 
+; taskkill exit code → DetailPrint + "$TEMP\wave-install-kill.log" (0 = killed, 128 = none running),
+; so a later update proof can read whether the install-time kill fired. $0/$1 saved & restored.
+!macro WAVE_KILL_LOG IMAGE
+  Exch $0
+  Push $1
+  DetailPrint "${IMAGE} exit=$0"
+  FileOpen $1 "$TEMP\wave-install-kill.log" a
+  StrCmp $1 "" +4
+  FileSeek $1 0 END
+  FileWrite $1 "${IMAGE} exit=$0$\r$\n"
+  FileClose $1
+  Pop $1
+  Pop $0
+!macroend
+
 !macro NSIS_HOOK_PREINSTALL
   ; ① GUI만 종료(세션은 데몬 소유 — 무손실). updater 경로면 이미 종료 중이라 멱등.
   ; 0.3.2: canonical GUI wave-app + 구 이름 GUI forwarder cys-app 둘 다.
   nsExec::Exec 'taskkill /F /T /IM wave-app.exe'
+  !insertmacro WAVE_KILL_LOG "wave-app.exe"
   nsExec::Exec 'taskkill /F /T /IM cys-app.exe'
-
+  !insertmacro WAVE_KILL_LOG "cys-app.exe"
+  ; 0.3.2: no old-name image may stay resident (cysd.exe/cys.exe forwarders) — Theo kai#1e17e2.
+  nsExec::Exec 'taskkill /F /T /IM cysd.exe'
+  !insertmacro WAVE_KILL_LOG "cysd.exe"
+  nsExec::Exec 'taskkill /F /T /IM cys.exe'
+  !insertmacro WAVE_KILL_LOG "cys.exe"
 
   ; ② waved.exe rename-swap (canonical 데몬 무사망)
   IfFileExists "$INSTDIR\waved.exe" 0 waved_done

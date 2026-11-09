@@ -282,8 +282,31 @@ fn shutdown_cleanup(daemon: &Arc<Daemon>, reason: &str) {
 }
 
 #[cfg(unix)]
+/// Korean message for a socket path that cannot be bound; None when the path is fine so far.
+/// Pure (no I/O) so tests can inject any path. Too-long path gets the shared one-sentence message.
+fn socket_prebind_error(socket_path: &std::path::Path) -> Option<String> {
+    cys::check_socket_path_len(socket_path).err()
+}
+
+/// Korean text for a failed bind (never a panic): too-long path → shared message, else path + OS error.
+fn bind_failure_message(socket_path: &std::path::Path, e: &std::io::Error) -> String {
+    socket_prebind_error(socket_path).unwrap_or_else(|| {
+        format!("연결 통로를 만들 수 없습니다: {} ({e})", socket_path.display())
+    })
+}
+
+/// Bind the daemon socket; failure = (Korean message, non-zero exit code), never a panic.
+fn bind_listener(socket_path: &std::path::Path) -> Result<tokio::net::UnixListener, (String, i32)> {
+    tokio::net::UnixListener::bind(socket_path).map_err(|e| (bind_failure_message(socket_path, &e), 1))
+}
+
 async fn accept_loop(daemon: Arc<Daemon>, socket_path: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
+    // Refuse before creating any folder/lock/heartbeat when the path cannot fit sun_path.
+    if let Some(msg) = socket_prebind_error(socket_path) {
+        eprintln!("오류: {msg}");
+        std::process::exit(1);
+    }
     if let Some(dir) = socket_path.parent() {
         let _ = std::fs::create_dir_all(dir);
         // 상태 디렉터리는 소유자 전용 — transcripts.db·feed.jsonl·소켓을 같은 UID로 봉인
@@ -325,8 +348,10 @@ async fn accept_loop(daemon: Arc<Daemon>, socket_path: &std::path::Path) {
         }
         let _ = std::fs::remove_file(socket_path);
     }
-    let listener = tokio::net::UnixListener::bind(socket_path)
-        .unwrap_or_else(|e| panic!("bind {} failed: {e}", socket_path.display()));
+    let listener = bind_listener(socket_path).unwrap_or_else(|(msg, code)| {
+        eprintln!("오류: {msg}");
+        std::process::exit(code);
+    });
     // 소켓 파일은 소유자만 read/write — 인증 없는 제어 채널을 같은 UID로 한정한다.
     // (master·worker·gemini·codex 노드는 모두 오너 UID로 도는 단일 사용자 구조)
     let _ = std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600));
@@ -469,6 +494,32 @@ fn open_startup_lock(lock_path: &std::path::Path) -> Result<std::fs::File, Start
         return Err(StartupLockError::Refused("데몬 시작 잠금이 일반 파일이 아니어서 사용하지 않습니다.".into()));
     }
     Ok(file)
+}
+
+#[cfg(all(test, unix))]
+mod socket_path_limit_tests {
+    #[tokio::test]
+    async fn too_long_bind_is_korean_message_and_nonzero_code_not_panic() {
+        let long = std::path::PathBuf::from("/tmp").join("김".repeat(40)).join("cys.sock");
+        assert!(super::socket_prebind_error(&long).is_some(), "pre-check refuses before any folder is made");
+        let (msg, code) = super::bind_listener(&long).err().expect("bind must fail");
+        assert_eq!(msg, cys::SOCKET_PATH_TOO_LONG_MSG);
+        assert_ne!(code, 0);
+        assert!(!long.parent().unwrap().exists(), "no half-created folder");
+    }
+
+    #[tokio::test]
+    async fn short_path_bind_works_and_other_failures_get_korean_text() {
+        let dir = std::path::PathBuf::from("/tmp").join(format!("wv-sl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ok = dir.join("a.sock");
+        let _l = super::bind_listener(&ok).expect("short path binds");
+        assert!(super::socket_prebind_error(&ok).is_none());
+        let (msg, code) = super::bind_listener(&ok).err().expect("second bind fails");
+        assert!(msg.starts_with("연결 통로를 만들 수 없습니다"), "{msg}");
+        assert_ne!(code, 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
 
 #[cfg(all(test, unix))]

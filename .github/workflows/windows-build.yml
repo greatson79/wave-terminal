@@ -105,6 +105,37 @@ jobs:
           ls -la "$RT/git/usr/bin/bash.exe" "$RT/git/cmd/git.exe" "$RT/python/python3.exe"
           du -sh "$RT" "$RT/git" "$RT/python" || true
 
+      # 0.3.2: compile every Windows test target BEFORE packaging (the proof run found an app test that only
+      # failed to compile on Windows). `--no-run` compiles, never runs, so no host/daemon state is touched.
+      # tauri-build needs the bundle inputs to exist: inert placeholders are staged ONLY where absent, inside
+      # this runner checkout (all four paths are gitignored), and removed again so packaging starts clean.
+      - name: Windows test-compile gate (workspace core lib + bins, and the wave-app crate)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $staged = @()
+          function Stage([string]$rel, [bool]$dir = $false) {
+            $target = Join-Path (Get-Location).Path $rel
+            if (Test-Path -LiteralPath $target) { return }
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+            if ($dir) { New-Item -ItemType Directory -Force -Path $target | Out-Null } else { [IO.File]::WriteAllBytes($target, [byte[]](0x4d, 0x5a)) }
+            $script:staged += $target
+          }
+          try {
+            foreach ($bin in 'wave','waved','cys','cysd','cys-app') { Stage "src-tauri/binaries/$bin-x86_64-pc-windows-msvc.exe" }
+            Stage 'src-tauri/resources/pack.tar.gz'
+            Stage 'src-tauri/resources/pack-manifest.json'
+            Stage 'ui/dist/index.html'
+            # Every package in the workspace (core lib + all bins, then the app crate); failing the job on any error.
+            cargo test --workspace --no-run
+            if ($LASTEXITCODE -ne 0) { throw "cargo test --workspace --no-run failed with exit $LASTEXITCODE" }
+            cargo test -p wave-app --no-run
+            if ($LASTEXITCODE -ne 0) { throw "cargo test -p wave-app --no-run failed with exit $LASTEXITCODE" }
+            Write-Host 'WINDOWS_TEST_COMPILE_OK workspace + wave-app'
+          } finally {
+            foreach ($file in $staged) { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue }
+          }
+
       - name: Build Windows x64 (Tauri → NSIS setup.exe)
         shell: bash
         env:

@@ -269,8 +269,9 @@ mod tests {
     fn tmp_dir() -> PathBuf {
         // Parallel tests: the clock alone can repeat (microsecond granularity on macOS), so add a counter.
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let d = std::env::temp_dir().join(format!(
-            "cysd-deadman-test-{}-{}-{}",
+        // Sockets are bound under this dir: macOS sun_path is 104 bytes and CI TMPDIR is long, so use short /tmp.
+        let d = std::path::PathBuf::from("/tmp").join(format!(
+            "wv-dm-{}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -279,6 +280,10 @@ mod tests {
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&d).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         d
     }
 

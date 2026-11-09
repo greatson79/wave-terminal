@@ -3904,6 +3904,7 @@ async function promptBinaryPatch() {
 // 강제 재시작 없음(세션 보존 우선). 잃을 세션 0인 노드는 무손실 자동 교대, 세션 있는 노드만 배지+1회 안내.
 // ★거버넌스: 부서 교대는 '재기동'일 뿐 CSO 단일소유 생성/폐기 권한을 건드리지 않는다
 // (rotate_dept_daemon=cys-dept rotate=데몬 프로세스만 재기동·레지스트리·묘비·CEO 불변).
+const MIGRATION_REFUSED_TOAST = "새 데몬으로 옮기지 못해 기존 데몬으로 계속 실행합니다. 컴퓨터를 다시 켜면 새 판이 적용됩니다.";
 let rotatingDaemon = false;
 let verSkewBadge: HTMLElement | null = null;
 let skewNoticeShown = false; // C: 세션당 1회 능동 안내 플래그(스큐 해소 시 리셋)
@@ -4727,6 +4728,14 @@ async function start() {
   const status = (await invoke("daemon_status")) as Record<string, unknown>;
   info.textContent = `daemon pid=${status.daemon_pid} sock=${status.socket_path}`;
   headerDaemonInfo.textContent = `pid=${status.daemon_pid} sock=${status.socket_path}`;
+  // A refused/failed daemon migration no longer blocks the UI: startup continued on the running daemon; say so (the detail stays in #daemon-info).
+  try {
+    const migrationNotice = await invoke("migration_notice") as string | null;
+    if (migrationNotice) {
+      headerDaemonInfo.textContent += ` · ${migrationNotice}`;
+      toast("health", "업데이트 안내", MIGRATION_REFUSED_TOAST);
+    }
+  } catch { /* older backend without the command: nothing to show */ }
   accountOwners = await invoke("account_owners").catch(() => ({})) as Record<string, string>;
   accountOrder = await invoke("account_order").catch(() => []) as string[];
   void refreshSidebarUsage();

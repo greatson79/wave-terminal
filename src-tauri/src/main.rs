@@ -21,6 +21,8 @@ mod rename_layout;
 
 static STARTUP_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static STARTUP_ERROR: Mutex<Option<String>> = Mutex::new(None);
+/// The migration refusal shown to the user once the UI is ready (pulled by the UI; an event could fire before it listens).
+static MIGRATION_NOTICE: Mutex<Option<String>> = Mutex::new(None);
 
 #[tauri::command]
 async fn take_rename_surface_map(app: AppHandle) -> Result<Value, String> {
@@ -316,6 +318,11 @@ fn set_account_owner(app: AppHandle, key: String, owner: String) -> Result<std::
 
 /// GUI(cys-app) 자기 버전 — 데몬 버전(system.identify .version)과 비교해 rename-swap 후
 /// lame-duck 스큐(구 데몬 + 새 앱)를 UI 배지로 알리는 용도(P2 · 비차단·강제 재시작 없음).
+#[tauri::command]
+fn migration_notice() -> Option<String> {
+    MIGRATION_NOTICE.lock().ok().and_then(|notice| notice.clone())
+}
+
 #[tauri::command]
 fn app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
@@ -2808,6 +2815,7 @@ fn main() {
             read_dept_catalog,
             install_cli_to_path,
             app_version,
+            migration_notice,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -2816,11 +2824,15 @@ fn main() {
                     Ok(path)=>path,
                     Err(error)=>{ if let Ok(mut retained)=STARTUP_ERROR.lock(){*retained=Some(error.clone());} let _=handle.emit("daemon-error",error);return; },
                 };
-                if let Err(error) = rename_migration::run(settings_file).await {
-                    if let Ok(mut retained) = STARTUP_ERROR.lock() { *retained = Some(error.clone()); }
-                    let _ = handle.emit("daemon-error", error);
-                    return;
+                // Fail-open (Theo 2026-11-09): a refused/failed migration records the error and tells the UI, but startup CONTINUES on the
+                // daemon that is already running — never a dead GUI. The failed path stopped/changed nothing it did not finish.
+                let migration = rename_migration::run(settings_file).await;
+                if let Some(error) = rename_migration::migration_error(&migration) {
+                    if let Ok(mut retained) = STARTUP_ERROR.lock() { *retained = Some(error.to_string()); }
+                    if let Ok(mut notice) = MIGRATION_NOTICE.lock() { *notice = Some(error.to_string()); }
+                    eprintln!("[wave-app] migration refused, continuing on the running daemon: {error}");
                 }
+                if !rename_migration::startup_continues(&migration) { return; }
                 // ★온보딩 게이트(v4) — GUI 전용 완료 마커(.gui-onboarded) 기준. 팩 마커(.pack-version)
                 // 기준이던 v3는 CLI autostart·잔존 schtasks 등으로 cysd가 GUI보다 먼저 돈 머신에서
                 // 게이트가 선점돼 ~/.claude hook이 영구 미설치됐다(0.12.52 cys-neo 실사고 — "너는

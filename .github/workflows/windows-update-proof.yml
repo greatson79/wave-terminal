@@ -64,7 +64,7 @@ jobs:
           if (-not $rc.isPrerelease) { throw "$env:RC_TAG is not a prerelease" }
           $latest = (gh release view -R $env:REPO --json tagName | ConvertFrom-Json).tagName
           if ($latest -eq $env:RC_TAG) { throw 'the rc is marked latest' }
-          Invoke-WebRequest "https://github.com/$env:REPO/releases/latest/download/latest.json" -OutFile channel-before.json
+          Invoke-WebRequest "https://github.com/$env:REPO/releases/latest/download/latest.json" -MaximumRetryCount 5 -RetryIntervalSec 5 -OutFile channel-before.json
           $channel = (Get-Content channel-before.json -Raw | ConvertFrom-Json).version
           if ("v$channel" -ne $env:BASE_TAG) { throw "channel latest.json says $channel, expected $env:BASE_TAG" }
           if ((Get-Content channel-before.json -Raw) -match [regex]::Escape($env:RC_TAG)) { throw 'channel latest.json points at the rc' }
@@ -101,17 +101,53 @@ jobs:
           $env:CYS_UPDATE_MANIFEST_URL = "https://github.com/$env:REPO/releases/download/$env:RC_TAG/latest-rc.json"
           $env:CYS_AUTOTEST_PATCH_INSTALL = '1'
           Write-Host "UPDATE_SOURCE $env:CYS_UPDATE_MANIFEST_URL"
+          New-Item -ItemType Directory -Force -Path evidence\shots | Out-Null
+          function Shot([string]$name) {   # the 0.3.1 app reports updater errors only as a UI toast (it has no log plugin) — keep a picture
+            try {
+              Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+              $b = [Windows.Forms.SystemInformation]::VirtualScreen
+              $bmp = New-Object Drawing.Bitmap $b.Width, $b.Height
+              $g = [Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size)
+              $bmp.Save((Join-Path 'evidence\shots' "$name.png")); $g.Dispose(); $bmp.Dispose()
+            } catch { Write-Host "SHOT_FAILED $name $($_.Exception.Message)" }
+          }
+          function Timeline([string]$tag) {   # was there ever a setup/NSIS process? one line per interesting process every 15 s
+            $rows = Get-CimInstance Win32_Process | Where-Object { $_.Name -match '(?i)setup|nsis|nsu|update|wave|cys|waved|msedgewebview2' -and $_.Name -notmatch '(?i)msedgewebview2' } |
+              ForEach-Object { "{0} pid={1} ppid={2} {3}" -f $_.Name, $_.ProcessId, $_.ParentProcessId, $_.ExecutablePath }
+            Add-Content -Path evidence\processes_timeline.txt -Value ("[{0}] {1}`n  {2}" -f (Get-Date -Format o), $tag, ($rows -join "`n  "))
+          }
           Start-Process -FilePath (Join-Path $dir 'cys-app.exe')
           Remove-Item Env:CYS_UPDATE_MANIFEST_URL, Env:CYS_AUTOTEST_PATCH_INSTALL
           $watch = [Diagnostics.Stopwatch]::StartNew()
           $new = Join-Path $dir 'wave-app.exe'
+          $nextLine = 0; $nextShot = 0
           while ($watch.Elapsed.TotalMinutes -lt 12) {
             if ((Test-Path $new) -and (Get-Item $new).VersionInfo.ProductVersion -match '^0\.3\.2') { break }
+            $t = [int]$watch.Elapsed.TotalSeconds
+            if ($t -ge $nextLine) { Timeline "t=${t}s"; $nextLine = $t + 15 }
+            if ($t -ge $nextShot) { Shot ("t{0:D3}" -f $t); $nextShot = $t + 60 }
             Start-Sleep -Seconds 5
           }
+          if (-not ((Test-Path $new) -and (Get-Item $new).VersionInfo.ProductVersion -match '^0\.3\.2')) { Timeline 'TIMEOUT'; Shot 'timeout' }
           if (-not ((Test-Path $new) -and (Get-Item $new).VersionInfo.ProductVersion -match '^0\.3\.2')) { throw 'the in-app update did not install 0.3.2 within 12 minutes (wrong signature / manifest / asset name?)' }
           Start-Sleep -Seconds 15
           Write-Host "UPDATED wave-app.exe $((Get-Item $new).VersionInfo.ProductVersion) after $([int]$watch.Elapsed.TotalSeconds)s"
+          # wave-app.exe reads 0.3.2 while the installer is still copying files: wait for the installer to be gone BEFORE judging the
+          # install dir. Keep the process handle while polling so its exit code can be read.
+          $iw = [Diagnostics.Stopwatch]::StartNew(); $held = $null
+          while ($iw.Elapsed.TotalMinutes -lt 5) {
+            $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like '*installer*' })
+            if ($running.Count -eq 0) { break }
+            if (-not $held) { $held = $running[0]; $null = $held.Handle }
+            Start-Sleep -Seconds 2
+          }
+          $still = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like '*installer*' })
+          if ($still.Count -gt 0) {
+            Get-ChildItem -LiteralPath $dir -File | Sort-Object Name | ForEach-Object { Write-Host ("DIR {0,-24} {1,10}" -f $_.Name, $_.Length) }
+            throw "installer still running after 5 minutes: $(($still | ForEach-Object { "$($_.ProcessName) pid=$($_.Id)" }) -join ', ')"
+          }
+          $exitText = if ($held) { try { "exit=$($held.ExitCode)" } catch { 'exit=unknown' } } else { 'installer process never observed' }
+          Write-Host "INSTALLER_GONE after $([int]$iw.Elapsed.TotalSeconds)s ($exitText)"
           # (1) the install succeeded WITH the 0.3.1 daemon running: cysd.exe on disk must now be the 0.3.2 forwarder (the old
           # image was rename-swapped to cysd.prev*.exe). Never fix a failed swap by killing the daemon.
           $old = Get-Content old-daemon.json -Raw | ConvertFrom-Json
@@ -182,10 +218,62 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          Invoke-WebRequest "https://github.com/$env:REPO/releases/latest/download/latest.json" -OutFile channel-after.json
+          Invoke-WebRequest "https://github.com/$env:REPO/releases/latest/download/latest.json" -MaximumRetryCount 5 -RetryIntervalSec 5 -OutFile channel-after.json
           $a = (Get-Content channel-before.json -Raw -ErrorAction SilentlyContinue); $b = Get-Content channel-after.json -Raw
           if ($a -and $a -ne $b) { throw 'channel latest.json changed during the proof' }
           Write-Host 'CHANNEL_UNCHANGED'
+
+      - name: Capture the 0.3.1 updater evidence (app/daemon logs, %TEMP% download + NSIS traces, on-disk cysd.exe)
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Force -Path evidence | Out-Null
+          $dir = Join-Path $env:LOCALAPPDATA 'Wave Terminal'
+          # a) logs. v0.3.1 has NO log plugin (updater failures are a UI toast only). ALLOW-LIST of exact files only — no directory
+          # sweep and no deny-list: only these paths can ever be copied. Directory NAMES (never contents) are printed so the
+          # allow-list can be extended by hand if a needed log is missing.
+          $allow = @(
+            (Join-Path $env:LOCALAPPDATA 'cys\cysd.log'), (Join-Path $env:LOCALAPPDATA 'cys\cys.log'), (Join-Path $env:LOCALAPPDATA 'cys\waved.log'),
+            (Join-Path $env:LOCALAPPDATA 'cys\wave.log'), (Join-Path $env:LOCALAPPDATA 'cys\daemon.log'),
+            (Join-Path $env:LOCALAPPDATA 'com.waveainetworks.wave-terminal\logs\Wave Terminal.log'),
+            (Join-Path $env:APPDATA 'com.waveainetworks.wave-terminal\logs\Wave Terminal.log'),
+            (Join-Path $HOME '.cys\update.log'), (Join-Path $HOME '.cys\.pending-restore'))
+          foreach ($file in $allow) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { Write-Host "ALLOWED_LOG_ABSENT $file"; continue }
+            $to = Join-Path 'evidence\app-logs' (($file -replace '[:\\/]', '_'))
+            New-Item -ItemType Directory -Force -Path 'evidence\app-logs' | Out-Null
+            Copy-Item -LiteralPath $file -Destination $to -ErrorAction SilentlyContinue
+            Write-Host "ALLOWED_LOG_COPIED $file"
+            Select-String -LiteralPath $file -Pattern 'update|download|signature|install|error|fail|minisign|manifest|http' -ErrorAction SilentlyContinue | Select-Object -First 40 |
+              ForEach-Object { Write-Host ("LOGLINE {0}: {1}" -f (Split-Path $file -Leaf), $_.Line.Trim()) }
+          }
+          foreach ($d in @((Join-Path $env:LOCALAPPDATA 'cys'), (Join-Path $env:LOCALAPPDATA 'com.waveainetworks.wave-terminal'), (Join-Path $env:APPDATA 'com.waveainetworks.wave-terminal'), (Join-Path $HOME '.cys'))) {
+            if (Test-Path $d) { Write-Host "DIRNAMES $d : $((Get-ChildItem -LiteralPath $d -Force -Name -ErrorAction SilentlyContinue | Select-Object -First 60) -join ', ')" } else { Write-Host "DIR_ABSENT $d" }
+          }
+          # b) the updater download: any setup/NSIS/tauri-update file under the temp dirs, hashed against the rc asset
+          $temps = @($env:TEMP, (Join-Path $env:LOCALAPPDATA 'Temp')) | Select-Object -Unique
+          $found = @()
+          foreach ($t in $temps) {
+            $found += Get-ChildItem -LiteralPath $t -Recurse -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)setup|nsis|nsu|tauri|wave|\.exe$' -and $_.FullName -notmatch 'evidence|_work' }
+          }
+          $found | Sort-Object LastWriteTime | ForEach-Object { "{0} {1,12} {2}" -f $_.LastWriteTime.ToString('o'), $_.Length, $_.FullName } | Tee-Object -FilePath evidence\temp_listing.txt | Select-Object -First 200 | ForEach-Object { Write-Host "TEMPFILE $_" }
+          $rcAsset = Join-Path $env:RUNNER_TEMP 'rc-setup.exe'
+          gh release download $env:RC_TAG -R $env:REPO -p '*windows-x64-setup.exe' -O $rcAsset 2>&1 | Out-Host
+          $rcHash = if (Test-Path $rcAsset) { (Get-FileHash $rcAsset -Algorithm SHA256).Hash } else { 'rc-asset-not-downloadable' }
+          Write-Host "RC_ASSET_SHA256 $rcHash"
+          foreach ($f in @($found | Where-Object { $_.Name -match '(?i)setup.*\.exe$|\.nsis' -and -not $_.PSIsContainer })) {
+            $h = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash
+            Write-Host ("DOWNLOADED_SETUP {0} size={1} sha256={2} matches_rc_asset={3}" -f $f.FullName, $f.Length, $h, ($h -eq $rcHash))
+          }
+          if (-not ($found | Where-Object { $_.Name -match '(?i)setup.*\.exe$' })) { Write-Host 'NO_DOWNLOADED_SETUP_EXE found under the temp dirs (the updater never saved a setup file)' }
+          # c) NSIS traces: install logs / kill log; the process timeline (processes_timeline.txt) is written by the update step
+          Get-ChildItem -LiteralPath $env:TEMP -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)^nsu|nsis|\.log$' } | ForEach-Object { Write-Host "NSIS_TRACE $($_.FullName) $($_.Length)" }
+          Write-Host "KILL_LOG_EXISTS $(Test-Path (Join-Path $env:TEMP 'wave-install-kill.log'))"
+          if (Test-Path evidence\processes_timeline.txt) { Write-Host "SETUP_PROCESS_EVER_SEEN $((Select-String -Path evidence\processes_timeline.txt -Pattern '(?i)setup' -Quiet))" }
+          # d) what is on disk at the end
+          Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(cysd|waved|wave|cys|wave-app|cys-app)(\.prev\d*)?\.exe$|\.old$' } | Sort-Object Name |
+            ForEach-Object { Write-Host ("DISK {0,-18} {1,10} bytes version={2} sha256={3}" -f $_.Name, $_.Length, $_.VersionInfo.ProductVersion, (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash) } | Tee-Object -FilePath evidence\disk_exes.txt
 
       - name: Collect evidence
         if: always()
@@ -195,9 +283,23 @@ jobs:
           Copy-Item (Join-Path $env:TEMP 'wave-install-kill.log') evidence -ErrorAction SilentlyContinue
           Copy-Item layout-*.txt, layout-*.json, channel-*.json, old-daemon.json evidence -ErrorAction SilentlyContinue
           Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,ExecutablePath | Format-Table -AutoSize | Out-String -Width 220 | Out-File evidence\processes.txt
-      - uses: actions/upload-artifact@v4
+      - name: Secret-scan the evidence bundle (file names only; a hit skips the upload and fails this step, not the proof)
+        id: scan
         if: always()
+        shell: pwsh
+        run: |
+          $hits = @()
+          $patterns = '(?i)(token|secret|passw(or)?d|api[_-]?key|authorization|bearer)\s*["'':=]', 'gh[pousr]_[A-Za-z0-9]{20,}', 'github_pat_[A-Za-z0-9_]{20,}', 'AKIA[0-9A-Z]{16}', '-----BEGIN [A-Z ]*PRIVATE KEY', 'sk-[A-Za-z0-9]{20,}'
+          foreach ($f in @(Get-ChildItem evidence -Recurse -File -Force -ErrorAction SilentlyContinue)) {
+            if ($f.Name -match '(?i)token|secret|\.key$|\.pem$|credential') { $hits += $f.FullName; continue }
+            if ($f.Extension -match '(?i)\.(png|exe|dll)$') { continue }
+            foreach ($pattern in $patterns) { if (Select-String -LiteralPath $f.FullName -Pattern $pattern -Quiet -ErrorAction SilentlyContinue) { $hits += $f.FullName; break } }
+          }
+          if ($hits.Count -gt 0) { Write-Host "EVIDENCE_SECRET_SCAN_HIT (names only): $(($hits | Select-Object -Unique) -join ', ')"; exit 1 }
+          Write-Host 'EVIDENCE_SECRET_SCAN_CLEAN'
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.scan.outcome == 'success'
         with:
           name: windows-update-proof-evidence
-          path: evidence/*
+          path: evidence
           if-no-files-found: warn

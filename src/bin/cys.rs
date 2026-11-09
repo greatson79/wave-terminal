@@ -9140,8 +9140,11 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::net::UnixListener;
-            let path = std::env::temp_dir().join(format!("cys-label-{}-{}.sock", std::process::id(),
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            // Parallel tests: the clock alone can repeat (microsecond granularity on macOS), so add a counter.
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!("cys-label-{}-{}-{}.sock", std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
             let listener = UnixListener::bind(&path).unwrap();
             let server = std::thread::spawn(move || {
                 for (expected, response) in [

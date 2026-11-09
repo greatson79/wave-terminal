@@ -447,18 +447,26 @@ mod tests {
     #[test]
     fn teardown_valid_receipt_still_waits_for_surviving_identity() {
         let _root = test_root();
-        let helper = fresh_exe(); // warm before the 5 s survivor starts
-        let mut owned = child("hang");
+        let helper = fresh_exe(); // warm before the survivor starts
+        let mut owned = child("linger"); // outlives HANG_GUARD, so only the survivor wait can end run()
         let tree = ProcessTree::capture(&[owned.0.id()]).unwrap();
         tauri::async_runtime::block_on(async {
+            // Watchdog, not a timing assertion: the survivor never exits, so run() must
+            // keep waiting on it after a valid receipt until this deadline (~10 s by design).
+            const HANG_GUARD: Duration = Duration::from_secs(10);
+            // Byte-exact copies of the two literals run() can return when the deadline hits
+            // while the surviving identity is still being waited on (which one depends on
+            // which of the loop's deadline checks fires first; both mean "still waiting").
+            const SURVIVOR_WAIT: &str = "부서 프로세스가 남아 있어 종료를 확인하지 못했습니다. 잠시 후 다시 시도하세요.";
+            const VERIFY_TIMEOUT: &str = "부서 종료 확인 시간이 초과됐습니다. 잠시 후 다시 시도하세요.";
             let error = run(
                 verified_command_for(&helper, &tree),
                 tree,
-                Instant::now() + Duration::from_millis(80),
+                Instant::now() + HANG_GUARD,
             )
             .await
             .unwrap_err();
-            assert!(error.contains("시간"), "{error}");
+            assert!(error == SURVIVOR_WAIT || error == VERIFY_TIMEOUT, "{error}");
         });
         assert!(owned.0.try_wait().unwrap().is_none());
     }

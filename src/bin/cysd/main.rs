@@ -492,7 +492,9 @@ mod startup_lock_open_tests {
         let meta = root.symlink_metadata().unwrap();
         assert_eq!(meta.uid(), unsafe { libc::geteuid() }, "test root must be owned by test user");
         assert_eq!(meta.mode() & 0o077, 0, "test root must be private");
-        let dir = root.join(format!("waved-lock-{}", std::process::id()));
+        // Parallel tests share the pid: the counter keeps each fixture directory distinct.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = root.join(format!("waved-lock-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
         std::fs::create_dir(&dir).unwrap();
         check(&dir);
         std::fs::remove_dir_all(dir).unwrap();
@@ -533,6 +535,17 @@ mod startup_lock_open_tests {
                 Err(error) => assert!(!super::lock_open_is_fatal(&error), "plain I/O error is not a refusal: {error}"),
                 Ok(_) => panic!("missing parent must not open"),
             }
+        });
+    }
+
+    #[test]
+    fn startup_lock_open_sets_close_on_exec_so_children_never_keep_the_lock() {
+        use std::os::unix::io::AsRawFd;
+        fixture(|dir| {
+            let file = super::open_startup_lock(&dir.join("cys.lock")).unwrap();
+            let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) };
+            assert!(flags >= 0, "F_GETFD failed");
+            assert!(flags & libc::FD_CLOEXEC != 0, "startup lock fd must be close-on-exec");
         });
     }
 
@@ -1989,10 +2002,13 @@ mod attach_race_tests {
     fn process_and_send_are_atomic_under_parser_lock_no_dup_delivery() {
         // 멀티스레드 런타임 불필요 — 동기 스레드만 사용. PTY reader는 create_surface가
         // 내부에서 std::thread로 띄운다.
+        // Parallel tests: the clock alone can repeat (microsecond granularity on macOS), so add a counter.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let tmp = std::env::temp_dir().join(format!(
-            "cys-attach-race-{}-{}.sock",
+            "cys-attach-race-{}-{}-{}.sock",
             std::process::id(),
-            now_nanos()
+            now_nanos(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let daemon = Daemon::new(tmp.clone());
 
@@ -2131,13 +2147,16 @@ mod feed_wait_disconnect_tests {
         // ★상태 격리: state_dir = socket의 부모 디렉터리이고 거기에 feed.jsonl이 영속된다.
         // 소켓을 고유 하위 디렉터리에 두지 않으면 temp_dir/feed.jsonl을 다른 실행과 공유해
         // 직전 실행이 남긴 같은 request_id가 replay되어 'duplicate request_id'로 오염된다.
+        // Parallel tests: the clock alone can repeat (microsecond granularity on macOS), so add a counter.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "cys-feedwait-disc-{}-{}",
+            "cys-feedwait-disc-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
-                .unwrap_or(0)
+                .unwrap_or(0),
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let tmp = dir.join("cysd.sock");

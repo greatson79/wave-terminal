@@ -40,7 +40,11 @@ jobs:
           test "$(uname -m)" = arm64
           git rev-parse HEAD > "$RUNNER_TEMP/w3-macos-evidence/source-sha.txt"
           bash scripts/secret-scan.sh --all
-      - uses: oven-sh/setup-bun@v2
+      - id: bun
+        continue-on-error: true   # setup-bun downloads from GitHub; one retry on a transient 5xx
+        uses: oven-sh/setup-bun@v2
+      - if: steps.bun.outcome == 'failure'
+        uses: oven-sh/setup-bun@v2
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin

@@ -1,0 +1,496 @@
+name: windows-direct-update-proof
+# 0.3.1 -> 0.3.2 update proof on a Windows runner WITHOUT the release-download chain for the new build.
+# The 0.3.2 installer comes from the build ARTIFACT of a bound windows-build run; it is run exactly the way the 0.3.1
+# in-app updater runs it (tauri-plugin-updater 2.10.1, Cargo.lock of v0.3.1; default install mode Passive):
+#   src/updater.rs:787-865 (Windows install_inner): ShellExecuteW("open", <setup.exe>, "/P /R /UPDATE /ARGS <current exe args>"), then
+#   std::process::exit(0) — the APP exits, the daemon is never stopped by the updater. Passive = config.rs:41 `["/P","/R"]`.
+#   /R makes the NSIS template relaunch the app after install.
+# The only release fetch is the v0.3.1 base installer (one asset, retried with backoff up to 10 minutes).
+# Harness only: reads releases and artifacts, creates/edits/deletes nothing, never touches the update channel manifest.
+on:
+  push:
+    branches: [release/0.3.2-directproof]
+    paths: ['.github/directproof-inputs.json', '.github/workflows/windows-direct-update-proof.yml']
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  direct-update-proof:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve inputs (.github/directproof-inputs.json = {build_run_id, expected_sha, base_tag})
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cfg = Get-Content .github/directproof-inputs.json -Raw | ConvertFrom-Json
+          $run = [string]$cfg.build_run_id; $sha = [string]$cfg.expected_sha; $base = [string]$cfg.base_tag
+          if ($run -notmatch '^\d+$' -or $sha -notmatch '^[0-9a-f]{40}$' -or $base -notmatch '^v\d+\.\d+\.\d+$') { throw "invalid input: build_run_id='$run' expected_sha='$sha' base_tag='$base'" }
+          "BUILD_RUN_ID=$run" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "EXPECTED_SHA=$sha" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BASE_TAG=$base" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "INPUTS build_run_id=$run expected_sha=$sha base_tag=$base"
+
+      - name: Bind the 0.3.2 build run (success, head_sha == expected_sha)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $run = $null
+          foreach ($i in 1..6) {
+            try { $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:BUILD_RUN_ID" | ConvertFrom-Json; break } catch { Start-Sleep -Seconds (10 * $i) }
+          }
+          if (-not $run) { throw "cannot read build run $env:BUILD_RUN_ID" }
+          if ($run.conclusion -ne 'success') { throw "Build run $env:BUILD_RUN_ID conclusion=$($run.conclusion)" }
+          if ($run.head_sha -ne $env:EXPECTED_SHA) { throw "Build run head_sha $($run.head_sha) != expected_sha $env:EXPECTED_SHA" }
+          Write-Host "BUILD_BOUND run=$env:BUILD_RUN_ID head_sha=$($run.head_sha) workflow=$($run.name)"
+
+      - name: Download the 0.3.2 installer from the build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cys-windows-x64-nsis
+          run-id: ${{ env.BUILD_RUN_ID }}
+          github-token: ${{ github.token }}
+          path: installer032
+
+      - name: Base 0.3.1 installer (the ONE release fetch; retried with backoff up to 10 minutes)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $watch = [Diagnostics.Stopwatch]::StartNew(); $delay = 10; $got = $false
+          while ($watch.Elapsed.TotalMinutes -lt 10 -and -not $got) {
+            gh release download $env:BASE_TAG -R $env:GITHUB_REPOSITORY -p '*windows-x64-setup.exe' -O base-setup.exe --clobber 2>&1 | Out-Host
+            $got = ($LASTEXITCODE -eq 0) -and (Test-Path base-setup.exe) -and ((Get-Item base-setup.exe).Length -gt 1MB)
+            if (-not $got) { Write-Host "BASE_FETCH_RETRY in ${delay}s (elapsed $([int]$watch.Elapsed.TotalSeconds)s)"; Start-Sleep -Seconds $delay; $delay = [Math]::Min($delay * 2, 120) }
+          }
+          if (-not $got) { throw 'base 0.3.1 installer could not be downloaded within 10 minutes' }
+          $hash = (Get-FileHash base-setup.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "BASE_SHA256 $hash size=$((Get-Item base-setup.exe).Length)"
+          # best effort: compare with the release's SHA256SUMS.txt (a second small fetch); print only when it cannot be fetched
+          gh release download $env:BASE_TAG -R $env:GITHUB_REPOSITORY -p 'SHA256SUMS.txt' -O base-sums.txt --clobber 2>&1 | Out-Host
+          if ($LASTEXITCODE -eq 0 -and (Test-Path base-sums.txt)) {
+            $line = Get-Content base-sums.txt | Where-Object { $_ -match 'windows-x64-setup\.exe' } | Select-Object -First 1
+            if (-not $line) { Write-Host 'BASE_SUMS_NO_LINE (hash printed above)' }
+            elseif ($line.ToLowerInvariant().StartsWith($hash)) { Write-Host 'BASE_SHA256_VERIFIED against SHA256SUMS.txt' }
+            else { throw "base installer hash differs from SHA256SUMS.txt: $line" }
+          } else { Write-Host 'BASE_SUMS_UNAVAILABLE (hash printed above)' }
+          $LASTEXITCODE = 0
+
+      - name: Install 0.3.1, require its layout, start its daemon, create the seats
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $p = Start-Process -FilePath (Resolve-Path base-setup.exe).Path -ArgumentList '/S' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "base installer failed: $($p.ExitCode)" }
+          $dir = Join-Path $env:LOCALAPPDATA 'Wave Terminal'
+          $app = Join-Path $dir 'cys-app.exe'
+          if (-not (Test-Path $app)) { throw 'base GUI cys-app.exe missing (not a 0.3.1 layout)' }
+          $ver = (Get-Item $app).VersionInfo.ProductVersion
+          if ($ver -notmatch '^0\.3\.1') { throw "base version $ver, expected 0.3.1" }
+          Write-Host "BASE_VERSION $ver"
+          $cys = Join-Path $dir 'cys.exe'
+          & $cys list; if ($LASTEXITCODE -ne 0) { Start-Sleep -Seconds 3; & $cys list }
+          if ($LASTEXITCODE -ne 0) { throw 'base daemon did not start' }
+          foreach ($t in 'upd-seat-a','upd-seat-b') { & $cys new-surface --title $t | Out-Null; if ($LASTEXITCODE -ne 0) { throw "new-surface $t failed" } }
+          & $cys list | Tee-Object -FilePath layout-before.txt
+          & $cys status --json | Out-File layout-before.json -Encoding utf8
+          $id = (& $cys identify) | ConvertFrom-Json
+          $oldProc = Get-CimInstance Win32_Process -Filter "ProcessId=$($id.daemon_pid)"
+          Write-Host "BASE_DAEMON pid=$($id.daemon_pid) version=$($id.version) image=$($oldProc.ExecutablePath)"
+          [ordered]@{ pid = [int]$id.daemon_pid; created = [string]$oldProc.CreationDate; image = $oldProc.ExecutablePath } | ConvertTo-Json | Out-File old-daemon.json -Encoding utf8
+          Remove-Item (Join-Path $env:TEMP 'wave-install-kill.log') -ErrorAction SilentlyContinue
+
+      - name: Run the 0.3.2 installer the way the 0.3.1 updater does (daemon left running)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:LOCALAPPDATA 'Wave Terminal'
+          New-Item -ItemType Directory -Force -Path evidence\shots | Out-Null
+          function Shot([string]$name) {
+            try {
+              Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+              $b = [Windows.Forms.SystemInformation]::VirtualScreen
+              $bmp = New-Object Drawing.Bitmap $b.Width, $b.Height
+              $g = [Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size)
+              $bmp.Save((Join-Path 'evidence\shots' "$name.png")); $g.Dispose(); $bmp.Dispose()
+            } catch { Write-Host "SHOT_FAILED $name $($_.Exception.Message)" }
+          }
+          function Timeline([string]$tag) {
+            $rows = Get-CimInstance Win32_Process | Where-Object { $_.Name -match '(?i)setup|nsis|nsu|update|wave|cys|waved' -and $_.Name -notmatch '(?i)msedgewebview2' } |
+              ForEach-Object { "{0} pid={1} ppid={2} {3}" -f $_.Name, $_.ProcessId, $_.ParentProcessId, $_.ExecutablePath }
+            Add-Content -Path evidence\processes_timeline.txt -Value ("[{0}] {1}`n  {2}" -f (Get-Date -Format o), $tag, ($rows -join "`n  "))
+          }
+          $setup = @(Get-ChildItem installer032 -Recurse -Filter '*.exe')
+          if ($setup.Count -ne 1) { throw "expected exactly one setup exe in the build artifact, found $($setup.Count)" }
+          $installer = $setup[0].FullName
+          Write-Host "INSTALLER_032 $($setup[0].Name) size=$($setup[0].Length) sha256=$((Get-FileHash $installer -Algorithm SHA256).Hash)"
+          # the 0.3.1 GUI is running when the updater fires; the updater ends it with std::process::exit(0) (updater.rs:865), not the daemon
+          $gui = Start-Process -FilePath (Join-Path $dir 'cys-app.exe') -PassThru
+          Start-Sleep -Seconds 12
+          Timeline 'before-update (0.3.1 GUI + daemon running)'; Shot 'before'
+          $old = Get-Content old-daemon.json -Raw | ConvertFrom-Json
+          $alive = Get-CimInstance Win32_Process -Filter "ProcessId=$($old.pid)"
+          if (-not $alive) { throw 'the 0.3.1 daemon is not running before the install (proof precondition)' }
+          Write-Host "OLD_DAEMON_RUNNING_AT_INSTALL pid=$($old.pid) image=$($alive.ExecutablePath)"
+          Stop-Process -Id $gui.Id -Force -ErrorAction SilentlyContinue   # = the updater's process::exit(0) of the GUI only
+          # exact updater arguments (Passive mode, NSIS): /P /R /UPDATE /ARGS <current exe args = none>
+          $args032 = @('/P', '/R', '/UPDATE', '/ARGS')
+          Write-Host "UPDATER_ARGS $($args032 -join ' ')   (tauri-plugin-updater 2.10.1 src/updater.rs:808-815, config.rs:41)"
+          $inst = Start-Process -FilePath $installer -ArgumentList $args032 -PassThru
+          $watch = [Diagnostics.Stopwatch]::StartNew(); $next = 0; $nextShot = 0
+          while (-not $inst.HasExited -and $watch.Elapsed.TotalMinutes -lt 10) {
+            $t = [int]$watch.Elapsed.TotalSeconds
+            if ($t -ge $next) { Timeline "install t=${t}s"; $next = $t + 15 }
+            if ($t -ge $nextShot) { Shot ("i{0:D3}" -f $t); $nextShot = $t + 30 }
+            Start-Sleep -Seconds 3
+          }
+          if (-not $inst.HasExited) { Timeline 'INSTALL_TIMEOUT'; Shot 'install-timeout'; throw 'the installer did not finish within 10 minutes' }
+          Write-Host "INSTALLER_EXIT code=$($inst.ExitCode) after $([int]$watch.Elapsed.TotalSeconds)s"
+          # (1) exit 0 while the 0.3.1 daemon was running; cysd.exe on disk = 0.3.2 forwarder; never fix a failure by killing
+          if ($inst.ExitCode -ne 0) { throw "(1) FAILED — installer exit $($inst.ExitCode) with the 0.3.1 daemon running. kill log: $(Get-Content (Join-Path $env:TEMP 'wave-install-kill.log') -ErrorAction SilentlyContinue)" }
+          Get-ChildItem -LiteralPath $dir -File | Where-Object { $_.Name -match '^(cysd|waved|wave|cys|wave-app|cys-app)(\.prev\d*)?\.exe$' } | Sort-Object Name |
+            ForEach-Object { Write-Host ("INSTALLED {0,-18} {1,10} bytes  version={2}  sha256={3}" -f $_.Name, $_.Length, $_.VersionInfo.ProductVersion, (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.Substring(0,16)) }
+          # (1) hash check (the forwarders / wave / waved carry NO ProductVersion resource): the installed cysd.exe and waved.exe must be
+          # byte-identical to the ones inside the 0.3.2 installer, and the old 0.3.1 image must sit beside as cysd.prev*.exe with a different hash.
+          $sevenZip = @('C:\Program Files\7-Zip\7z.exe', 'C:\Program Files (x86)\7-Zip\7z.exe') | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $sevenZip) { throw '(1) FAILED — 7-Zip not found on the runner (cannot extract the installer payload)' }
+          $ex = Join-Path $env:RUNNER_TEMP 'installer-extract'; Remove-Item $ex -Recurse -Force -ErrorAction SilentlyContinue
+          & $sevenZip e -y "-o$ex" $installer cysd.exe waved.exe -r | Out-Null
+          foreach ($n in 'cysd.exe', 'waved.exe') {
+            $src = Join-Path $ex $n
+            if (-not (Test-Path $src)) { throw "(1) FAILED — $n not found inside the installer" }
+            $want = (Get-FileHash $src -Algorithm SHA256).Hash
+            $have = if (Test-Path (Join-Path $dir $n)) { (Get-FileHash (Join-Path $dir $n) -Algorithm SHA256).Hash } else { 'missing' }
+            if ($have -ne $want) { throw "(1) FAILED — installed $n ($have) differs from the installer's ($want). Do NOT add a kill. kill log: $(Get-Content (Join-Path $env:TEMP 'wave-install-kill.log') -ErrorAction SilentlyContinue)" }
+            Write-Host "INSTALLED_EQUALS_INSTALLER $n sha=$want"
+          }
+          $cysdSha = (Get-FileHash (Join-Path $dir 'cysd.exe') -Algorithm SHA256).Hash
+          $prev = @(Get-ChildItem -LiteralPath $dir -File -Filter 'cysd.prev*.exe')
+          if ($prev.Count -eq 0) { throw '(1) FAILED — no cysd.prev*.exe: the running 0.3.1 image was not rename-swapped' }
+          foreach ($f in $prev) { if ((Get-FileHash $f.FullName -Algorithm SHA256).Hash -eq $cysdSha) { throw "(1) FAILED — $($f.Name) is identical to the new cysd.exe (old image not preserved)" } }
+          Write-Host "CYSD_FORWARDER_OK sha=$cysdSha prev=[$((@($prev | ForEach-Object Name)) -join ',')]"
+
+      - name: "(2) install-time kill log: exists, wave-app/cys-app/cys present, NO cysd.exe line"
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $log = Join-Path $env:TEMP 'wave-install-kill.log'
+          if (-not (Test-Path $log)) { throw "(2) FAILED — $log missing: the NSIS pre-install hook did not run" }
+          $seen = @{}
+          foreach ($line in (Get-Content $log)) {
+            if ($line -match '^(?<image>\S+) exit=(?<code>\d+)\s*$') {
+              $seen[$Matches.image] = [int]$Matches.code
+              Write-Host ("KILL {0,-14} exit={1,-4} {2}" -f $Matches.image, $Matches.code, $(if ([int]$Matches.code -eq 0) { 'KILLED a running process' } else { 'none running' }))
+            }
+          }
+          foreach ($image in 'wave-app.exe','cys-app.exe','cys.exe') { if (-not $seen.ContainsKey($image)) { throw "(2) FAILED — no kill-log line for $image" } }
+          if ($seen.ContainsKey('cysd.exe')) { throw "(2) FAILED — the install-time kill list contains cysd.exe (exit=$($seen['cysd.exe']))" }
+          Write-Host 'KILL_LOG_OK wave-app/cys-app/cys present, no cysd.exe line'
+
+      - name: "(3) restart like the updater (/R), 0.3.2 daemon, seats restored, old 0.3.1 daemon exits"
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:LOCALAPPDATA 'Wave Terminal'
+          $wave = Join-Path $dir 'wave.exe'
+          # the updater's /R makes the installer relaunch the app; if no wave-app is running after a grace period, say so and start it
+          $w = [Diagnostics.Stopwatch]::StartNew()
+          while ($w.Elapsed.TotalSeconds -lt 45 -and -not (Get-Process wave-app -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 3 }
+          if (Get-Process wave-app -ErrorAction SilentlyContinue) { Write-Host 'RESTARTED_BY_INSTALLER (/R) wave-app is running' }
+          else { Write-Host 'NOT_RESTARTED_BY_INSTALLER — starting wave-app.exe by hand'; Start-Process -FilePath (Join-Path $dir 'wave-app.exe') }
+          $appVer = (Get-Item (Join-Path $dir 'wave-app.exe')).VersionInfo.ProductVersion
+          if ($appVer -notmatch '^0\.3\.2') { throw "wave-app.exe is $appVer, expected 0.3.2" }
+          # (3a) the 0.3.2 app runs the daemon migration at startup (rename_migration: capture -> stop old -> wait -> activate -> await new -> restore;
+          # an error rolls back and is reported to the UI only). Wait for the NEW daemon, recording the rename-handover marker phase and the screen.
+          New-Item -ItemType Directory -Force -Path evidence\shots | Out-Null
+          function Shot([string]$name) {
+            try {
+              Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+              $b = [Windows.Forms.SystemInformation]::VirtualScreen
+              $bmp = New-Object Drawing.Bitmap $b.Width, $b.Height
+              $g = [Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size)
+              $bmp.Save((Join-Path 'evidence\shots' "$name.png")); $g.Dispose(); $bmp.Dispose()
+              $script:lastShot = "$name.png"
+            } catch { Write-Host "SHOT_FAILED $name $($_.Exception.Message)" }
+          }
+          function Timeline([string]$tag) {
+            $rows = Get-CimInstance Win32_Process | Where-Object { $_.Name -match '(?i)setup|nsis|nsu|update|wave|cys|waved' -and $_.Name -notmatch '(?i)msedgewebview2' } |
+              ForEach-Object { "{0} pid={1} ppid={2} {3}" -f $_.Name, $_.ProcessId, $_.ParentProcessId, $_.ExecutablePath }
+            Add-Content -Path evidence\processes_timeline.txt -Value ("[{0}] {1}`n  {2}" -f (Get-Date -Format o), $tag, ($rows -join "`n  "))
+          }
+          # expand the collapsed "daemon >" <details id="header-daemon"> (ui/index.html:13; #daemon-info shows daemon_status / STARTUP_ERROR, main.rs:278-284)
+          # with a real mouse click (user32 SetCursorPos + mouse_event, ~x=150,y=49 on the 1024x768 runner desktop), screenshot it, and best-effort
+          # print the text through UI Automation (the WebView2 accessibility tree). No IPC/HTTP surface exists for STARTUP_ERROR, so nothing else is read.
+          function ExpandDaemon([string]$name) {
+            try {
+              Add-Type -Namespace W32 -Name U -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y); [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, System.UIntPtr e);' -ErrorAction SilentlyContinue
+              [W32.U]::SetCursorPos(150, 49) | Out-Null; Start-Sleep -Milliseconds 300
+              [W32.U]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 80; [W32.U]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+              Start-Sleep -Seconds 2
+              Write-Host "DAEMON_DETAILS_CLICKED x=150 y=49 shot=$name"
+            } catch { Write-Host "DAEMON_CLICK_FAILED $name $($_.Exception.Message)" }
+            Shot $name
+            try {
+              Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+              $texts = New-Object System.Collections.Generic.List[string]
+              foreach ($proc in @(Get-Process wave-app -ErrorAction SilentlyContinue)) {
+                if (-not $proc.MainWindowHandle -or $proc.MainWindowHandle -eq 0) { continue }
+                $root = [Windows.Automation.AutomationElement]::FromHandle($proc.MainWindowHandle)
+                $all = $root.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
+                foreach ($el in $all) { $n = [string]$el.Current.Name; if ($n -and $n.Length -gt 3) { $texts.Add($n) } }
+              }
+              $script:uia = @($texts | Select-Object -Unique)
+              $hit = @($texts | Select-Object -Unique | Select-Object -First 80)
+              Add-Content -Path evidence\daemon-details-uia.txt -Value ("[{0}] {1}`n{2}" -f (Get-Date -Format o), $name, ($hit -join "`n"))
+              Write-Host "DAEMON_INFO_UIA ($($hit.Count) texts, full list in evidence/daemon-details-uia.txt): $((($hit | Where-Object { $_ -match '(?i)daemon|error|migrat|restor|start|오류|실패|서비스|데몬|업데이트' }) | Select-Object -First 8) -join ' | ')"
+            } catch { Write-Host "DAEMON_INFO_UIA_UNAVAILABLE $($_.Exception.Message)" }
+          }
+          function UiaTexts() {
+            $out = New-Object System.Collections.Generic.List[string]
+            try {
+              Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+              foreach ($proc in @(Get-Process wave-app -ErrorAction SilentlyContinue)) {
+                if (-not $proc.MainWindowHandle -or $proc.MainWindowHandle -eq 0) { continue }
+                $root = [Windows.Automation.AutomationElement]::FromHandle($proc.MainWindowHandle)
+                foreach ($el in $root.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)) { $n = [string]$el.Current.Name; if ($n) { $out.Add($n) } }
+              }
+            } catch { Write-Host "UIA_TEXTS_UNAVAILABLE $($_.Exception.Message)" }
+            return @($out | Select-Object -Unique)
+          }
+          $marker = Join-Path $HOME '.cys\.pending-restore'   # cys::rename_handover::marker_path (src/rename_handover.rs:4-5); JSON {"rename_handover":{"phase":...}}
+          $lastPhase = ''; $script:lastShot = 'none'; $migrated = $false; $nextShot = 0
+          $mig = [Diagnostics.Stopwatch]::StartNew()
+          while ($mig.Elapsed.TotalSeconds -lt 240) {
+            $t = [int]$mig.Elapsed.TotalSeconds
+            $phase = if (Test-Path -LiteralPath $marker) { try { [string](Get-Content -LiteralPath $marker -Raw | ConvertFrom-Json).rename_handover.phase } catch { 'unreadable' } } else { 'absent' }
+            if ($phase -ne $lastPhase) {
+              Write-Host "MARKER_PHASE t=${t}s phase=$phase"
+              if (Test-Path -LiteralPath $marker) { Copy-Item -LiteralPath $marker -Destination "evidence\marker_t$('{0:D3}' -f $t)_$phase.json" -ErrorAction SilentlyContinue }
+              $lastPhase = $phase
+            }
+            if ($t -ge $nextShot) { Shot ("m{0:D3}" -f $t); Timeline "migration t=${t}s phase=$phase"; $nextShot = $t + 15 }
+            $idj = try { (& $wave identify 2>$null) | ConvertFrom-Json } catch { $null }
+            if ($idj -and $idj.version -match '^0\.3\.2') {
+              $pr = Get-CimInstance Win32_Process -Filter "ProcessId=$($idj.daemon_pid)"
+              if ($pr -and $pr.ExecutablePath -eq (Join-Path $dir 'waved.exe')) { $migrated = $true; break }
+            }
+            Start-Sleep -Seconds 3
+          }
+          Shot 'migration-end'; Timeline 'migration-end'
+          ExpandDaemon 'daemon-expanded'   # on timeout AND on success, before the verdict below
+          if (-not $migrated) {
+            Get-CimInstance Win32_Process | Where-Object { $_.Name -match '(?i)wave|cys|waved' } | ForEach-Object { Write-Host "PROC $($_.Name) pid=$($_.ProcessId) $($_.ExecutablePath)" }
+            # PASS BAR B (fail-open): the migration was refused but the GUI is not dead. All of: wave-app 0.3.2 alive (version checked above), `wave list` works,
+            # the window is not in the waiting state, the Korean toast is visible (checked in the UIA text tree: it is the only in-process way to read the WebView2 text), and
+            # the seats upd-seat-a/b are alive on the running daemon. The refusal reason itself is 0.3.3.
+            $reasons = @()
+            if (-not (Get-Process wave-app -ErrorAction SilentlyContinue)) { $reasons += 'wave-app is not alive (dead GUI)' }
+            $seatsOk = $false; $sw = [Diagnostics.Stopwatch]::StartNew()
+            while ($sw.Elapsed.TotalSeconds -lt 60 -and -not $seatsOk) {
+                $st = (& $wave status --json 2>$null) -join "`n"
+                $seatsOk = ($LASTEXITCODE -eq 0) -and ($st -match 'upd-seat-a') -and ($st -match 'upd-seat-b')
+                if (-not $seatsOk) { Start-Sleep -Seconds 4 }
+            }
+            $listText = (& $wave list 2>&1) -join "`n"; $listOk = ($LASTEXITCODE -eq 0)
+            $listText | Out-File layout-after.txt -Encoding utf8; $st | Out-File layout-after.json -Encoding utf8
+            if (-not $listOk) { $reasons += "wave list failed: $listText" }
+            if (-not $seatsOk) { $reasons += 'seats upd-seat-a/b are not alive on the running daemon' }
+            $tx = @($script:uia) + @(UiaTexts)
+            $toastSeen = [bool]($tx | Where-Object { $_ -match '기존 데몬으로 계속 실행' } | Select-Object -First 1)
+            $waitingSeen = [bool]($tx | Where-Object { $_ -match '확인하고 있습니다' } | Select-Object -First 1)
+            $sidebarSeen = [bool]($tx | Where-Object { $_ -match 'upd-seat' } | Select-Object -First 1)
+            Set-Content -Path evidence\failopen-uia-texts.txt -Value ($tx | Select-Object -Unique) -Encoding utf8
+            Write-Host "FAILOPEN_CHECK toast=$toastSeen waiting_state=$waitingSeen sidebar_has_seats=$sidebarSeen wave_list=$listOk seats_alive=$seatsOk (UIA texts: evidence/failopen-uia-texts.txt; screenshots: daemon-expanded.png, migration-end.png)"
+            if (-not $toastSeen) { $reasons += 'the toast "기존 데몬으로 계속 실행" is not visible (no fail-open notice)' }
+            if ($waitingSeen) { $reasons += 'the window is stuck in the waiting state (dead GUI)' }
+            if ($reasons.Count -eq 0) {
+              Write-Host 'MIGRATION_REFUSED_FAILOPEN_OK migration refused, GUI alive on the running daemon, toast shown, seats alive (refusal reason = 0.3.3)'
+              Write-Host 'DIRECT_UPDATE_PROOF_PASS (B) installer exit 0 with the 0.3.1 daemon running; cysd.exe = 0.3.2 forwarder; no cysd kill; wave-app 0.3.2 alive; fail-open toast; seats alive'
+              exit 0
+            }
+            throw "MIGRATION_FAILED — no 0.3.2 daemon (waved.exe) within 240 s AND the fail-open bar (B) is not met: $($reasons -join '; '). last marker phase='$lastPhase', last screenshot=$script:lastShot (see evidence/shots, processes_timeline.txt, marker_*.json)"
+          }
+          Copy-Item -LiteralPath $marker -Destination evidence\marker_final.json -ErrorAction SilentlyContinue
+          Write-Host "MIGRATED new daemon after $([int]$mig.Elapsed.TotalSeconds)s (last marker phase='$lastPhase')"
+          $id = (& $wave identify) | ConvertFrom-Json
+          $process = Get-CimInstance Win32_Process -Filter "ProcessId=$($id.daemon_pid)"
+          Write-Host "NEW_DAEMON pid=$($id.daemon_pid) version=$($id.version) image=$($process.ExecutablePath)"
+          if ($id.version -notmatch '^0\.3\.2') { throw "daemon version $($id.version), expected 0.3.2" }
+          if ($process.ExecutablePath -ne (Join-Path $dir 'waved.exe')) { throw '(3) FAILED — daemon is not the installed waved.exe' }
+          # (3b) only now: the seats on the NEW daemon
+          $ok = $false; $watch = [Diagnostics.Stopwatch]::StartNew()
+          while ($watch.Elapsed.TotalSeconds -lt 120 -and -not $ok) {
+            $status = (& $wave status --json 2>$null) -join "`n"
+            $ok = ($LASTEXITCODE -eq 0) -and ($status -match 'upd-seat-a') -and ($status -match 'upd-seat-b')
+            if (-not $ok) { Start-Sleep -Seconds 5 }
+          }
+          & $wave list | Tee-Object -FilePath layout-after.txt
+          $status | Out-File layout-after.json -Encoding utf8
+          if (-not $ok) { throw '(3) FAILED — the seats created before the update are not on the new daemon (layout not restored)' }
+          $old = Get-Content old-daemon.json -Raw | ConvertFrom-Json
+          $exited = $false; $x = [Diagnostics.Stopwatch]::StartNew()
+          while ($x.Elapsed.TotalSeconds -lt 120 -and -not $exited) {
+            $p = Get-CimInstance Win32_Process -Filter "ProcessId=$($old.pid)"
+            $exited = -not ($p -and [string]$p.CreationDate -eq $old.created)
+            if (-not $exited) { Start-Sleep -Seconds 3 }
+          }
+          if (-not $exited) { throw "(3) FAILED — the old 0.3.1 daemon pid=$($old.pid) image=$($p.ExecutablePath) is still running 120 s after the restart" }
+          Write-Host "OLD_DAEMON_EXITED pid=$($old.pid) after $([int]$x.Elapsed.TotalSeconds)s"
+          Write-Host 'DIRECT_UPDATE_PROOF_PASS installer exit 0 with the 0.3.1 daemon running; cysd.exe = 0.3.2 forwarder; no cysd kill; wave-app 0.3.2; waved.exe 0.3.2; seats restored; old daemon exited'
+
+      - name: "(4) LOGON_SIM — next logon after the (possibly failed) migration: old pid ended, wave-app closed, schtasks cysd, forwarder -> waved 0.3.2, GUI connects"
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $dir = Join-Path $env:LOCALAPPDATA 'Wave Terminal'
+          New-Item -ItemType Directory -Force -Path evidence\shots | Out-Null
+          function Shot([string]$name) {
+            try {
+              Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+              $b = [Windows.Forms.SystemInformation]::VirtualScreen
+              $bmp = New-Object Drawing.Bitmap $b.Width, $b.Height
+              $g = [Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size)
+              $bmp.Save((Join-Path 'evidence\shots' "$name.png")); $g.Dispose(); $bmp.Dispose()
+            } catch { Write-Host "SHOT_FAILED $name $($_.Exception.Message)" }
+          }
+          function Timeline([string]$tag) {
+            $rows = Get-CimInstance Win32_Process | Where-Object { $_.Name -match '(?i)setup|nsis|nsu|update|wave|cys|waved' -and $_.Name -notmatch '(?i)msedgewebview2' } |
+              ForEach-Object { "{0} pid={1} ppid={2} {3}" -f $_.Name, $_.ProcessId, $_.ParentProcessId, $_.ExecutablePath }
+            Add-Content -Path evidence\processes_timeline.txt -Value ("[{0}] {1}`n  {2}" -f (Get-Date -Format o), $tag, ($rows -join "`n  "))
+          }
+          # expand the collapsed "daemon >" <details id="header-daemon"> (ui/index.html:13; #daemon-info shows daemon_status / STARTUP_ERROR, main.rs:278-284)
+          # with a real mouse click (user32 SetCursorPos + mouse_event, ~x=150,y=49 on the 1024x768 runner desktop), screenshot it, and best-effort
+          # print the text through UI Automation (the WebView2 accessibility tree). No IPC/HTTP surface exists for STARTUP_ERROR, so nothing else is read.
+          function ExpandDaemon([string]$name) {
+            try {
+              Add-Type -Namespace W32 -Name U -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y); [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, System.UIntPtr e);' -ErrorAction SilentlyContinue
+              [W32.U]::SetCursorPos(150, 49) | Out-Null; Start-Sleep -Milliseconds 300
+              [W32.U]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 80; [W32.U]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+              Start-Sleep -Seconds 2
+              Write-Host "DAEMON_DETAILS_CLICKED x=150 y=49 shot=$name"
+            } catch { Write-Host "DAEMON_CLICK_FAILED $name $($_.Exception.Message)" }
+            Shot $name
+            try {
+              Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+              $texts = New-Object System.Collections.Generic.List[string]
+              foreach ($proc in @(Get-Process wave-app -ErrorAction SilentlyContinue)) {
+                if (-not $proc.MainWindowHandle -or $proc.MainWindowHandle -eq 0) { continue }
+                $root = [Windows.Automation.AutomationElement]::FromHandle($proc.MainWindowHandle)
+                $all = $root.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
+                foreach ($el in $all) { $n = [string]$el.Current.Name; if ($n -and $n.Length -gt 3) { $texts.Add($n) } }
+              }
+              $script:uia = @($texts | Select-Object -Unique)
+              $hit = @($texts | Select-Object -Unique | Select-Object -First 80)
+              Add-Content -Path evidence\daemon-details-uia.txt -Value ("[{0}] {1}`n{2}" -f (Get-Date -Format o), $name, ($hit -join "`n"))
+              Write-Host "DAEMON_INFO_UIA ($($hit.Count) texts, full list in evidence/daemon-details-uia.txt): $((($hit | Where-Object { $_ -match '(?i)daemon|error|migrat|restor|start|오류|실패|서비스|데몬|업데이트' }) | Select-Object -First 8) -join ' | ')"
+            } catch { Write-Host "DAEMON_INFO_UIA_UNAVAILABLE $($_.Exception.Message)" }
+          }
+          $script:why = ''
+          function Fail([string]$reason) { if (-not $script:why) { $script:why = $reason } }
+          $wave = Join-Path $dir 'wave.exe'
+          # --- end ONLY recorded pids: the old 0.3.1 daemon (old-daemon.json, matched by creation date) and the current daemon if it is the installed waved.exe
+          $targets = @()
+          if (Test-Path old-daemon.json) {
+            $old = Get-Content old-daemon.json -Raw | ConvertFrom-Json
+            $p = Get-CimInstance Win32_Process -Filter "ProcessId=$($old.pid)"
+            if ($p -and [string]$p.CreationDate -eq $old.created) { $targets += [pscustomobject]@{ pid = [int]$old.pid; why = 'old 0.3.1 daemon (recorded pid)' } } else { Write-Host "LOGON_SIM old 0.3.1 daemon pid=$($old.pid) already gone" }
+          } else { Fail 'old-daemon.json missing (earlier steps did not run)' }
+          $idj = try { (& $wave identify 2>$null) | ConvertFrom-Json } catch { $null }
+          if ($idj -and $idj.daemon_pid) {
+            $cp = Get-CimInstance Win32_Process -Filter "ProcessId=$($idj.daemon_pid)"
+            if ($cp -and $cp.ExecutablePath -eq (Join-Path $dir 'waved.exe')) { $targets += [pscustomobject]@{ pid = [int]$idj.daemon_pid; why = 'current waved.exe (reported by wave identify)' } }
+          }
+          Timeline 'logon-sim before'
+          foreach ($tg in ($targets | Sort-Object pid -Unique)) { Write-Host "LOGON_SIM end pid=$($tg.pid) ($($tg.why))"; Stop-Process -Id $tg.pid -Force -ErrorAction SilentlyContinue }
+          Get-Process wave-app -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "LOGON_SIM close wave-app pid=$($_.Id)"; Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+          Start-Sleep -Seconds 5
+          Timeline 'logon-sim after-stop'
+          # --- the legacy logon task (CI runner only)
+          schtasks /Query /TN cysd 2>&1 | Out-Host
+          if ($LASTEXITCODE -ne 0) { Fail 'scheduled task cysd does not exist (legacy logon task missing)' }
+          else {
+            schtasks /Run /TN cysd 2>&1 | Out-Host
+            if ($LASTEXITCODE -ne 0) { Fail "schtasks /Run /TN cysd failed ($LASTEXITCODE)" }
+          }
+          $up = $false; $w = [Diagnostics.Stopwatch]::StartNew(); $seenFwd = $false
+          while (-not $script:why -and $w.Elapsed.TotalSeconds -lt 90 -and -not $up) {
+            if (Get-Process cysd -ErrorAction SilentlyContinue) { $seenFwd = $true }
+            $j = try { (& $wave identify 2>$null) | ConvertFrom-Json } catch { $null }
+            if ($j -and $j.version -match '^0\.3\.2') {
+              $pr = Get-CimInstance Win32_Process -Filter "ProcessId=$($j.daemon_pid)"
+              if ($pr -and $pr.ExecutablePath -eq (Join-Path $dir 'waved.exe')) { $up = $true; Write-Host "LOGON_SIM_DAEMON pid=$($j.daemon_pid) version=$($j.version) image=$($pr.ExecutablePath) forwarder_seen=$seenFwd after $([int]$w.Elapsed.TotalSeconds)s" }
+            }
+            if (-not $up) { Start-Sleep -Seconds 3 }
+          }
+          Timeline 'logon-sim after-schtasks'
+          if (-not $script:why -and -not $up) { Fail 'cysd.exe forwarder (0.3.2) did not bring up waved.exe 0.3.2 within 90 s of schtasks /Run' }
+          # --- the GUI after the logon: wave-app alive, `wave list` works, sidebar not dead
+          if (-not $script:why) {
+            Start-Process -FilePath (Join-Path $dir 'wave-app.exe')
+            Start-Sleep -Seconds 25
+            if (-not (Get-Process wave-app -ErrorAction SilentlyContinue)) { Fail 'wave-app.exe is not alive 25 s after the logon start' }
+            $list = (& $wave list 2>&1) -join "`n"
+            if ($LASTEXITCODE -ne 0) { Fail "wave list failed after the logon: $list" } else { Write-Host "LOGON_SIM_WAVE_LIST`n$list"; $list | Out-File evidence\layout-logon.txt -Encoding utf8 }
+          }
+          Shot 'logon-sidebar'
+          ExpandDaemon 'daemon-expanded-logon'
+          Timeline 'logon-sim end'
+          if (Test-Path evidence\daemon-details-uia.txt) { $uia = ((Get-Content evidence\daemon-details-uia.txt -Raw) -split '\] daemon-expanded-logon')[-1]; if ($uia -match 'upd-seat') { Write-Host 'LOGON_SIM_SIDEBAR_HAS_SEATS (UIA)' } else { Write-Host 'LOGON_SIM_SIDEBAR_SEATS_NOT_SEEN_IN_UIA (see logon-sidebar.png)' } }
+          if ($script:why) { Write-Host "LOGON_SIM_FAIL $script:why"; exit 1 } else { Write-Host 'LOGON_SIM_OK' }
+
+      - name: Capture evidence (logs, temp traces, hashes, on-disk exes)
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Force -Path evidence | Out-Null
+          $dir = Join-Path $env:LOCALAPPDATA 'Wave Terminal'
+          Copy-Item (Join-Path $env:TEMP 'wave-install-kill.log') evidence -ErrorAction SilentlyContinue
+          Write-Host "KILL_LOG_EXISTS $(Test-Path (Join-Path $env:TEMP 'wave-install-kill.log'))"
+          Copy-Item layout-*.txt, layout-*.json, old-daemon.json evidence -ErrorAction SilentlyContinue
+          Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,ExecutablePath | Format-Table -AutoSize | Out-String -Width 220 | Out-File evidence\processes.txt
+          $found = @(Get-ChildItem -LiteralPath $env:TEMP -Recurse -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)setup|nsis|nsu|tauri|wave|\.exe$|\.log$' -and $_.FullName -notmatch 'evidence|_work' })
+          $found | Sort-Object LastWriteTime | ForEach-Object { "{0} {1,12} {2}" -f $_.LastWriteTime.ToString('o'), $_.Length, $_.FullName } | Out-File evidence\temp_listing.txt
+          Get-ChildItem -LiteralPath $env:TEMP -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)^nsu|nsis' } | ForEach-Object { Write-Host "NSIS_TRACE $($_.FullName) $($_.Length)" }
+          Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(cysd|waved|wave|cys|wave-app|cys-app)(\.prev\d*)?\.exe$|\.old$' } | Sort-Object Name |
+            ForEach-Object { Write-Host ("DISK {0,-18} {1,10} bytes version={2} sha256={3}" -f $_.Name, $_.Length, $_.VersionInfo.ProductVersion, (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash) } | Tee-Object -FilePath evidence\disk_exes.txt
+          # app/daemon logs: ALLOW-LIST of exact files only (no directory sweep, no deny-list); directory NAMES (never contents) are printed
+          $allow = @(
+            (Join-Path $env:LOCALAPPDATA 'cys\cysd.log'), (Join-Path $env:LOCALAPPDATA 'cys\cys.log'), (Join-Path $env:LOCALAPPDATA 'cys\waved.log'),
+            (Join-Path $env:LOCALAPPDATA 'cys\wave.log'), (Join-Path $env:LOCALAPPDATA 'cys\daemon.log'),
+            (Join-Path $env:LOCALAPPDATA 'com.waveainetworks.wave-terminal\logs\Wave Terminal.log'),
+            (Join-Path $HOME '.cys\update.log'), (Join-Path $HOME '.cys\.pending-restore'))
+          foreach ($file in $allow) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { Write-Host "ALLOWED_LOG_ABSENT $file"; continue }
+            New-Item -ItemType Directory -Force -Path 'evidence\app-logs' | Out-Null
+            Copy-Item -LiteralPath $file -Destination (Join-Path 'evidence\app-logs' ($file -replace '[:\\/]', '_')) -ErrorAction SilentlyContinue
+            Write-Host "ALLOWED_LOG_COPIED $file"
+          }
+          foreach ($d in @((Join-Path $env:LOCALAPPDATA 'cys'), (Join-Path $env:LOCALAPPDATA 'com.waveainetworks.wave-terminal'), (Join-Path $HOME '.cys'))) {
+            if (Test-Path $d) { Write-Host "DIRNAMES $d : $((Get-ChildItem -LiteralPath $d -Force -Name -ErrorAction SilentlyContinue | Select-Object -First 60) -join ', ')" } else { Write-Host "DIR_ABSENT $d" }
+          }
+      - name: Secret-scan the evidence bundle (file names only; a hit skips the upload and fails this step, not the proof)
+        id: scan
+        if: always()
+        shell: pwsh
+        run: |
+          $hits = @()
+          $patterns = '(?i)(token|secret|passw(or)?d|api[_-]?key|authorization|bearer)\s*["'':=]', 'gh[pousr]_[A-Za-z0-9]{20,}', 'github_pat_[A-Za-z0-9_]{20,}', 'AKIA[0-9A-Z]{16}', '-----BEGIN [A-Z ]*PRIVATE KEY', 'sk-[A-Za-z0-9]{20,}'
+          foreach ($f in @(Get-ChildItem evidence -Recurse -File -Force -ErrorAction SilentlyContinue)) {
+            if ($f.Name -match '(?i)token|secret|\.key$|\.pem$|credential') { $hits += $f.FullName; continue }
+            if ($f.Extension -match '(?i)\.(png|exe|dll)$') { continue }
+            foreach ($pattern in $patterns) { if (Select-String -LiteralPath $f.FullName -Pattern $pattern -Quiet -ErrorAction SilentlyContinue) { $hits += $f.FullName; break } }
+          }
+          if ($hits.Count -gt 0) { Write-Host "EVIDENCE_SECRET_SCAN_HIT (names only): $(($hits | Select-Object -Unique) -join ', ')"; exit 1 }
+          Write-Host 'EVIDENCE_SECRET_SCAN_CLEAN'
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.scan.outcome == 'success'
+        with:
+          name: windows-direct-update-proof-evidence
+          path: evidence
+          if-no-files-found: warn

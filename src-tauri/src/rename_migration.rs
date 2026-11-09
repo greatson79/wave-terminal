@@ -63,6 +63,13 @@ trait Backend {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Outcome { AlreadyReady, Migrated }
 
+/// Fail-open startup: a refused or failed migration must never leave a dead GUI. Whatever `run` returned, startup continues to the
+/// normal connect path on the daemon that is already running (the migration path itself stopped/changed nothing it did not finish).
+pub(crate) fn startup_continues(_result: &Result<Outcome, String>) -> bool { true }
+
+/// The migration error to record and show (None for AlreadyReady / Migrated).
+pub(crate) fn migration_error(result: &Result<Outcome, String>) -> Option<&str> { result.as_ref().err().map(String::as_str) }
+
 async fn perform<B: Backend>(backend: &mut B) -> Result<Outcome, String> {
     let before = backend.inspect().await?;
     if before.uncertain {
@@ -207,6 +214,25 @@ mod tests {
         let mut fake=Fake::old();fake.fail="activate";fake.rollback_fail=true;
         let error=perform(&mut fake).await.unwrap_err();
         assert!(error.contains("실패: activate")&&error.contains("복구 실패"),"{error}");
+    }
+    #[tokio::test]
+    async fn inspect_error_is_fail_open_nothing_written_stopped_or_activated() {
+        let mut fake = Fake::old();
+        fake.fail = "inspect";
+        let result = perform(&mut fake).await;
+        assert!(result.is_err());
+        assert_eq!(fake.events, vec!["inspect"], "no capture, no marker (prepared), no stop-old, no activate");
+        assert!(startup_continues(&result), "startup must reach READY on the running daemon");
+        assert_eq!(migration_error(&result), Some("실패: inspect"));
+    }
+
+    #[test]
+    fn startup_continues_for_every_outcome_and_only_errors_are_recorded() {
+        assert!(startup_continues(&Ok(Outcome::AlreadyReady)) && startup_continues(&Ok(Outcome::Migrated)));
+        assert!(startup_continues(&Err("x".to_string())));
+        assert_eq!(migration_error(&Ok(Outcome::AlreadyReady)), None);
+        assert_eq!(migration_error(&Ok(Outcome::Migrated)), None);
+        assert_eq!(migration_error(&Err("x".to_string())), Some("x"));
     }
 }
 

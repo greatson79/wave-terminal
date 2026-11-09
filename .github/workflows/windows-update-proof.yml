@@ -1,0 +1,160 @@
+name: windows-update-proof
+# 0.3.1 -> 0.3.2 update proof on a Windows runner, through the app's REAL in-app updater (v0.3.1 already honours
+# CYS_UPDATE_MANIFEST_URL + CYS_AUTOTEST_PATCH_INSTALL). The update source is the manifest asset latest-rc.json of a
+# v<X.Y.Z>-rc.<N> PRERELEASE — the channel manifest releases/latest/download/latest.json is never read as the source
+# and never written; this workflow only READS it before and after to prove it still says the base version.
+# Needs: the rc prerelease (not latest) carrying wave-terminal-<ver>-windows-x64-setup.exe + latest-rc.json signed with the
+# owner updater key (scripts/make-rc-manifest.py). Creates nothing, deletes nothing.
+on:
+  workflow_dispatch:
+    inputs:
+      rc_tag:
+        description: Prerelease tag (vX.Y.Z-rc.N)
+        required: true
+      base_tag:
+        description: Installed-before release tag
+        required: true
+        default: v0.3.1
+      repo:
+        description: Release repository (owner/name)
+        required: true
+        default: greatson79/wave-terminal
+
+permissions:
+  contents: read
+
+jobs:
+  update-proof:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      RC_TAG: ${{ inputs.rc_tag }}
+      BASE_TAG: ${{ inputs.base_tag }}
+      REPO: ${{ inputs.repo }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Guard — rc is a prerelease and not latest; channel manifest still on the base version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RC_TAG -notmatch '^v\d+\.\d+\.\d+-rc\.\d+$' -or $env:BASE_TAG -notmatch '^v\d+\.\d+\.\d+$' -or $env:REPO -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') { throw 'invalid input' }
+          $rc = gh release view $env:RC_TAG -R $env:REPO --json isPrerelease,isDraft,tagName | ConvertFrom-Json
+          if (-not $rc.isPrerelease) { throw "$env:RC_TAG is not a prerelease" }
+          $latest = (gh release view -R $env:REPO --json tagName | ConvertFrom-Json).tagName
+          if ($latest -eq $env:RC_TAG) { throw 'the rc is marked latest' }
+          Invoke-WebRequest "https://github.com/$env:REPO/releases/latest/download/latest.json" -OutFile channel-before.json
+          $channel = (Get-Content channel-before.json -Raw | ConvertFrom-Json).version
+          if ("v$channel" -ne $env:BASE_TAG) { throw "channel latest.json says $channel, expected $env:BASE_TAG" }
+          if ((Get-Content channel-before.json -Raw) -match [regex]::Escape($env:RC_TAG)) { throw 'channel latest.json points at the rc' }
+          Write-Host "GUARD_OK latest=$latest channel=$channel rc=$env:RC_TAG prerelease"
+
+      - name: Install the base release and create a live layout
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          gh release download $env:BASE_TAG -R $env:REPO -p '*windows-x64-setup.exe' -O base-setup.exe
+          $p = Start-Process -FilePath (Resolve-Path base-setup.exe).Path -ArgumentList '/S' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "base installer failed: $($p.ExitCode)" }
+          $dir = Join-Path $env:LOCALAPPDATA 'Wave Terminal'
+          $app = Join-Path $dir 'cys-app.exe'
+          if (-not (Test-Path $app)) { throw 'base GUI cys-app.exe missing (not a 0.3.1 layout)' }
+          Write-Host "BASE_VERSION $((Get-Item $app).VersionInfo.ProductVersion)"
+          $cys = Join-Path $dir 'cys.exe'
+          & $cys list; if ($LASTEXITCODE -ne 0) { Start-Sleep -Seconds 3; & $cys list }
+          if ($LASTEXITCODE -ne 0) { throw 'base daemon did not start' }
+          foreach ($t in 'upd-seat-a','upd-seat-b') { & $cys new-surface --title $t | Out-Null; if ($LASTEXITCODE -ne 0) { throw "new-surface $t failed" } }
+          & $cys list | Tee-Object -FilePath layout-before.txt
+          & $cys status --json | Out-File layout-before.json -Encoding utf8
+          $id = (& $cys identify) | ConvertFrom-Json
+          Write-Host "BASE_DAEMON pid=$($id.daemon_pid) version=$($id.version) image=$((Get-CimInstance Win32_Process -Filter "ProcessId=$($id.daemon_pid)").ExecutablePath)"
+          Remove-Item (Join-Path $env:TEMP 'wave-install-kill.log') -ErrorAction SilentlyContinue
+
+      - name: In-app update (the real updater, update source = the rc manifest asset)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:LOCALAPPDATA 'Wave Terminal'
+          $env:CYS_UPDATE_MANIFEST_URL = "https://github.com/$env:REPO/releases/download/$env:RC_TAG/latest-rc.json"
+          $env:CYS_AUTOTEST_PATCH_INSTALL = '1'
+          Write-Host "UPDATE_SOURCE $env:CYS_UPDATE_MANIFEST_URL"
+          Start-Process -FilePath (Join-Path $dir 'cys-app.exe')
+          Remove-Item Env:CYS_UPDATE_MANIFEST_URL, Env:CYS_AUTOTEST_PATCH_INSTALL
+          $watch = [Diagnostics.Stopwatch]::StartNew()
+          $new = Join-Path $dir 'wave-app.exe'
+          while ($watch.Elapsed.TotalMinutes -lt 12) {
+            if ((Test-Path $new) -and (Get-Item $new).VersionInfo.ProductVersion -match '^0\.3\.2') { break }
+            Start-Sleep -Seconds 5
+          }
+          if (-not ((Test-Path $new) -and (Get-Item $new).VersionInfo.ProductVersion -match '^0\.3\.2')) { throw 'the in-app update did not install 0.3.2 within 12 minutes (wrong signature / manifest / asset name?)' }
+          Start-Sleep -Seconds 15
+          Write-Host "UPDATED wave-app.exe $((Get-Item $new).VersionInfo.ProductVersion) after $([int]$watch.Elapsed.TotalSeconds)s"
+
+      - name: "(b) + (a) install-time kill log — did each kill fire? the NSIS kill must hit nothing"
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $log = Join-Path $env:TEMP 'wave-install-kill.log'
+          if (-not (Test-Path $log)) { throw "$log missing — the installer build has no WAVE_KILL_LOG macro, or the update never ran the NSIS pre-install hook" }
+          $seen = @{}
+          foreach ($line in (Get-Content $log)) {
+            if ($line -match '^(?<image>\S+) exit=(?<code>\d+)\s*$') {
+              $seen[$Matches.image] = [int]$Matches.code
+              $meaning = switch ([int]$Matches.code) { 0 { 'KILLED a running process' } 128 { 'none running' } default { 'other' } }
+              Write-Host ("KILL {0,-14} exit={1,-4} {2}" -f $Matches.image, $Matches.code, $meaning)
+            }
+          }
+          foreach ($image in 'wave-app.exe','cys-app.exe','cysd.exe','cys.exe') { if (-not $seen.ContainsKey($image)) { throw "no kill-log line for $image" } }
+          # GUI images are closed by the updater itself and may race (informational). The daemon and CLI images carry the
+          # sessions: if NSIS killed them, the in-app handover did not run first and the update would have cost the layout.
+          $hit = @('cysd.exe','cys.exe') | Where-Object { $seen[$_] -ne 128 }
+          if ($hit) { throw "(a) FAILED — the NSIS pre-install kill hit a running $($hit -join ', '): the in-app handover did not stop it first. STOP and report." }
+          Write-Host 'HANDOVER_A_KILL_OK cysd.exe and cys.exe exit=128 (nothing to kill)'
+
+      - name: "(a) layout restored on the new version, real daemon, no resident forwarder"
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:LOCALAPPDATA 'Wave Terminal'
+          $wave = Join-Path $dir 'wave.exe'
+          if (-not (Get-Process wave-app -ErrorAction SilentlyContinue)) { Start-Process -FilePath (Join-Path $dir 'wave-app.exe') }
+          $ok = $false; $watch = [Diagnostics.Stopwatch]::StartNew()
+          while ($watch.Elapsed.TotalSeconds -lt 180 -and -not $ok) {
+            Start-Sleep -Seconds 5
+            $status = (& $wave status --json 2>$null) -join "`n"
+            $ok = ($LASTEXITCODE -eq 0) -and ($status -match 'upd-seat-a') -and ($status -match 'upd-seat-b')
+          }
+          & $wave list | Tee-Object -FilePath layout-after.txt
+          $status | Out-File layout-after.json -Encoding utf8
+          if (-not $ok) { throw '(a) FAILED — the seats created before the update are not back after it (layout not restored)' }
+          $id = (& $wave identify) | ConvertFrom-Json
+          $process = Get-CimInstance Win32_Process -Filter "ProcessId=$($id.daemon_pid)"
+          Write-Host "NEW_DAEMON pid=$($id.daemon_pid) version=$($id.version) image=$($process.ExecutablePath)"
+          if ($id.version -notmatch '^0\.3\.2') { throw "daemon version $($id.version), expected 0.3.2" }
+          if ($process.ExecutablePath -ne (Join-Path $dir 'waved.exe')) { throw 'daemon is not the installed waved.exe' }
+          $forwarders = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath -match '(?i)\\(cysd|cys-app)\.exe$' -and $_.ExecutablePath.StartsWith($dir + '\', [StringComparison]::OrdinalIgnoreCase) })
+          if ($forwarders.Count -ne 0) { throw "resident forwarder(s): $(($forwarders | ForEach-Object { $_.ExecutablePath }) -join ',')" }
+          Write-Host 'UPDATE_PROOF_PASS layout restored; daemon waved.exe 0.3.2; no resident forwarder'
+
+      - name: Channel manifest unchanged after the proof
+        if: always()
+        shell: pwsh
+        run: |
+          Invoke-WebRequest "https://github.com/$env:REPO/releases/latest/download/latest.json" -OutFile channel-after.json
+          $a = (Get-Content channel-before.json -Raw -ErrorAction SilentlyContinue); $b = Get-Content channel-after.json -Raw
+          if ($a -and $a -ne $b) { throw 'channel latest.json changed during the proof' }
+          Write-Host 'CHANNEL_UNCHANGED'
+
+      - name: Collect evidence
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path evidence | Out-Null
+          Copy-Item (Join-Path $env:TEMP 'wave-install-kill.log') evidence -ErrorAction SilentlyContinue
+          Copy-Item layout-*.txt, layout-*.json, channel-*.json evidence -ErrorAction SilentlyContinue
+          Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,ExecutablePath | Format-Table -AutoSize | Out-String -Width 220 | Out-File evidence\processes.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-update-proof-evidence
+          path: evidence/*
+          if-no-files-found: warn

@@ -16,6 +16,7 @@ on:
   push:
     tags:
       - 'v*'
+      - '!v*-rc.*'   # update-proof prereleases (v0.3.2-rc.N) never start the draft-release build
   workflow_dispatch:
 
 permissions:

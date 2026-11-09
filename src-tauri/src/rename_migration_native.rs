@@ -645,19 +645,24 @@ mod tests {
     fn seat()->Value{json!({"surface_id":7,"role":"worker","agent":"codex","model":"model-1","cwd":"/active","claude_config_dir":"/account","exited":false,"agent_alive":true,"launch_complete":true})}
     #[test]
     fn previous_bundle_daemon_accepts_only_exact_shipped_and_nsis_swap_names(){
-        let base=Path::new("/app/Wave");
+        // Platform-absolute root: a Windows path needs a drive, so "/app/Wave" is relative there and is (correctly) refused.
+        let app=if cfg!(windows){"C:/app"}else{"/app"};
+        let base_text=format!("{app}/Wave");
+        let base=Path::new(&base_text);
+        let at=|tail:&str|PathBuf::from(format!("{app}/{tail}"));
         for ok in ["cysd","cysd.exe","cysd.prev.exe","cysd.prev2.exe","cysd.prev3.exe"] {
             assert!(is_previous_bundle_daemon(&base.join(ok),base),"{ok}");
         }
         for bad in ["cysd.prev4.exe","cysd.prev","cysd.prev.exe.bak","cysd.exe.prev123","cysd.exe.previous","xcysd.exe","cysd2.exe","CYSD.EXE","cys.exe","waved.exe",""] {
             assert!(!is_previous_bundle_daemon(&base.join(bad),base),"{bad}");
         }
-        assert!(!is_previous_bundle_daemon(Path::new("/other/Wave/cysd.prev.exe"),base),"foreign dir");
-        assert!(!is_previous_bundle_daemon(Path::new("/app/Wave/sub/cysd.prev.exe"),base),"subdir");
-        assert!(!is_previous_bundle_daemon(Path::new("/app/Wave/../Wave2/cysd.prev.exe"),base),"traversal");
-        assert!(!is_previous_bundle_daemon(Path::new("/app/Wave/sub/../cysd.prev.exe"),base),"traversal2");
+        assert!(!is_previous_bundle_daemon(&at("other/Wave/cysd.prev.exe"),base),"foreign dir");
+        assert!(!is_previous_bundle_daemon(&at("Wave/sub/cysd.prev.exe"),base),"subdir");
+        assert!(!is_previous_bundle_daemon(&at("Wave/../Wave2/cysd.prev.exe"),base),"traversal");
+        assert!(!is_previous_bundle_daemon(&at("Wave/sub/../cysd.prev.exe"),base),"traversal2");
         assert!(!is_previous_bundle_daemon(Path::new("cysd.prev.exe"),base),"relative");
-        assert!(!is_previous_bundle_daemon(Path::new("/app/Wave"),Path::new("/app/Wave")),"dir itself");
+        assert!(!is_previous_bundle_daemon(base,base),"dir itself");
+        assert!(!is_previous_bundle_daemon(&base.join("cysd.prev.exe"),Path::new("app/Wave")),"relative base is refused on every OS");
     }
     #[test]
     fn rollback_plan_recovers_seats_before_the_marker_is_ever_cleared(){

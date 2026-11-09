@@ -89,6 +89,8 @@ jobs:
           & $cys status --json | Out-File layout-before.json -Encoding utf8
           $id = (& $cys identify) | ConvertFrom-Json
           Write-Host "BASE_DAEMON pid=$($id.daemon_pid) version=$($id.version) image=$((Get-CimInstance Win32_Process -Filter "ProcessId=$($id.daemon_pid)").ExecutablePath)"
+          $oldProc = Get-CimInstance Win32_Process -Filter "ProcessId=$($id.daemon_pid)"
+          [ordered]@{ pid = [int]$id.daemon_pid; created = [string]$oldProc.CreationDate; image = $oldProc.ExecutablePath } | ConvertTo-Json | Out-File old-daemon.json -Encoding utf8
           Remove-Item (Join-Path $env:TEMP 'wave-install-kill.log') -ErrorAction SilentlyContinue
 
       - name: In-app update (the real updater, update source = the rc manifest asset)
@@ -110,8 +112,18 @@ jobs:
           if (-not ((Test-Path $new) -and (Get-Item $new).VersionInfo.ProductVersion -match '^0\.3\.2')) { throw 'the in-app update did not install 0.3.2 within 12 minutes (wrong signature / manifest / asset name?)' }
           Start-Sleep -Seconds 15
           Write-Host "UPDATED wave-app.exe $((Get-Item $new).VersionInfo.ProductVersion) after $([int]$watch.Elapsed.TotalSeconds)s"
+          # (1) the install succeeded WITH the 0.3.1 daemon running: cysd.exe on disk must now be the 0.3.2 forwarder (the old
+          # image was rename-swapped to cysd.prev*.exe). Never fix a failed swap by killing the daemon.
+          $old = Get-Content old-daemon.json -Raw | ConvertFrom-Json
+          Write-Host "OLD_DAEMON_AT_INSTALL pid=$($old.pid) image_before=$($old.image)"
+          Get-ChildItem -LiteralPath $dir -File | Where-Object { $_.Name -match '^(cysd|waved|wave|cys|wave-app|cys-app)(\.prev\d*)?\.exe$' } | Sort-Object Name |
+            ForEach-Object { Write-Host ("INSTALLED {0,-18} {1,10} bytes  version={2}  sha256={3}" -f $_.Name, $_.Length, $_.VersionInfo.ProductVersion, (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.Substring(0,16)) }
+          $fwd = Join-Path $dir 'cysd.exe'
+          if (-not (Test-Path $fwd) -or (Get-Item $fwd).VersionInfo.ProductVersion -notmatch '^0\.3\.2') { throw "(1) FAILED — cysd.exe on disk is not the 0.3.2 forwarder (rename-swap failed while the 0.3.1 daemon ran). NSIS result: kill log below; do NOT re-add a kill. $(Get-Content (Join-Path $env:TEMP 'wave-install-kill.log') -ErrorAction SilentlyContinue)" }
+          $prev = @(Get-ChildItem -LiteralPath $dir -File -Filter 'cysd.prev*.exe')
+          Write-Host "CYSD_FORWARDER_OK cysd.exe=0.3.2 prev=[$((@($prev | ForEach-Object Name)) -join ',')]"
 
-      - name: "(b) + (a) install-time kill log — did each kill fire? the NSIS kill must hit nothing"
+      - name: "(b) install-time kill log — which kills fired; cysd.exe must not be in it"
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -125,12 +137,10 @@ jobs:
               Write-Host ("KILL {0,-14} exit={1,-4} {2}" -f $Matches.image, $Matches.code, $meaning)
             }
           }
-          foreach ($image in 'wave-app.exe','cys-app.exe','cysd.exe','cys.exe') { if (-not $seen.ContainsKey($image)) { throw "no kill-log line for $image" } }
-          # GUI images are closed by the updater itself and may race (informational). The daemon and CLI images carry the
-          # sessions: if NSIS killed them, the in-app handover did not run first and the update would have cost the layout.
-          $hit = @('cysd.exe','cys.exe') | Where-Object { $seen[$_] -ne 128 }
-          if ($hit) { throw "(a) FAILED — the NSIS pre-install kill hit a running $($hit -join ', '): the in-app handover did not stop it first. STOP and report." }
-          Write-Host 'HANDOVER_A_KILL_OK cysd.exe and cys.exe exit=128 (nothing to kill)'
+          foreach ($image in 'wave-app.exe','cys-app.exe','cys.exe') { if (-not $seen.ContainsKey($image)) { throw "no kill-log line for $image" } }
+          # (2) cysd.exe must NOT be killed at install (the running 0.3.1 daemon is rename-swapped = lame-duck, no session loss).
+          if ($seen.ContainsKey('cysd.exe')) { throw "(2) FAILED — the install-time kill list still contains cysd.exe (exit=$($seen['cysd.exe']))" }
+          Write-Host 'KILL_LOG_OK wave-app/cys-app/cys present, no cysd.exe line (informational: GUI/CLI kills may be 0 or 128)'
 
       - name: "(a) layout restored on the new version, real daemon, no resident forwarder"
         shell: pwsh
@@ -155,7 +165,18 @@ jobs:
           if ($process.ExecutablePath -ne (Join-Path $dir 'waved.exe')) { throw 'daemon is not the installed waved.exe' }
           $forwarders = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath -match '(?i)\\(cysd|cys-app)\.exe$' -and $_.ExecutablePath.StartsWith($dir + '\', [StringComparison]::OrdinalIgnoreCase) })
           if ($forwarders.Count -ne 0) { throw "resident forwarder(s): $(($forwarders | ForEach-Object { $_.ExecutablePath }) -join ',')" }
-          Write-Host 'UPDATE_PROOF_PASS layout restored; daemon waved.exe 0.3.2; no resident forwarder'
+          # (3) the old 0.3.1 daemon (same pid + creation time; image now cysd.exe/cysd.prev*.exe) must EXIT after the handover.
+          $old = Get-Content old-daemon.json -Raw | ConvertFrom-Json
+          $exited = $false; $w = [Diagnostics.Stopwatch]::StartNew()
+          while ($w.Elapsed.TotalSeconds -lt 120 -and -not $exited) {
+            $p = Get-CimInstance Win32_Process -Filter "ProcessId=$($old.pid)"
+            $exited = -not ($p -and [string]$p.CreationDate -eq $old.created)
+            if (-not $exited) { Start-Sleep -Seconds 3 }
+          }
+          if (-not $exited) { throw "(3) FAILED — the old 0.3.1 daemon pid=$($old.pid) image=$($p.ExecutablePath) is still running 120 s after the handover" }
+          Write-Host "OLD_DAEMON_EXITED pid=$($old.pid) after $([int]$w.Elapsed.TotalSeconds)s"
+          Write-Host 'UPDATE_PROOF_PASS layout restored; daemon waved.exe 0.3.2; no resident forwarder; old 0.3.1 daemon exited'
+
 
       - name: Channel manifest unchanged after the proof
         if: always()
@@ -172,7 +193,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path evidence | Out-Null
           Copy-Item (Join-Path $env:TEMP 'wave-install-kill.log') evidence -ErrorAction SilentlyContinue
-          Copy-Item layout-*.txt, layout-*.json, channel-*.json evidence -ErrorAction SilentlyContinue
+          Copy-Item layout-*.txt, layout-*.json, channel-*.json, old-daemon.json evidence -ErrorAction SilentlyContinue
           Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,ExecutablePath | Format-Table -AutoSize | Out-String -Width 220 | Out-File evidence\processes.txt
       - uses: actions/upload-artifact@v4
         if: always()

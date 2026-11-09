@@ -34,10 +34,9 @@
   !insertmacro WAVE_KILL_LOG "wave-app.exe"
   nsExec::Exec 'taskkill /F /T /IM cys-app.exe'
   !insertmacro WAVE_KILL_LOG "cys-app.exe"
-  ; 0.3.2: no old-name image may stay resident (cysd.exe/cys.exe forwarders) — Theo kai#1e17e2.
-  nsExec::Exec 'taskkill /F /T /IM cysd.exe'
-  !insertmacro WAVE_KILL_LOG "cysd.exe"
-  nsExec::Exec 'taskkill /F /T /IM cys.exe'
+  ; cys.exe is a short-lived CLI. cysd.exe is NOT killed here: a running 0.3.1 daemon image is cysd.exe and owns the
+  ; sessions — step ② rename-swaps it to cysd.prev*.exe (lame-duck, no session loss); the new app's handover retires it (Theo kai#5f279f).
+  nsExec::Exec 'taskkill /F /IM cys.exe'   ; no /T: a 0.3.1 cys.exe may be the parent of an autostarted daemon / long-lived `cys events` — a tree kill could end sessions
   !insertmacro WAVE_KILL_LOG "cys.exe"
 
   ; ② waved.exe rename-swap (canonical 데몬 무사망)

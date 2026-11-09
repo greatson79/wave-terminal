@@ -25,11 +25,14 @@ def proof_violations(text):
     for forbidden in ("gh release create", "gh release delete", "gh release edit", "--latest", "git tag", "git push", "contents: write"):
         if forbidden in text: bad.append("forbidden: " + forbidden)
     for required in ("isPrerelease", "CYS_UPDATE_MANIFEST_URL", "latest-rc.json", "CYS_AUTOTEST_PATCH_INSTALL", "wave-install-kill.log",
-                     "exit=128", "channel latest.json points at the rc", "CHANNEL_UNCHANGED", "(a) FAILED"):
+                     "channel latest.json points at the rc", "CHANNEL_UNCHANGED",
+                     "(1) FAILED", "CYSD_FORWARDER_OK", "cysd.prev*.exe", "(2) FAILED", "KILL_LOG_OK", "(3) FAILED", "OLD_DAEMON_EXITED", "old-daemon.json"):
         if required not in text: bad.append("missing: " + required)
     if re.search(r"CYS_UPDATE_MANIFEST_URL\s*=\s*\"[^\"]*releases/latest/", text): bad.append("update source is the channel")
     if re.search(r"CYS_UPDATE_MANIFEST_URL\s*=\s*\"[^\"]*/latest\.json", text): bad.append("update source is latest.json")
-    if "@('cysd.exe','cys.exe') | Where-Object { $seen[$_] -ne 128 }" not in text: bad.append("daemon/CLI kill must be exit 128")
+    if "$seen.ContainsKey('cysd.exe')" not in text: bad.append("kill log must reject a cysd.exe line")
+    if re.search(r"taskkill[^\n]*cysd", text): bad.append("proof must never kill cysd.exe itself")
+    if "foreach ($image in 'wave-app.exe','cys-app.exe','cys.exe')" not in text: bad.append("kill log must require wave-app/cys-app/cys lines")
     return bad
 
 
@@ -42,7 +45,10 @@ class UpdateProof(unittest.TestCase):
         self.assertTrue(proof_violations(text + "\n# gh release edit v1 --latest\n"))
         self.assertTrue(proof_violations(text.replace("latest-rc.json", "latest.json")))
         self.assertTrue(proof_violations(text.replace("isPrerelease", "isDraft")))
-        self.assertTrue(proof_violations(text.replace("-ne 128 }", "-ne 0 }")))
+        self.assertTrue(proof_violations(text.replace("$seen.ContainsKey('cysd.exe')", "$false")))        # cysd.exe line no longer rejected
+        self.assertTrue(proof_violations(text.replace("OLD_DAEMON_EXITED", "OLD_DAEMON_SEEN")))           # old daemon exit not proven
+        self.assertTrue(proof_violations(text.replace("(1) FAILED", "(1) NOTE")))                          # swap failure not fatal
+        self.assertTrue(proof_violations(text + "\n# nsExec taskkill /F /IM cysd.exe\n"))                 # re-adding the kill
         self.assertTrue(proof_violations(text.replace("CHANNEL_UNCHANGED", "")))
 
     def test_release_yml_does_not_build_on_rc_tags(self):

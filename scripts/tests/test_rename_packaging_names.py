@@ -60,15 +60,22 @@ class NsisLockedFileSwap(unittest.TestCase):
     def test_gui_images_are_closed_before_install(self):
         # unconditional close step: before the first rename-swap (not the ③ fallbacks)
         preinstall = self.hooks[self.hooks.index("!macro NSIS_HOOK_PREINSTALL"):].split("IfFileExists")[0]
-        for name in ("wave-app", "cys-app", "cysd", "cys"):
+        for name in ("wave-app", "cys-app"):
             self.assertIn(f"taskkill /F /T /IM {name}.exe", preinstall, name)
+        # cys.exe: image-only kill (no /T) — a 0.3.1 cys.exe can parent an autostarted daemon; a tree kill could end sessions.
+        self.assertIn("taskkill /F /IM cys.exe", preinstall)
+        self.assertNotIn("taskkill /F /T /IM cys.exe", preinstall)
+        # a running 0.3.1 daemon image is cysd.exe: killing it at install loses every session. It is rename-swapped (step ②) instead.
+        self.assertNotIn("taskkill /F /T /IM cysd.exe", preinstall)
+        self.assertNotIn('WAVE_KILL_LOG "cysd.exe"', preinstall)
+        self.assertIn('Rename "$INSTDIR\\cysd.exe" "$INSTDIR\\cysd.prev.exe"', self.hooks)
 
     def test_step1_kill_exit_code_is_logged(self):
         # taskkill exit 0 = killed, 128 = none running; a later proof reads $TEMP\\wave-install-kill.log
         preinstall = self.hooks[self.hooks.index("!macro NSIS_HOOK_PREINSTALL"):].split("IfFileExists")[0]
-        for name in ("wave-app", "cys-app", "cysd", "cys"):
+        for name, flags in (("wave-app", "/F /T"), ("cys-app", "/F /T"), ("cys", "/F")):
             self.assertRegex(preinstall,
-                             rf"nsExec::Exec 'taskkill /F /T /IM {name}\.exe'\s*\n\s*!insertmacro WAVE_KILL_LOG \"{name}\.exe\"", name)
+                             rf"nsExec::Exec 'taskkill {flags} /IM {name}\.exe'[^\n]*\n\s*!insertmacro WAVE_KILL_LOG \"{name}\.exe\"", name)
         macro = self.hooks[self.hooks.index("!macro WAVE_KILL_LOG"):].split("!macroend")[0]
         for needle in ("Exch $0", "DetailPrint", r"$TEMP\wave-install-kill.log", "exit=$0", "FileWrite"):
             self.assertIn(needle, macro, needle)

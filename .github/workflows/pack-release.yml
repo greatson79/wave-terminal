@@ -64,6 +64,11 @@ jobs:
         run: bash scripts/secret-scan.sh --all
 
       - name: Setup Bun
+        id: bun
+        continue-on-error: true   # setup-bun downloads from GitHub; one retry on a transient 5xx
+        uses: oven-sh/setup-bun@v2
+      - name: Setup Bun (retry)
+        if: steps.bun.outcome == 'failure'
         uses: oven-sh/setup-bun@v2
 
       - name: Setup Rust

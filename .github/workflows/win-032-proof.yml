@@ -408,6 +408,7 @@ jobs:
               [IO.File]::WriteAllText($env:CYS_DEPT_CATALOG, ($catalog | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
               $env:CYS_DEPT_CWD = $team
             }
+            $deptRecords = @()   # every department daemon + known tree this probe saw (pid + CreationDate); the strict inventory is about THESE
             foreach ($entry in @($Entry)) {
               $socket = $null
               $daemonPid = $null
@@ -436,6 +437,7 @@ jobs:
                   # 0.3.2 rename: the resident daemon is the real binary waved.exe (cysd.exe is only the compat forwarder).
                   Assert ($process.ExecutablePath -eq (Join-Path $install 'waved.exe')) "Daemon is not the installed waved.exe: $($process.ExecutablePath)"
                   $daemonRecord = $process
+                  $deptRecords += $process
                   # P2 reverse check: cys-dept launches the real waved directly, so no cys*-named forwarder may be the daemon's
                   # parent or stay resident next to it (a resident cysd.exe/cys-app.exe = the forwarder did not go away).
                   $parent = Get-CimInstance Win32_Process -Filter "ProcessId=$($process.ParentProcessId)"
@@ -509,6 +511,7 @@ jobs:
                 if ($socket) {
                   . Step "$entry down-sock and prove department removal" {
                     $departmentTree = @(ProcessTree (@($daemonRecord) + $surfaceRecords))
+                    $deptRecords += $departmentTree
                     $departmentTree | Select-Object ProcessId,ParentProcessId,CreationDate,ExecutablePath,CommandLine | Format-List | Out-Host
                     $stopOut = Native $bash @($dept,'down-sock',$socket)
                     $receiptLines = @(($stopOut -split "`r?`n") | Where-Object { $_ -like 'CYS_DEPT_STOP_RESULT *' })
@@ -537,9 +540,20 @@ jobs:
             try {
             . Step 'Final process inventory and isolated base-runtime cleanup' {
               $owned = @(OwnedProcesses)
-              # Strict: when the department steps passed, teardown must already have removed every installed-runtime process;
-              # the kill below is only a safety net and its use is itself a failure (F3 no-orphan: the launcher/forwarder chain is gone).
-              $orphans = @($owned | ForEach-Object { "$($_.ProcessId)=$($_.ExecutablePath)" })
+              # Strict about the DEPARTMENT: any process of a recorded department daemon/tree (same pid AND creation time) or one whose
+              # command line carries a department pipe (cys-dept-) must already be gone. The MAIN daemon of the isolated base runtime
+              # (installed waved.exe, no department record — the CLI autostarts it during teardown) is expected alive here and is
+              # stopped by the cleanup below. The kill below is only a safety net; using it on a department process is a failure.
+              $orphans = @($owned | Where-Object {
+                $o = $_
+                (@($deptRecords | Where-Object { $_.ProcessId -eq $o.ProcessId -and $_.CreationDate -eq $o.CreationDate }).Count -gt 0) -or ($o.CommandLine -match 'cys-dept-')
+              } | ForEach-Object { "$($_.ProcessId)=$($_.ExecutablePath)" })
+              # (a) a department pipe still present after teardown also means a department daemon is alive.
+              $pipes = @([IO.Directory]::GetFiles('\\.\pipe\') | Where-Object { $_ -match 'cys-dept-' })
+              if ($pipes.Count -gt 0) { $orphans += @($pipes | ForEach-Object { "pipe=$_" }) }
+              # (b) the base-runtime MAIN daemon is expected alive here; it is stopped by the cleanup below and RECORDED (MAIN_DAEMON_STOPPED).
+              $mains = @($owned | Where-Object { $o = $_; $o.ExecutablePath -match '(?i)\\waved\.exe$' -and @($deptRecords | Where-Object { $_.ProcessId -eq $o.ProcessId -and $_.CreationDate -eq $o.CreationDate }).Count -eq 0 -and $o.CommandLine -notmatch 'cys-dept-' })
+              foreach ($main in $mains) { Write-Host "EXPECTED_MAIN_DAEMON pid=$($main.ProcessId) parent=$($main.ParentProcessId) command=$($main.CommandLine) (base runtime main daemon; stopped by the cleanup)" }
               $runtimeTree = @(ProcessTree $owned)
               $runtimeTree | Select-Object ProcessId,ParentProcessId,CreationDate,ExecutablePath,CommandLine | Format-List | Out-Host
               # Department assertions happen before this fallback; cleanup never converts a failed probe to PASS.
@@ -552,7 +566,8 @@ jobs:
               Start-Sleep -Seconds 2
               Assert (@(OwnedProcesses).Count -eq 0) 'Installed runtime processes remain'
               AssertGone $runtimeTree
-              Assert ($orphans.Count -eq 0) "Orphan installed-runtime processes survived department teardown (removed only by the fallback): $($orphans -join ',')"
+              foreach ($main in $mains) { Write-Host "MAIN_DAEMON_STOPPED pid=$($main.ProcessId) image=$($main.ExecutablePath)" }
+              Assert ($orphans.Count -eq 0) "Orphan DEPARTMENT processes survived teardown (removed only by the fallback): $($orphans -join ',')"
             }
             } finally {
               . Step 'Restore original raw HKCU PATH and value kind' {

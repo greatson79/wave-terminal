@@ -48,6 +48,11 @@ jobs:
         run: bash scripts/secret-scan.sh --all
 
       - name: Setup Bun
+        id: bun
+        continue-on-error: true   # setup-bun downloads from GitHub; one retry on a transient 5xx
+        uses: oven-sh/setup-bun@v2
+      - name: Setup Bun (retry)
+        if: steps.bun.outcome == 'failure'
         uses: oven-sh/setup-bun@v2
 
       - name: Setup Rust (x86_64-pc-windows-msvc = 러너 네이티브)
@@ -71,30 +76,30 @@ jobs:
           RT="src-tauri/runtime"
           rm -rf "$RT"; mkdir -p "$RT"
           echo "== PortableGit 2.55.0 (bash + coreutils + git) =="
-          curl -fL -o pg.7z.exe "https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.1/PortableGit-2.55.0-64-bit.7z.exe"
+          curl -fL --retry 5 --retry-all-errors --retry-delay 5 -o pg.7z.exe "https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.1/PortableGit-2.55.0-64-bit.7z.exe"
           7z x pg.7z.exe -o"$RT/git" -y >/dev/null
           # 안전한 경량화: 문서·매뉴얼만 제거(런타임 기능 무관).
           rm -rf "$RT/git/mingw64/share/doc" "$RT/git/usr/share/doc" \
                  "$RT/git/mingw64/share/man" "$RT/git/usr/share/man" 2>/dev/null || true
           echo "== Python 3.12.10 embeddable (stdlib + _sqlite3 + ssl) =="
-          curl -fL -o py.zip "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip"
+          curl -fL --retry 5 --retry-all-errors --retry-delay 5 -o py.zip "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip"
           7z x py.zip -o"$RT/python" -y >/dev/null
           cp "$RT/python/python.exe" "$RT/python/python3.exe"
           # embeddable ._pth: 스크립트 dir(.) + site 활성화(형제 import·표준 경로 계산 존중).
           printf 'python312.zip\n.\nimport site\n' > "$RT/python/python312._pth"
           # ── pip 부트스트랩 (embeddable은 pip 미포함 → 'No module named pip' 방지) ──
           echo "== get-pip (embeddable python pip 부트스트랩) =="
-          curl -fL -o "$RT/python/get-pip.py" "https://bootstrap.pypa.io/get-pip.py"
+          curl -fL --retry 5 --retry-all-errors --retry-delay 5 -o "$RT/python/get-pip.py" "https://bootstrap.pypa.io/get-pip.py"
           "$RT/python/python.exe" "$RT/python/get-pip.py" --no-warn-script-location
           rm -f "$RT/python/get-pip.py"
           # ── uv/uvx 동봉 (serena·nlm-mcp-cli가 uvx 전제 → C20/C43 FAIL 방지). runtime/python은 cysd가 PATH 주입. ──
           echo "== uv 0.11.26 (x86_64-pc-windows-msvc) 동봉 =="
-          curl -fL -o uv.zip "https://github.com/astral-sh/uv/releases/download/0.11.26/uv-x86_64-pc-windows-msvc.zip"
+          curl -fL --retry 5 --retry-all-errors --retry-delay 5 -o uv.zip "https://github.com/astral-sh/uv/releases/download/0.11.26/uv-x86_64-pc-windows-msvc.zip"
           7z x uv.zip -o"$RT/python" -y >/dev/null
           ls -la "$RT/python/uv.exe" "$RT/python/uvx.exe"
           # ── node + npm/npx 동봉 (mac 0.7.0 파리티 — 순정 Windows엔 node 부재. runtime/node는 cysd가 PATH 주입) ──
           echo "== Node.js 22.17.1 (npm/npx — win-x64, mac과 동일 핀) =="
-          curl -fL -o node.zip "https://nodejs.org/dist/v22.17.1/node-v22.17.1-win-x64.zip"
+          curl -fL --retry 5 --retry-all-errors --retry-delay 5 -o node.zip "https://nodejs.org/dist/v22.17.1/node-v22.17.1-win-x64.zip"
           7z x node.zip -o"$RT" -y >/dev/null
           mv "$RT/node-v22.17.1-win-x64" "$RT/node"
           ls -la "$RT/node/node.exe" "$RT/node/npm.cmd"

@@ -288,6 +288,7 @@ fn socket_prebind_error(socket_path: &std::path::Path) -> Option<String> {
     cys::check_socket_path_len(socket_path).err()
 }
 
+#[cfg(unix)]
 /// Korean text for a failed bind (never a panic): too-long path → shared message, else path + OS error.
 fn bind_failure_message(socket_path: &std::path::Path, e: &std::io::Error) -> String {
     socket_prebind_error(socket_path).unwrap_or_else(|| {
@@ -295,11 +296,13 @@ fn bind_failure_message(socket_path: &std::path::Path, e: &std::io::Error) -> St
     })
 }
 
+#[cfg(unix)]
 /// Bind the daemon socket; failure = (Korean message, non-zero exit code), never a panic.
 fn bind_listener(socket_path: &std::path::Path) -> Result<tokio::net::UnixListener, (String, i32)> {
     tokio::net::UnixListener::bind(socket_path).map_err(|e| (bind_failure_message(socket_path, &e), 1))
 }
 
+#[cfg(unix)]
 async fn accept_loop(daemon: Arc<Daemon>, socket_path: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
     // Refuse before creating any folder/lock/heartbeat when the path cannot fit sun_path.

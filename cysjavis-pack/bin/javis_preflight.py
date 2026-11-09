@@ -1510,7 +1510,8 @@ class Preflight:
         if ping():
             self.add(cid, PASS, "cys ping OK")
             return
-        cysd = shutil.which("cysd")
+        # 0.3.2: canonical daemon first — the old-name forwarder stays resident on Windows.
+        cysd = shutil.which("waved") or shutil.which("cysd")
         if self.fix and cysd:
             log = open("/tmp/cysd-preflight.log", "ab") if os.name == "posix" else subprocess.DEVNULL
             subprocess.Popen(

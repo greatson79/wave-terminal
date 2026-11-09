@@ -758,16 +758,23 @@ mod tests {
         let empty=with_rollback_notice(&json!({"notice":null}),Some("x"));
         assert!(empty["notice"].as_str().unwrap().contains("x"));
     }
-    #[cfg(unix)]
+    // Cross-platform C9 test root: WAVE_TEST_ROOT is required (no default), absolute, no `..`, no symlink on
+    // any component, a directory. Unix additionally pins /private/tmp, owner and 0700; the Windows runner
+    // creates the root fresh and private per job (the proof workflow injects it), and the canonical form
+    // there carries a verbatim prefix that is not comparable, so the canonical-equality check stays unix-only.
     fn transport_root()->PathBuf{
-        use std::os::unix::fs::MetadataExt;
         let path=PathBuf::from(std::env::var_os("WAVE_TEST_ROOT").expect("explicit private test root required"));
-        assert!(path.is_absolute()&&path.starts_with("/private/tmp")&&path.components().all(|c|!matches!(c,std::path::Component::ParentDir)));
+        assert!(path.is_absolute()&&path.components().all(|c|!matches!(c,std::path::Component::ParentDir)));
         let mut prefix=PathBuf::new();
         for part in path.components(){prefix.push(part);assert!(!prefix.symlink_metadata().unwrap().file_type().is_symlink());}
         let metadata=path.symlink_metadata().unwrap();
-        assert!(metadata.is_dir()&&metadata.uid()==unsafe{libc::geteuid()}&&metadata.mode()&0o077==0);
-        assert_eq!(path.canonicalize().unwrap(),path);
+        assert!(metadata.is_dir());
+        #[cfg(unix)]{
+            use std::os::unix::fs::MetadataExt;
+            assert!(path.starts_with("/private/tmp"));
+            assert!(metadata.uid()==unsafe{libc::geteuid()}&&metadata.mode()&0o077==0);
+            assert_eq!(path.canonicalize().unwrap(),path);
+        }
         path
     }
     #[cfg(unix)]

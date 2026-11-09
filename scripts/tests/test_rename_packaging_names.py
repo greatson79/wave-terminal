@@ -58,15 +58,51 @@ class NsisLockedFileSwap(unittest.TestCase):
                               f"{name}.{suffix}")
 
     def test_gui_images_are_closed_before_install(self):
-        preinstall = self.hooks.split("!macroend")[0]
-        for name in ("wave-app", "cys-app"):
+        # unconditional close step: before the first rename-swap (not the ③ fallbacks)
+        preinstall = self.hooks[self.hooks.index("!macro NSIS_HOOK_PREINSTALL"):].split("IfFileExists")[0]
+        for name in ("wave-app", "cys-app", "cysd", "cys"):
             self.assertIn(f"taskkill /F /T /IM {name}.exe", preinstall, name)
+
+    def test_step1_kill_exit_code_is_logged(self):
+        # taskkill exit 0 = killed, 128 = none running; a later proof reads $TEMP\\wave-install-kill.log
+        preinstall = self.hooks[self.hooks.index("!macro NSIS_HOOK_PREINSTALL"):].split("IfFileExists")[0]
+        for name in ("wave-app", "cys-app", "cysd", "cys"):
+            self.assertRegex(preinstall,
+                             rf"nsExec::Exec 'taskkill /F /T /IM {name}\.exe'\s*\n\s*!insertmacro WAVE_KILL_LOG \"{name}\.exe\"", name)
+        macro = self.hooks[self.hooks.index("!macro WAVE_KILL_LOG"):].split("!macroend")[0]
+        for needle in ("Exch $0", "DetailPrint", r"$TEMP\wave-install-kill.log", "exit=$0", "FileWrite"):
+            self.assertIn(needle, macro, needle)
 
     def test_uninstall_stops_every_name_and_lame_duck(self):
         uninstall = self.hooks[self.hooks.index("NSIS_HOOK_PREUNINSTALL"):]
         for name in WINDOWS_EXES:
             for image in (f"{name}.exe", f"{name}.prev.exe", f"{name}.prev2.exe", f"{name}.prev3.exe"):
                 self.assertIn(f"taskkill /F /T /IM {image}", uninstall, image)
+
+
+class LegacyTaskLifecycle(unittest.TestCase):
+    """rename_migration_windows.rs SCRIPT: success ends cysd disabled+deleted, only rollback re-registers it."""
+    def setUp(self):
+        src = read("src-tauri/src/rename_migration_windows.rs")
+        self.script = src[src.index('const SCRIPT'):]
+        self.ops = {}
+        for op in ("disable", "activate", "rollback"):
+            start = self.script.index(f"$op -eq '{op}'")
+            nxt = [self.script.find("} elseif ($op", start + 1), self.script.find("} else { throw", start + 1)]
+            end = min(i for i in nxt if i > 0)
+            self.ops[op] = self.script[start:end]
+
+    def test_success_disables_then_deletes_legacy_task_and_never_reenables_it(self):
+        self.assertIn("'/Change','/TN','cysd','/DISABLE'", self.ops["disable"])
+        self.assertIn("'/Delete','/TN','cysd','/F'", self.ops["activate"])
+        self.assertIn("$null -ne (Task 'cysd')", self.ops["activate"])
+        for op in ("disable", "activate"):
+            self.assertNotIn("'/ENABLE'", self.ops[op].replace("'waved','/ENABLE'", ""), op)
+            self.assertNotIn("RegisterTask($name", self.ops[op], op)
+
+    def test_only_rollback_reregisters_and_reenables_legacy_task(self):
+        self.assertIn("RegisterTask($name, $saved.xml", self.ops["rollback"])
+        self.assertIn("$restored.Enabled = [bool]$saved.enabled", self.ops["rollback"])
 
 
 class WixNames(unittest.TestCase):

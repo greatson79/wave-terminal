@@ -282,8 +282,34 @@ fn shutdown_cleanup(daemon: &Arc<Daemon>, reason: &str) {
 }
 
 #[cfg(unix)]
+/// Korean message for a socket path that cannot be bound; None when the path is fine so far.
+/// Pure (no I/O) so tests can inject any path. Too-long path gets the shared one-sentence message.
+fn socket_prebind_error(socket_path: &std::path::Path) -> Option<String> {
+    cys::check_socket_path_len(socket_path).err()
+}
+
+#[cfg(unix)]
+/// Korean text for a failed bind (never a panic): too-long path → shared message, else path + OS error.
+fn bind_failure_message(socket_path: &std::path::Path, e: &std::io::Error) -> String {
+    socket_prebind_error(socket_path).unwrap_or_else(|| {
+        format!("연결 통로를 만들 수 없습니다: {} ({e})", socket_path.display())
+    })
+}
+
+#[cfg(unix)]
+/// Bind the daemon socket; failure = (Korean message, non-zero exit code), never a panic.
+fn bind_listener(socket_path: &std::path::Path) -> Result<tokio::net::UnixListener, (String, i32)> {
+    tokio::net::UnixListener::bind(socket_path).map_err(|e| (bind_failure_message(socket_path, &e), 1))
+}
+
+#[cfg(unix)]
 async fn accept_loop(daemon: Arc<Daemon>, socket_path: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
+    // Refuse before creating any folder/lock/heartbeat when the path cannot fit sun_path.
+    if let Some(msg) = socket_prebind_error(socket_path) {
+        eprintln!("오류: {msg}");
+        std::process::exit(1);
+    }
     if let Some(dir) = socket_path.parent() {
         let _ = std::fs::create_dir_all(dir);
         // 상태 디렉터리는 소유자 전용 — transcripts.db·feed.jsonl·소켓을 같은 UID로 봉인
@@ -325,8 +351,10 @@ async fn accept_loop(daemon: Arc<Daemon>, socket_path: &std::path::Path) {
         }
         let _ = std::fs::remove_file(socket_path);
     }
-    let listener = tokio::net::UnixListener::bind(socket_path)
-        .unwrap_or_else(|e| panic!("bind {} failed: {e}", socket_path.display()));
+    let listener = bind_listener(socket_path).unwrap_or_else(|(msg, code)| {
+        eprintln!("오류: {msg}");
+        std::process::exit(code);
+    });
     // 소켓 파일은 소유자만 read/write — 인증 없는 제어 채널을 같은 UID로 한정한다.
     // (master·worker·gemini·codex 노드는 모두 오너 UID로 도는 단일 사용자 구조)
     let _ = std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600));
@@ -472,6 +500,32 @@ fn open_startup_lock(lock_path: &std::path::Path) -> Result<std::fs::File, Start
 }
 
 #[cfg(all(test, unix))]
+mod socket_path_limit_tests {
+    #[tokio::test]
+    async fn too_long_bind_is_korean_message_and_nonzero_code_not_panic() {
+        let long = std::path::PathBuf::from("/tmp").join("김".repeat(40)).join("cys.sock");
+        assert!(super::socket_prebind_error(&long).is_some(), "pre-check refuses before any folder is made");
+        let (msg, code) = super::bind_listener(&long).err().expect("bind must fail");
+        assert_eq!(msg, cys::SOCKET_PATH_TOO_LONG_MSG);
+        assert_ne!(code, 0);
+        assert!(!long.parent().unwrap().exists(), "no half-created folder");
+    }
+
+    #[tokio::test]
+    async fn short_path_bind_works_and_other_failures_get_korean_text() {
+        let dir = std::path::PathBuf::from("/tmp").join(format!("wv-sl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ok = dir.join("a.sock");
+        let _l = super::bind_listener(&ok).expect("short path binds");
+        assert!(super::socket_prebind_error(&ok).is_none());
+        let (msg, code) = super::bind_listener(&ok).err().expect("second bind fails");
+        assert!(msg.starts_with("연결 통로를 만들 수 없습니다"), "{msg}");
+        assert_ne!(code, 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(all(test, unix))]
 mod startup_lock_open_tests {
     use std::path::PathBuf;
 
@@ -492,7 +546,9 @@ mod startup_lock_open_tests {
         let meta = root.symlink_metadata().unwrap();
         assert_eq!(meta.uid(), unsafe { libc::geteuid() }, "test root must be owned by test user");
         assert_eq!(meta.mode() & 0o077, 0, "test root must be private");
-        let dir = root.join(format!("waved-lock-{}", std::process::id()));
+        // Parallel tests share the pid: the counter keeps each fixture directory distinct.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = root.join(format!("waved-lock-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
         std::fs::create_dir(&dir).unwrap();
         check(&dir);
         std::fs::remove_dir_all(dir).unwrap();
@@ -533,6 +589,17 @@ mod startup_lock_open_tests {
                 Err(error) => assert!(!super::lock_open_is_fatal(&error), "plain I/O error is not a refusal: {error}"),
                 Ok(_) => panic!("missing parent must not open"),
             }
+        });
+    }
+
+    #[test]
+    fn startup_lock_open_sets_close_on_exec_so_children_never_keep_the_lock() {
+        use std::os::unix::io::AsRawFd;
+        fixture(|dir| {
+            let file = super::open_startup_lock(&dir.join("cys.lock")).unwrap();
+            let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) };
+            assert!(flags >= 0, "F_GETFD failed");
+            assert!(flags & libc::FD_CLOEXEC != 0, "startup lock fd must be close-on-exec");
         });
     }
 
@@ -1989,10 +2056,13 @@ mod attach_race_tests {
     fn process_and_send_are_atomic_under_parser_lock_no_dup_delivery() {
         // 멀티스레드 런타임 불필요 — 동기 스레드만 사용. PTY reader는 create_surface가
         // 내부에서 std::thread로 띄운다.
+        // Parallel tests: the clock alone can repeat (microsecond granularity on macOS), so add a counter.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let tmp = std::env::temp_dir().join(format!(
-            "cys-attach-race-{}-{}.sock",
+            "cys-attach-race-{}-{}-{}.sock",
             std::process::id(),
-            now_nanos()
+            now_nanos(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let daemon = Daemon::new(tmp.clone());
 
@@ -2131,13 +2201,16 @@ mod feed_wait_disconnect_tests {
         // ★상태 격리: state_dir = socket의 부모 디렉터리이고 거기에 feed.jsonl이 영속된다.
         // 소켓을 고유 하위 디렉터리에 두지 않으면 temp_dir/feed.jsonl을 다른 실행과 공유해
         // 직전 실행이 남긴 같은 request_id가 replay되어 'duplicate request_id'로 오염된다.
+        // Parallel tests: the clock alone can repeat (microsecond granularity on macOS), so add a counter.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "cys-feedwait-disc-{}-{}",
+            "cys-feedwait-disc-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
-                .unwrap_or(0)
+                .unwrap_or(0),
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let tmp = dir.join("cysd.sock");

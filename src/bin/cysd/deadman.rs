@@ -267,16 +267,32 @@ mod tests {
     }
 
     fn tmp_dir() -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "cysd-deadman-test-{}-{}",
+        // Parallel tests: the clock alone can repeat (microsecond granularity on macOS), so add a counter.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        // Sockets are bound under this dir: macOS sun_path is 104 bytes and CI TMPDIR is long, so use short /tmp.
+        let d = std::path::PathBuf::from("/tmp").join(format!(
+            "wv-dm-{}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&d).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         d
+    }
+
+    /// Tests that spawn a child (or call code that does) fork this whole process; for the instant
+    /// between fork and exec the child shares every open fd, so it also keeps another test's lock
+    /// alive past its close. Those tests and the flock test take this gate so they never overlap.
+    fn spawn_gate() -> std::sync::MutexGuard<'static, ()> {
+        static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        GATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     #[test]
@@ -390,6 +406,7 @@ mod tests {
 
     #[test]
     fn pid_is_cysd_refuses_non_cysd() {
+        let _gate = spawn_gate();
         // 안전 게이트: 테스트 바이너리·init(pid 1)은 cysd가 아니므로 false → kill 거부.
         assert!(!pid_is_cysd(std::process::id()), "테스트 프로세스≠cysd");
         assert!(!pid_is_cysd(1), "init/launchd≠cysd");
@@ -398,6 +415,7 @@ mod tests {
 
     #[test]
     fn reclaim_refuses_when_not_cysd() {
+        let _gate = spawn_gate();
         // (오살상 차단) verify_cysd=false면 kill하지 않고 false 반환 — 대상 프로세스 생존.
         let mut child = std::process::Command::new("sleep")
             .arg("30")
@@ -413,6 +431,7 @@ mod tests {
 
     #[test]
     fn reclaim_sigterm_kills_verified_holder() {
+        let _gate = spawn_gate();
         // (a) 에스컬레이션: verify=true인 대상에 SIGTERM → 정상 종료 → true 반환·프로세스 소멸.
         let mut child = std::process::Command::new("sleep")
             .arg("30")
@@ -428,6 +447,7 @@ mod tests {
 
     #[test]
     fn reclaim_escalates_to_sigkill_on_sigterm_ignorer() {
+        let _gate = spawn_gate();
         // (a) 에스컬레이션: SIGTERM 무시 프로세스는 유예 후 SIGKILL로 회수.
         let mut child = std::process::Command::new("sh")
             .arg("-c")
@@ -444,6 +464,7 @@ mod tests {
 
     #[test]
     fn flock_reacquire_after_holder_release() {
+        let _gate = spawn_gate();
         // (a) 락 인수 의미론: 서로 다른 open 기술자 간 flock은 같은 프로세스에서도 배타 →
         // 홀더 fd 해제 후 재시도 성공(데드맨이 홀더 kill 후 락 인수하는 경로의 토대).
         use std::os::unix::io::AsRawFd;

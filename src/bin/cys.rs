@@ -1361,6 +1361,8 @@ fn primary_launchd_check(socket: &std::path::Path, check: impl FnOnce() -> bool)
 /// 위임한다 — 구형 CLI가 자기 옆 구형 cysd를 띄워 startup lock을 선점하고 launchd 신형과
 /// crashloop 하는 경로를 원천 차단. kickstart 실패·폴링 타임아웃 시에만 sibling fallback(개발 환경).
 fn connect() -> Result<ConnStream, String> {
+    // Too-long unix socket path (Korean home/dept names): refuse with one Korean message, never autostart.
+    cys::check_socket_path_len(&socket_path())?;
     match connect_raw() {
         Ok(s) => Ok(s),
         Err(first) => {
@@ -9102,9 +9104,22 @@ mod tests {
         assert_eq!(rename_parse_error_ko(&error), "wave rename 입력이 올바르지 않습니다: 문자 인코딩 오류");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn connect_refuses_too_long_socket_path_in_korean_before_autostart() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let old = std::env::var_os("CYS_SOCKET");
+        let long = format!("/Users/{}/.local/state/cys-dept-{}/cys.sock", "김".repeat(12), "미".repeat(11));
+        std::env::set_var("CYS_SOCKET", &long);
+        let r = connect().err();
+        if let Some(v) = old { std::env::set_var("CYS_SOCKET", v); } else { std::env::remove_var("CYS_SOCKET"); }
+        assert_eq!(r.as_deref(), Some(cys::SOCKET_PATH_TOO_LONG_MSG));
+    }
+
     #[test]
     fn label_scope_rename_and_restore() {
         use super::*;
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let command = |args: &[&str]| is_rename_subcommand(args.iter().map(std::ffi::OsString::from));
         assert!(command(&["rename", "--bad"]));
         assert!(command(&["--socket", "/tmp/cys.sock", "rename", "--bad"]));
@@ -9140,8 +9155,18 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::net::UnixListener;
-            let path = std::env::temp_dir().join(format!("cys-label-{}-{}.sock", std::process::id(),
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            // Parallel tests: the clock alone can repeat (microsecond granularity on macOS), so add a counter.
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            // macOS sun_path is 104 bytes and CI TMPDIR is long: bind under a short private /tmp dir.
+            let dir = std::path::PathBuf::from("/tmp").join(format!("wv-lb-{}-{}-{}", std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+            std::fs::create_dir_all(&dir).unwrap();
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            let path = dir.join("l.sock");
             let listener = UnixListener::bind(&path).unwrap();
             let server = std::thread::spawn(move || {
                 for (expected, response) in [
@@ -9164,7 +9189,7 @@ mod tests {
             if let Some(value) = old { std::env::set_var("CYS_SOCKET", value); }
             else { std::env::remove_var("CYS_SOCKET"); }
             server.join().unwrap();
-            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_dir_all(&dir);
             assert_eq!(code, 0);
         }
     }

@@ -350,7 +350,7 @@ jobs:
               Write-Host "installer exit=$($p.ExitCode)"
               Assert ($p.ExitCode -eq 0) 'Installer failed'
               $p.Dispose()
-              foreach ($relative in @('cys.exe','cysd.exe','runtime\git\usr\bin\bash.exe','runtime\python\python3.exe')) {
+              foreach ($relative in @('wave.exe','wave-app.exe','waved.exe','cys.exe','cysd.exe','cys-app.exe','runtime\git\usr\bin\bash.exe','runtime\python\python3.exe')) {
                 $file = Join-Path $install $relative
                 Assert (Test-Path -LiteralPath $file -PathType Leaf) "Missing shipped file: $file"
                 Write-Host "$relative sha256=$((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash)"
@@ -433,8 +433,19 @@ jobs:
                   $daemonPid = [int]$identity.daemon_pid
                   Assert ($identity.version -eq $ExpectedVersion) "Wrong daemon version $($identity.version), expected $ExpectedVersion"
                   $process = Get-CimInstance Win32_Process -Filter "ProcessId=$daemonPid"
-                  Assert ($process.ExecutablePath -eq (Join-Path $install 'cysd.exe')) 'Daemon is not the installed binary'
+                  # 0.3.2 rename: the resident daemon is the real binary waved.exe (cysd.exe is only the compat forwarder).
+                  Assert ($process.ExecutablePath -eq (Join-Path $install 'waved.exe')) "Daemon is not the installed waved.exe: $($process.ExecutablePath)"
                   $daemonRecord = $process
+                  # P2 reverse check: cys-dept launches the real waved directly, so no cys*-named forwarder may be the daemon's
+                  # parent or stay resident next to it (a resident cysd.exe/cys-app.exe = the forwarder did not go away).
+                  $parent = Get-CimInstance Win32_Process -Filter "ProcessId=$($process.ParentProcessId)"
+                  Assert (-not ($parent -and $parent.ExecutablePath -match '(?i)\\(cys|cysd|cys-app)\.exe$')) "Daemon parent is a forwarder: $($parent.ExecutablePath)"
+                  $forwarders = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($install + '\', [StringComparison]::OrdinalIgnoreCase) -and $_.ExecutablePath -match '(?i)\\(cysd|cys-app)\.exe$' })
+                  Assert ($forwarders.Count -eq 0) "Resident forwarder process(es): $((@($forwarders | ForEach-Object { "$($_.ProcessId)=$($_.ExecutablePath)" })) -join ',')"
+                  # P3 the stop identity is RECORDED at launch: registry pid record = this daemon, image = the installed waved.exe.
+                  $recorded = @((Get-Content -LiteralPath $registryPath -Raw -Encoding UTF8 | ConvertFrom-Json).depts.$name.pids)[0]
+                  Assert ($null -ne $recorded -and [int]$recorded.pid -eq $daemonPid) "Registry has no pid record for the daemon: $($recorded | ConvertTo-Json -Compress)"
+                  Assert ($recorded.image -ieq (Join-Path $install 'waved.exe')) "Registry image is not the installed waved.exe: $($recorded.image)"
                   $process | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine | Format-List | Out-Host
                   $state = (Native $cys @('status','--json')) | ConvertFrom-Json
                   $masters = @($state.surfaces | Where-Object { $_.role -eq 'master' -and -not $_.exited })
@@ -526,6 +537,9 @@ jobs:
             try {
             . Step 'Final process inventory and isolated base-runtime cleanup' {
               $owned = @(OwnedProcesses)
+              # Strict: when the department steps passed, teardown must already have removed every installed-runtime process;
+              # the kill below is only a safety net and its use is itself a failure (F3 no-orphan: the launcher/forwarder chain is gone).
+              $orphans = @($owned | ForEach-Object { "$($_.ProcessId)=$($_.ExecutablePath)" })
               $runtimeTree = @(ProcessTree $owned)
               $runtimeTree | Select-Object ProcessId,ParentProcessId,CreationDate,ExecutablePath,CommandLine | Format-List | Out-Host
               # Department assertions happen before this fallback; cleanup never converts a failed probe to PASS.
@@ -538,6 +552,7 @@ jobs:
               Start-Sleep -Seconds 2
               Assert (@(OwnedProcesses).Count -eq 0) 'Installed runtime processes remain'
               AssertGone $runtimeTree
+              Assert ($orphans.Count -eq 0) "Orphan installed-runtime processes survived department teardown (removed only by the fallback): $($orphans -join ',')"
             }
             } finally {
               . Step 'Restore original raw HKCU PATH and value kind' {
@@ -775,6 +790,15 @@ jobs:
           $env:PYTHONUTF8 = '1'
           $env:PYTHONIOENCODING = 'utf-8'
           $env:PYTHONDONTWRITEBYTECODE = '1'
+          # C9: the rename_handover tests refuse to run without an explicitly injected private root. Provision a
+          # fresh, empty, job-private directory under the runner temp (never a host path) and inject it; the
+          # script fails closed if the root is missing, relative or not empty before any cargo test runs.
+          $waveRoot = Join-Path $env:RUNNER_TEMP ('wave-test-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $waveRoot | Out-Null
+          $env:WAVE_TEST_ROOT = $waveRoot
+          if (-not $env:WAVE_TEST_ROOT -or -not [IO.Path]::IsPathRooted($env:WAVE_TEST_ROOT)) { throw 'WAVE_TEST_ROOT not injected as an absolute path' }
+          if (@(Get-ChildItem -Force -LiteralPath $env:WAVE_TEST_ROOT).Count -ne 0) { throw 'WAVE_TEST_ROOT is not empty' }
+          Write-Host "LIB_FIXTURE_ROOT wave=$waveRoot"
           function RunCargo([string[]]$cargoArgs) {
             # PS 5.1 wraps native stderr in error records; collect text and judge by exit code only.
             $text = (& cargo @cargoArgs 2>&1 | ForEach-Object { "$_" }) -join "`n"

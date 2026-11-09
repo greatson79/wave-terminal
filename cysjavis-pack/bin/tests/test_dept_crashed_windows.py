@@ -198,7 +198,7 @@ class PidWriterTests(unittest.TestCase):
 
     def test_every_spawn_site_records_pids_after_the_daemon_is_up(self):
         source = DEPT.read_text(encoding="utf-8")
-        spawns = [m.start() for m in re.finditer(r'nohup "\$CYSD"', source)]
+        spawns = [m.start() for m in re.finditer(r'nohup "\$WAVED"', source)]
         self.assertEqual(len(spawns), 3)
         for at in spawns:
             tail = source[at:at + 1200]

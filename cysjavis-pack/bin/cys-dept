@@ -45,6 +45,9 @@ PACK_DEFAULT="$HOME/.cys/pack"
 # RC-6: 폴백 경로 가드 — command -v 우선(Windows는 RC-5 runtime PATH로 cysd.exe/cys.exe 해소).
 # /opt/homebrew는 macOS 전용이라 존재할 때만 폴백(Windows서 유령 경로 방지), 최종 폴백=bare 이름.
 CYSD="$(command -v cysd || { [ -x /opt/homebrew/bin/cysd ] && echo /opt/homebrew/bin/cysd; } || echo cysd)"
+# 0.3.2: depts run the REAL daemon (waved), never the cysd forwarder (no resident forwarder on any OS). A 0.3.1-only
+# install has no waved: fall back to its real cysd. The recorded image is whatever really launched (reg_set_pids).
+WAVED="$(command -v waved || { [ -x /opt/homebrew/bin/waved ] && echo /opt/homebrew/bin/waved; } || echo "$CYSD")"
 CYS="$(command -v cys || { [ -x /opt/homebrew/bin/cys ] && echo /opt/homebrew/bin/cys; } || echo cys)"
 # RC-6(codex R3.1 nit): 인라인 python heredoc이 cys를 literal이 아니라 **해소된 경로**로 실행하도록
 # CYS_BIN을 env로 전파(heredoc은 프로세스 env 상속). dept_classify_idle·alive_sock 등 subprocess가 사용.
@@ -66,6 +69,18 @@ dept_sock(){
   esac
 }
 dept_pack(){ echo "$HOME/.cys/pack-dept-$1"; }
+# Unix socket path limit in UTF-8 BYTES incl. the NUL (must equal src/lib.rs unix_sun_path_capacity + SOCKET_PATH_TOO_LONG_MSG;
+# test_dept_sock_limit.py cross-checks them). Windows named pipes have no such limit. Refuses BEFORE anything is created.
+DEPT_SOCK_CAP_BSD=104
+DEPT_SOCK_CAP_OTHER=108
+DEPT_SOCK_TOO_LONG='부서 이름이나 사용자 폴더 경로가 너무 길어 연결 통로를 만들 수 없습니다. 더 짧은 부서 이름을 쓰세요.'
+dept_sock_check(){
+  [ "$dept_windows" = 1 ] && return 0
+  local cap len
+  case "$(uname -s 2>/dev/null)" in Darwin|*BSD|DragonFly) cap=$DEPT_SOCK_CAP_BSD ;; *) cap=$DEPT_SOCK_CAP_OTHER ;; esac
+  len="$(printf '%s' "$(dept_sock "$1")" | LC_ALL=C wc -c | tr -d ' ')"
+  [ "$len" -lt "$cap" ] || { echo "$DEPT_SOCK_TOO_LONG" >&2; exit 6; }
+}
 
 # ★W2a-4 의도삭제 → phoenix dept 묘비: 부서 전체 폐기(down/down-sock=의도적 teardown)를 phoenix
 # 보호집합(base dept_roster)에 명시적 폐역으로 기록해, 부활 보고가 폐기된 부서를 '부활 필요'로
@@ -233,11 +248,60 @@ PY_IDENTITY
 }
 
 # Windows has no shutdown RPC: attempt targeted non-force taskkill, then bounded fallback.
-graceful_kill(){
-  local pid="$1"
-  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || { echo "[cys-dept] 종료할 프로세스 번호가 올바르지 않습니다." >&2; return 1; }
+# Executable image of a live pid (absolute path) — recorded at launch and compared at stop. Empty = unknown.
+dept_live_image(){
   if [ "$dept_windows" = 1 ]; then
-    python3 - "$pid" "${2:-}" "$(native_path "$CYSD")" <<'PY_STOP'
+    python3 - "$1" <<'PY_IMG'
+import ctypes,sys
+from ctypes import wintypes
+try:
+    k=ctypes.WinDLL('kernel32',use_last_error=True)
+    k.OpenProcess.restype=wintypes.HANDLE
+    h=k.OpenProcess(0x1000,False,int(sys.argv[1]))
+    if h:
+        buf=ctypes.create_unicode_buffer(32768); size=wintypes.DWORD(len(buf))
+        if k.QueryFullProcessImageNameW(h,0,buf,ctypes.byref(size)): print(buf.value)
+        k.CloseHandle(h)
+except Exception: pass
+PY_IMG
+  else
+    readlink "/proc/$1/exe" 2>/dev/null || LC_ALL=C ps -p "$1" -o comm= 2>/dev/null | sed 's/^ *//' || true
+  fi
+}
+# Images this dept's daemon may legitimately have, '|'-joined (empty = refuse). Strict, from the identity RECORDED at launch:
+#  - record has image (0.3.2): exactly that image (+ its .prev/.prev2/.prev3 rename-swap names in the SAME dir, Windows only);
+#  - no image (0.3.1-started, which never recorded): exactly cysd/cysd.exe/cysd.prev[23].exe in the installed bin dir;
+#  - a record whose pid or start disagrees with the live daemon = refuse. A 0.3.2 record never falls back; a legacy one never accepts waved.
+dept_stop_images(){
+  [ -n "${1:-}" ] || return 0
+  python3 - "$(native_path "$REG")" "$1" "$2" "${3:-}" "$(native_path "$(dirname "$WAVED")")" "$dept_windows" "$DEPT_PID_START_SLACK" <<'PY_IMAGES'
+import json,os,sys
+reg,name,pid,started,bindir,windows,slack=sys.argv[1:8]
+try: entry=json.load(open(reg,encoding='utf-8')).get('depts',{}).get(name,{})
+except Exception: sys.exit(0)
+rec=next((r for r in entry.get('pids',[]) if isinstance(r,dict)),None)
+if rec is not None:
+    if str(rec.get('pid'))!=pid: sys.exit(0)
+    try:
+        if started and abs(float(started)-float(rec.get('start')))>float(slack): sys.exit(0)
+    except (TypeError,ValueError): sys.exit(0)
+image=rec.get('image') if rec else None
+if image:
+    out=[image]
+    if windows=='1':
+        d,b=os.path.split(image); stem,ext=os.path.splitext(b)
+        out+=[os.path.join(d,stem+t+ext) for t in ('.prev','.prev2','.prev3')]
+else:
+    out=[os.path.join(bindir,n) for n in ('cysd','cysd.exe','cysd.prev.exe','cysd.prev2.exe','cysd.prev3.exe')]
+print('|'.join(out))
+PY_IMAGES
+}
+graceful_kill(){
+  local pid="$1" images
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || { echo "[cys-dept] 종료할 프로세스 번호가 올바르지 않습니다." >&2; return 1; }
+  images="$(dept_stop_images "${3:-}" "$pid" "${2:-}" | tr -d '\r')"
+  if [ "$dept_windows" = 1 ]; then
+    python3 - "$pid" "${2:-}" "$images" <<'PY_STOP'
 import ctypes
 from ctypes import wintypes
 import json
@@ -293,10 +357,11 @@ def stop_tree(backend, root_pid, clock=time.monotonic, pause=time.sleep):
 
 
 class WindowsProcesses:
-    def __init__(self, started_at, image):
+    def __init__(self, started_at, images):
         self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
         self.started_at = started_at
-        self.image = os.path.normcase(os.path.abspath(image))
+        # '|'-joined allowed images (strict set; empty = nothing is allowed = refuse).
+        self.images = {os.path.normcase(os.path.abspath(i)) for i in images.split("|") if i}
         self.kernel.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
         self.kernel.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
         self.kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
@@ -354,7 +419,7 @@ class WindowsProcesses:
             if not self.kernel.QueryFullProcessImageNameW(root["handle"], 0, image, ctypes.byref(size)):
                 raise StopFailure("부서 실행 파일을 확인하지 못했습니다.")
             created_seconds = (root["created"]-116444736000000000)/10000000.0
-            if os.path.normcase(os.path.abspath(image.value)) != self.image or created_seconds > self.started_at:
+            if os.path.normcase(os.path.abspath(image.value)) not in self.images or created_seconds > self.started_at:
                 raise StopFailure("부서 프로세스 정보가 바뀌었습니다. 다른 프로세스는 종료하지 않습니다.")
             self.root_started = (root["created"]-116444736000000000)//10000000
             return {pid:root}
@@ -465,6 +530,16 @@ if __name__ == "__main__":
         sys.exit(1)
 PY_STOP
   else
+    # Same strict image check as Windows, before anything is killed (macOS/Linux compare real paths).
+    local live ok=0 candidate
+    live="$(dept_live_image "$pid" | head -1)"
+    if [ -n "$live" ]; then
+      live="$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$live")"
+      while IFS= read -r candidate; do
+        [ -n "$candidate" ] && [ "$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$candidate")" = "$live" ] && ok=1
+      done < <(printf '%s\n' "$images" | tr '|' '\n')
+    fi
+    [ "$ok" = 1 ] || { echo "[cys-dept] 종료 확인 실패: 부서 프로세스 정보가 바뀌었습니다. 다른 프로세스는 종료하지 않습니다." >&2; return 1; }
     local process_start
     process_start="$(LC_ALL=C ps -p "$pid" -o lstart= | python3 -c 'import sys,time;print(int(time.mktime(time.strptime(sys.stdin.read().strip(), "%a %b %d %H:%M:%S %Y"))))')" || return 1
     kill "$pid" 2>/dev/null || true
@@ -569,8 +644,12 @@ PY
 reg_set_pids(){
   local pid started_at
   IFS=$'\t' read -r pid started_at <<<"$(daemon_identity "$2" 2>/dev/null || true)" || true; started_at="${started_at%$'\r'}"
-  case "$pid$started_at" in ''|*[!0-9]*) echo "[cys-dept] WARN: $1 데몬 pid 기록 실패(신원 미확인)" >&2; return 0 ;; esac
-  reg_init; python3 - "$(native_path "$REG")" "$1" "$pid" "$started_at" <<'PY'
+  # identify reports started_at as a float (1794189098.49): digits with one optional dot — the old all-digits test
+  # rejected every real value, so no pid record was ever written (proof log: "pid 기록 실패").
+  case "$pid" in ''|*[!0-9]*) echo "[cys-dept] WARN: $1 데몬 pid 기록 실패(신원 미확인)" >&2; return 0 ;; esac
+  case "$started_at" in ''|*[!0-9.]*|*.*.*) echo "[cys-dept] WARN: $1 데몬 pid 기록 실패(신원 미확인)" >&2; return 0 ;; esac
+  local image; image="$(dept_live_image "$pid" | head -1 | tr -d '\r')"
+  reg_init; python3 - "$(native_path "$REG")" "$1" "$pid" "$started_at" "$image" <<'PY'
 import json,sys,os
 try:
     import fcntl
@@ -580,11 +659,13 @@ except ImportError:
     def _lk(f):
         try: msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
         except OSError: pass
-p,n,pid,start=sys.argv[1:5]
+p,n,pid,start,image=sys.argv[1:6]
 lf=open(p+'.lock','w'); _lk(lf)
 d=json.load(open(p)); e=d.get('depts',{}).get(n)
 if e is not None:
-    e['pids']=[{'pid':int(pid),'start':int(start)}]
+    rec={'pid':int(pid),'start':int(float(start))}
+    if image: rec['image']=image
+    e['pids']=[rec]
     tmp=p+'.tmp.%d'%os.getpid()
     with open(tmp,'w') as f: json.dump(d,f,ensure_ascii=False,indent=2); f.flush(); os.fsync(f.fileno())
     os.replace(tmp,p)
@@ -849,6 +930,7 @@ PY
     ;;
   launch)
     name="${2:?usage: cys-dept launch <name>}"
+    dept_sock_check "$name"
     sock="$(dept_sock "$name")"; pack="$(dept_pack "$name")"
     mkdir -p "$(dept_logdir "$name")" "$pack/directives"
     seed_acl "$pack"
@@ -856,18 +938,21 @@ PY
     if ready "$sock"; then
       echo "[cys-dept] $name 이미 가동 중 — 재사용"
     else
-      CYS_SOCKET="$sock" CYS_PACK_DIR="$pack" nohup "$CYSD" >"$(dept_logdir "$name")/cysd.log" 2>&1 &
-      disown
+      CYS_SOCKET="$sock" CYS_PACK_DIR="$pack" nohup "$WAVED" >"$(dept_logdir "$name")/cysd.log" 2>&1 &
+      spawned=$!; disown
+      # launcher killed before the daemon is recorded must not leave an orphan daemon (cleared once reg_set_pids ran)
+      trap 'kill "$spawned" 2>/dev/null; exit 143' TERM INT HUP
       # 기동 실패 시 reg_upsert 롤백 — 유령 부서(데몬 없는 레지스트리 항목) 잔류 방지
       ready "$sock" || { reg_remove "$name"; echo "[cys-dept] ERROR: $name 데몬 기동 실패"; exit 1; }
     fi
-    reg_set_pids "$name" "$sock"
+    reg_set_pids "$name" "$sock"; trap - TERM INT HUP
     seed_schedule "$pack"   # owner-progress-report 제거(부서는 최상위 보고 안 함) — 데몬 30초 핫리로드로 반영
     ceo_promote
     dept_tombstone_remove "$name"   # WP-3·R6ⓒ: 재기동 성공 = 재생성 의도 확정 → 묘비 해소(rotate는 내부 가드로 no-op)
     echo "[cys-dept] $name 가동 완료 (sock=$sock pack=$pack). 부서 수=$(reg_count)"
     ;;
   allocate)
+    dept_sock_check dept-999   # worst-case allocated name (CAP is small); refuse before reserving anything
     # 번호계산+예약을 단일 flock 블록에 묶어 TOCTOU 제거 — lowest-unused dept-N을 발급·예약(원자).
     # 시나리오2: 레지스트리엔 빠졌어도 소켓을 점유 중인(죽어가는) 데몬 번호는 alive() probe로 skip.
     name=$(reg_init; python3 - "$(native_path "$REG")" <<'PY'
@@ -938,11 +1023,13 @@ PY
     if ready "$sock"; then echo "[cys-dept] $name 이미 가동 중 — 재사용" >&2
     else
       # ★계정 격리: 데몬을 CYS_ACCOUNT_DIR(fork dir)와 함께 spawn (create와 동형).
-      CYS_SOCKET="$sock" CYS_PACK_DIR="$pack" CYS_ACCOUNT_DIR="$acctdir" nohup "$CYSD" >"$(dept_logdir "$name")/cysd.log" 2>&1 &
-      disown
+      CYS_SOCKET="$sock" CYS_PACK_DIR="$pack" CYS_ACCOUNT_DIR="$acctdir" nohup "$WAVED" >"$(dept_logdir "$name")/cysd.log" 2>&1 &
+      spawned=$!; disown
+      # launcher killed before the daemon is recorded must not leave an orphan daemon (cleared once reg_set_pids ran)
+      trap 'kill "$spawned" 2>/dev/null; exit 143' TERM INT HUP
       ready "$sock" || { reg_remove "$name"; echo "[cys-dept] ERROR: $name 데몬 기동 실패" >&2; exit 1; }
     fi
-    reg_set_pids "$name" "$sock"
+    reg_set_pids "$name" "$sock"; trap - TERM INT HUP
     # ★데몬 up 확정 후 실패 trap을 풀teardown(kill+소켓+reg)으로 업그레이드 — 이후 단계 set -e 종료 시 orphan 0.
     trap '"$0" down "$name" >/dev/null 2>&1 || true' EXIT
     seed_schedule "$pack"
@@ -973,6 +1060,7 @@ PY
   create)
     # ＋부서 자동화: 카탈로그 기반 완전 자동 부서 생성(부서명·계정·미션·각성). 레거시 allocate 무변경.
     key="${2:?usage: cys-dept create <catalog-key>}"
+    dept_sock_check dept-999   # worst-case allocated name; refuse before reserving anything
     CAT="${CYS_DEPT_CATALOG:-$HOME/.cys/dept-catalog.json}"
     MISS="${CYS_DEPT_MISSIONS:-$HOME/.cys/dept-missions}"
     [ -f "$CAT" ] || { echo "[cys-dept] 카탈로그 부재: $CAT (GUI=레거시 allocate fallback)" >&2; exit 3; }  # fail-closed
@@ -1078,11 +1166,13 @@ PY
     if ready "$sock"; then echo "[cys-dept] $name 이미 가동 — 재사용" >&2
     else
       # ★계정 격리: 데몬을 CYS_ACCOUNT_DIR 와 함께 spawn(patch2 있으면 자식 전파·없으면 F1 시드가 보장)
-      CYS_SOCKET="$sock" CYS_PACK_DIR="$pack" CYS_ACCOUNT_DIR="$acctdir" nohup "$CYSD" >"$(dept_logdir "$name")/cysd.log" 2>&1 &
-      disown
+      CYS_SOCKET="$sock" CYS_PACK_DIR="$pack" CYS_ACCOUNT_DIR="$acctdir" nohup "$WAVED" >"$(dept_logdir "$name")/cysd.log" 2>&1 &
+      spawned=$!; disown
+      # launcher killed before the daemon is recorded must not leave an orphan daemon (cleared once reg_set_pids ran)
+      trap 'kill "$spawned" 2>/dev/null; exit 143' TERM INT HUP
       ready "$sock" || { if [ "$verb" = "NEW" ]; then reg_remove "$name"; fi; echo "[cys-dept] ERROR: $name 데몬 기동 실패" >&2; exit 1; }
     fi
-    reg_set_pids "$name" "$sock"
+    reg_set_pids "$name" "$sock"; trap - TERM INT HUP
     # ★R3.1(CSO·codex R3-REG-SET-META-ORPHAN): 데몬 up 확정 후 실패 trap을 풀teardown(down=kill+소켓+reg)으로 업그레이드.
     #   이후 reg_set_meta fail-closed/시드/각성에서 set -e 종료해도 이미 뜬 데몬 orphan 0. NEW·REUSE_DEAD 공통.
     trap '"$0" down "$name" >/dev/null 2>&1 || true' EXIT
@@ -1123,7 +1213,7 @@ PY
     IFS=$'\t' read -r pid started_at <<<"$(daemon_identity "$sock" 2>/dev/null || true)" || true; started_at="${started_at%$'\r'}"
     # orphan 방지(오너 ③): kill 후 데몬 사망 확인·잔존 시 SIGKILL(down이 데몬 살린 채 reg_remove→orphan 재발 차단).
     if [ -n "${pid:-}" ]; then
-      stop_receipt="$(graceful_kill "$pid" "${started_at:-}")"
+      stop_receipt="$(graceful_kill "$pid" "${started_at:-}" "$name")"
     elif [ "$dept_windows" = 1 ]; then
       echo "[cys-dept] 부서 프로세스를 확인하지 못했습니다. 팀 정보를 유지합니다." >&2
       exit 9
@@ -1160,7 +1250,7 @@ PY
     fi
     IFS=$'\t' read -r pid started_at <<<"$(daemon_identity "$sock" 2>/dev/null || true)" || true; started_at="${started_at%$'\r'}"
     if [ -n "${pid:-}" ]; then
-      stop_receipt="$(graceful_kill "$pid" "${started_at:-}")"
+      stop_receipt="$(graceful_kill "$pid" "${started_at:-}" "$name")"
     elif [ "$dept_windows" = 1 ]; then
       # 신원 불명: 파이프가 없고 기록된 pid도 없을 때만 "이미 종료"(크래시 부서)로 정리. 그 외 = 기존 거부(exit 9).
       if [ "$(dept_pipe_present "$sock" | tr -d '\r')" != absent ] || { [ -n "$name" ] && dept_recorded_pid_alive "$name"; }; then
@@ -1216,7 +1306,7 @@ PY
     fi
     # 프로세스만 종료(down의 graceful_kill 재사용 — OS중립·Windows taskkill 분기 포함, 신설 분기 없음).
     # graceful_kill이 사망을 동기 확인하므로 아래 launch의 ready 프로브가 죽은 소켓을 새것으로 오인하지 않는다.
-    graceful_kill "$pid" "${started_at:-}"
+    graceful_kill "$pid" "${started_at:-}" "$name"
     rm -f "$sock" "$sock.lock" 2>/dev/null || true
     # ★필수2(A·리뷰) TOCTOU 재확인: kill·rm 도중 CSO down(reg_remove+dept_tombstone)이 레이스로 끼어들어
     # 폐기됐으면 launch(부활) 금지 — 사전 게이트 이후 창을 최소화하려 launch 직전에 한 번 더 확인(미등재→exit 8).

@@ -6,6 +6,11 @@ name: windows-update-proof
 # Needs: the rc prerelease (not latest) carrying wave-terminal-<ver>-windows-x64-setup.exe + latest-rc.json signed with the
 # owner updater key (scripts/make-rc-manifest.py). Creates nothing, deletes nothing.
 on:
+  # A manual-only workflow can only be dispatched from the default branch (outside our allow), so — like win-032-proof.yml —
+  # a push to the proof branch with .github/updproof-inputs.json {rc_tag, base_tag, repo} starts it too. Dispatch inputs win.
+  push:
+    branches: [release/0.3.2-updproof]
+    paths: ['.github/updproof-inputs.json', '.github/workflows/windows-update-proof.yml']
   workflow_dispatch:
     inputs:
       rc_tag:
@@ -28,11 +33,28 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     env:
-      RC_TAG: ${{ inputs.rc_tag }}
-      BASE_TAG: ${{ inputs.base_tag }}
-      REPO: ${{ inputs.repo }}
       GH_TOKEN: ${{ github.token }}
     steps:
+      - uses: actions/checkout@v4
+      - name: Resolve inputs (dispatch inputs override .github/updproof-inputs.json; same validation)
+        shell: pwsh
+        env:
+          IN_RC: ${{ inputs.rc_tag }}
+          IN_BASE: ${{ inputs.base_tag }}
+          IN_REPO: ${{ inputs.repo }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $file = '.github/updproof-inputs.json'
+          $cfg = if (Test-Path $file) { Get-Content $file -Raw | ConvertFrom-Json } else { $null }
+          $rc = if ($env:IN_RC) { $env:IN_RC } elseif ($cfg) { [string]$cfg.rc_tag } else { '' }
+          $base = if ($env:IN_BASE) { $env:IN_BASE } elseif ($cfg) { [string]$cfg.base_tag } else { '' }
+          $repo = if ($env:IN_REPO) { $env:IN_REPO } elseif ($cfg) { [string]$cfg.repo } else { '' }
+          if ($rc -notmatch '^v\d+\.\d+\.\d+-rc\.\d+$' -or $base -notmatch '^v\d+\.\d+\.\d+$' -or $repo -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') { throw "invalid input: rc_tag='$rc' base_tag='$base' repo='$repo'" }
+          "RC_TAG=$rc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BASE_TAG=$base" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "REPO=$repo" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "INPUTS rc=$rc base=$base repo=$repo source=$(if ($env:IN_RC) { 'dispatch' } else { 'updproof-inputs.json' })"
+
       - name: Guard — rc is a prerelease and not latest; channel manifest still on the base version
         shell: pwsh
         run: |

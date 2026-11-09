@@ -2,7 +2,7 @@
 name = "wave-app"
 autobins = false
 default-run = "wave-app"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 description = "Wave Terminal UI shell (Tauri 2) — thin client over the cysd socket"
 license = "MIT"

@@ -1913,13 +1913,20 @@ async function makePane(sid: number, title: string, socket?: string): Promise<Pa
         follow = atBottom();
       });
     },
-    { passive: true },
+    { passive: true, capture: true },
   );
 
   // WKWebView IME(한글 등 CJK) 조합 가드: 조합 중 keydown(keyCode 229/isComposing)을
   // xterm이 일반 키로 처리하면 자모가 분리 입력된다 — 조합 완성분만 onData로 흐르게 차단.
   term.attachCustomKeyEventHandler((e) => {
     if (e.isComposing || e.keyCode === 229) return false;
+    // Shift+PageUp/PageDown = 키보드 스크롤백 — 휠과 같이 follow 해제 후 rAF로 실제 위치 재판정(xterm은 계속 처리).
+    if (e.type === "keydown" && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && (e.key === "PageUp" || e.key === "PageDown")) {
+      follow = false;
+      requestAnimationFrame(() => {
+        follow = atBottom();
+      });
+    }
     // ★붙여넣기(F2): Ctrl/Cmd+V·Ctrl+Shift+V 를 xterm이 \x16(literal)로 삼키지 않게 false 반환 →
     // 브라우저 네이티브 paste 이벤트가 발화되고 아래 paste 리스너가 클립보드를 PTY로 보낸다.
     // (WebView2에서 xterm 기본 붙여넣기가 안 먹던 문제 — permission 불요의 clipboardData 경로.)

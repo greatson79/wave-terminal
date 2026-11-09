@@ -712,7 +712,7 @@ mod tests {
             assert!(ko.to_string_lossy().chars().count() < cap, "char count is under the limit, bytes are not");
             assert!(check_socket_path_len(&ko).is_err(), "Korean path counted in bytes");
             // a real short Korean dept path still works
-            assert!(check_socket_path_len(Path::new("/Users/kylechoi/.local/state/cys-dept-개발본부/cys.sock")).is_ok());
+            assert!(check_socket_path_len(Path::new("/Users/user/.local/state/cys-dept-개발본부/cys.sock")).is_ok());
         }
         // Windows named pipe is never length-checked.
         #[cfg(windows)]

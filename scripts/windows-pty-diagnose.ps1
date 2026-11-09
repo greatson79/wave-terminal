@@ -14,14 +14,14 @@ public static class StartupPipeProbe {
 }
 '@
 $pipe = '\\.\pipe\cys'
-$cys = Join-Path $InstallDirectory 'cys.exe'
-$daemon = Join-Path $InstallDirectory 'cysd.exe'
+$cys = Join-Path $InstallDirectory 'wave.exe'
+$daemon = Join-Path $InstallDirectory 'waved.exe'
 foreach ($name in 'CYS_SOCKET','JAVIS_SOCKET','AITERM_SOCKET') {
   Write-Host "$name=$([Environment]::GetEnvironmentVariable($name))"
   if ([Environment]::GetEnvironmentVariable($name)) { throw 'Unexpected pipe override in diagnostic runner' }
 }
 function Observe-Startup([string]$label, [string]$exe, [string]$arguments) {
-  Get-Process cys,cysd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  Get-Process wave,waved,cys,cysd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
   Start-Sleep -Milliseconds 300
   $out = Join-Path $OutputDirectory "$label.stdout.log"
   $err = Join-Path $OutputDirectory "$label.stderr.log"
@@ -48,7 +48,7 @@ function Observe-Startup([string]$label, [string]$exe, [string]$arguments) {
     }
     $visible = [StartupPipeProbe]::WaitNamedPipe($pipe, 1)
     $pipeError = if ($visible) { 0 } else { [Runtime.InteropServices.Marshal]::GetLastWin32Error() }
-    $processes = @(Get-Process cysd -ErrorAction SilentlyContinue | ForEach-Object {
+    $processes = @(Get-Process waved -ErrorAction SilentlyContinue | ForEach-Object {
       [ordered]@{ pid = $_.Id; start_utc = $_.StartTime.ToUniversalTime().ToString('o'); path = $_.Path; cpu_seconds = $_.CPU }
     })
     if ($null -eq $firstPipe -and ($visible -or $pipeError -eq 121 -or $pipeError -eq 231)) { $firstPipe = $clock.ElapsedMilliseconds }
@@ -68,7 +68,7 @@ function Observe-Startup([string]$label, [string]$exe, [string]$arguments) {
   }
   $summary = [ordered]@{ label=$label; start_utc=$started.ToString('o'); process_pid=$process.Id; first_pipe_ms=$firstPipe; pipe_lateness_after_4000_ms=$(if($null -ne $firstPipe){$firstPipe-4000}else{$null}); observed_ms=$clock.ElapsedMilliseconds; process_exit_ms=$exitMs; exit_code=$(if($process.HasExited){$process.ExitCode}else{$null}); accept_loop_ready=$directReady }
   $summary | ConvertTo-Json | Set-Content (Join-Path $OutputDirectory "$label.summary.json")
-  Get-Process cys,cysd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  Get-Process wave,waved,cys,cysd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
   $process.WaitForExit(5000) | Out-Null
   $readOut.GetAwaiter().GetResult() | Set-Content $out
   while (-not $stderrEnded) {

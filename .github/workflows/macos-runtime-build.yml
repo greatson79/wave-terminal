@@ -55,6 +55,13 @@ jobs:
         run: |
           set -euo pipefail
           export CYS_PACK_DIR="$(mktemp -d)"
+          # C9: tests refuse to run without an injected private root (fail closed) — provision it, never relax it.
+          WAVE_TEST_ROOT="$(mktemp -d /private/tmp/wave-test-XXXXXX)"
+          chmod 700 "$WAVE_TEST_ROOT"
+          export WAVE_TEST_ROOT
+          CYS_DEPT_TEST_ROOT="$(mktemp -d /private/tmp/dept-test-XXXXXX)"
+          printf 'owned-dept-fixture\n' > "$CYS_DEPT_TEST_ROOT/.cys-dept-test-root"
+          export CYS_DEPT_TEST_ROOT
           sh scripts/bundle-prep.sh
           cargo test --workspace -- --test-threads=1 --skip hwmon:: 2>&1 | tee "$RUNNER_TEMP/w3-macos-evidence/cargo-tests.log"
       - name: Measurement and runtime regression tests
@@ -68,6 +75,34 @@ jobs:
         run: |
           set -euo pipefail
           bun x @tauri-apps/cli@2 build --target "$CYS_TARGET" --bundles app,dmg --config '{"bundle":{"createUpdaterArtifacts":false}}' 2>&1 | tee "$RUNNER_TEMP/w3-macos-evidence/build.log"
+      # 0.3.2 rename gate 2: list Contents/MacOS and require canonical + legacy entrypoints (evidence before later checks).
+      - name: App bundle listing (0.3.2 canonical + legacy names)
+        shell: bash
+        run: |
+          set -euo pipefail
+          PRODUCT="$(python3 -c 'import json; print(json.load(open("src-tauri/tauri.conf.json"))["productName"])')"
+          APP="target/$CYS_TARGET/release/bundle/macos/$PRODUCT.app"
+          ls -la "$APP/Contents/MacOS" | tee "$RUNNER_TEMP/w3-macos-evidence/contents-macos.txt"
+          missing=()
+          for name in wave-app wave waved cys cysd cys-app; do
+            [ -x "$APP/Contents/MacOS/$name" ] || missing+=("$name")
+          done
+          [ ${#missing[@]} -eq 0 ] || { echo "Contents/MacOS missing: ${missing[*]}" >&2; exit 1; }
+          echo "OK: wave-app, wave, waved + cys, cysd, cys-app in Contents/MacOS"
+      # C7: the macOS-only ignored probe tests::bundled_python_launch_probe is driven here against the BUILT bundle's runtime.
+      # The test copies the runtime into its own temp dir (HOME + copy under the runner temp); the built .app is never written.
+      - name: Bundled Python seal test (built bundle runtime)
+        shell: bash
+        run: |
+          set -euo pipefail
+          PRODUCT="$(python3 -c 'import json; print(json.load(open("src-tauri/tauri.conf.json"))["productName"])')"
+          export WAVE_TEST_PYTHON_RUNTIME="$GITHUB_WORKSPACE/target/$CYS_TARGET/release/bundle/macos/$PRODUCT.app/Contents/Resources/runtime/python"
+          [ -x "$WAVE_TEST_PYTHON_RUNTIME/bin/python3" ] || { echo "built bundle has no runtime/python/bin/python3: $WAVE_TEST_PYTHON_RUNTIME" >&2; exit 1; }
+          python3 scripts/tests/test_bundle_python_seal.py -v 2>&1 | tee "$RUNNER_TEMP/w3-macos-evidence/bundle-seal.log"
+          # unittest exits 0 on a skipped test: require exactly one test that ran and passed, none skipped.
+          grep -Eq '^Ran 1 test in ' "$RUNNER_TEMP/w3-macos-evidence/bundle-seal.log"
+          grep -Eq '^OK$' "$RUNNER_TEMP/w3-macos-evidence/bundle-seal.log"
+          if grep -Eqi 'skipped' "$RUNNER_TEMP/w3-macos-evidence/bundle-seal.log"; then echo "seal test skipped" >&2; exit 1; fi
       - name: Mount DMG read-only and verify packaged runtimes
         shell: bash
         run: |

@@ -26,19 +26,21 @@ sh ui/build.sh
 
 if [ -n "$CYS_TARGET" ]; then
   triple="$CYS_TARGET"
-  cargo build --release --target "$triple" --bin cys --bin cysd
+  cargo build --release --target "$triple" --bin wave --bin waved --bin cys --bin cysd --bin cys-app
   bindir="target/$triple/release"
 else
   triple="$(rustc -vV | sed -n 's/^host: //p')"
-  cargo build --release --bin cys --bin cysd
+  cargo build --release --bin wave --bin waved --bin cys --bin cysd --bin cys-app
   bindir="target/release"
 fi
 
-# Windows 사이드카는 .exe 확장자 필수(tauri externalBin은 cys-<triple>.exe 를 찾음).
+# Windows 사이드카는 .exe 확장자 필수(tauri externalBin은 <name>-<triple>.exe 를 찾음).
+# 0.3.2: canonical wave/waved + legacy entrypoint forwarders cys/cysd/cys-app ship side by side.
 case "$triple" in *windows*) exe=".exe" ;; *) exe="" ;; esac
 mkdir -p src-tauri/binaries
-cp "$bindir/cys$exe" "src-tauri/binaries/cys-$triple$exe"
-cp "$bindir/cysd$exe" "src-tauri/binaries/cysd-$triple$exe"
+for name in wave waved cys cysd cys-app; do
+  cp "$bindir/$name$exe" "src-tauri/binaries/$name-$triple$exe"
+done
 
 # ── pack.tar.gz를 .app Contents/Resources/ 에 동봉 (옵션4 — 오프라인 자기완결·가시·핫스왑) ──
 # 임베드 PACK_ALL(build.rs가 git-추적 cysjavis-pack/ 전 트리에서 생성한 권위 테이블)을 단일 SOT로
@@ -51,16 +53,16 @@ cp "$bindir/cysd$exe" "src-tauri/binaries/cysd-$triple$exe"
 host_triple="$(rustc -vV | sed -n 's/^host: //p')"
 case "$host_triple" in *windows*) host_exe=".exe" ;; *) host_exe="" ;; esac
 if [ "$triple" = "$host_triple" ]; then
-  manifest_cys="$bindir/cys$exe"      # 호스트 네이티브 사이드카 — 그대로 실행 가능
+  manifest_cli="$bindir/wave$exe"     # 호스트 네이티브 canonical CLI — 그대로 실행 가능
 else
   # 크로스 빌드 레그(예: arm64 러너에서 x86_64): 사이드카는 타깃 ABI라 실행 불가 →
   # 호스트 cys를 별도 빌드해 manifest emit에 쓴다(팩 콘텐츠는 타깃 무관 = 동일 manifest).
-  cargo build --release --bin cys
-  manifest_cys="target/release/cys$host_exe"
+  cargo build --release --bin wave
+  manifest_cli="target/release/wave$host_exe"
 fi
 
 mkdir -p src-tauri/resources
-"$manifest_cys" pack-manifest > src-tauri/resources/pack-manifest.json
+"$manifest_cli" pack-manifest > src-tauri/resources/pack-manifest.json
 "$PY" - <<'PY'
 import gzip, hashlib, io, json, os, sys, tarfile
 

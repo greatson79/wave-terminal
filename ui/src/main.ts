@@ -30,7 +30,7 @@ import { createHqTabShell, type MiniDoc } from "./wstab";
 import { teamMemberRows } from "./teamtree";
 import { dedupeTree, socketOwnsSid } from "./treededupe";
 import { shouldAdoptSurface } from "./surfaceadopt";
-import { coalesceHqWorkspaces, normalizeWorkspaces, pruneEmptyHqWorkspaces, rehomeRestoredSeats, shouldKeepEmptyWorkspaceOnRestore } from "./wsrestore";
+import { coalesceHqWorkspaces, normalizeWorkspaces, pruneEmptyHqWorkspaces, rehomeRestoredSeats, applyRenameLayoutSafely, shouldKeepEmptyWorkspaceOnRestore, type RenameSurfaceMap } from "./wsrestore";
 import { nextGhostStrike } from "./ghoststrike";
 import { transferTrees } from "./transfer";
 import { resolveEventSocket } from "./eventsocket";
@@ -721,7 +721,7 @@ function taskRow(s: any, deptKey: string): string {
     label = idle > 60 ? "대기" : "활동";
   }
   const trust = selfReport
-    ? `<span class="cc-trust-badge self" title="노드가 cys set-status로 직접 보고한 상태">📍자기보고</span>`
+    ? `<span class="cc-trust-badge self" title="노드가 wave set-status로 직접 보고한 상태">📍자기보고</span>`
     : `<span class="cc-trust-badge derived" title="출력 활동에서 데몬이 추정한 상태(자기보고 없음)">⚙파생</span>`;
   const task = selfReport && st.task ? String(st.task) : "(업무 미보고)";
   const ctx =
@@ -1272,7 +1272,7 @@ function renderControlCenter(d: any) {
   }
 
   document.getElementById("cc-footer")!.textContent =
-    `cys Control Center · v${d.version ?? ""} · 대시보드 5초 · 하드웨어 2초 갱신`;
+    `Wave Control Center · v${d.version ?? ""} · 대시보드 5초 · 하드웨어 2초 갱신`;
 }
 
 function renderLiveBody(d: any, fleet: any[]) {
@@ -1468,6 +1468,7 @@ let activeWs = 0;
 let wsCounter = 1;
 let groups: GroupMeta[] = []; // 06: 그룹 메타 배열(진실원=localStorage)
 let groupCounter = 1; // 06: 그룹 id 발급(ws의 wsCounter와 분리)
+let renameRevision: string | undefined;
 let focusedSid: number | null = null;
 const panes = new Map<string, PaneRuntime>(); // 키 = paneKey(sid, socket)
 applyFontFace(fontFace); // keep the rollback key synchronized with the new settings key
@@ -1568,7 +1569,7 @@ function saveLayout() {
   const a = Math.max(0, norm.findIndex((w) => w.id === activeId));
   localStorage.setItem(
     LAYOUT_KEY,
-    JSON.stringify({ workspaces: norm, groups: normG, active: a, counter: wsCounter, groupCounter }),
+    JSON.stringify({ workspaces: norm, groups: normG, active: a, counter: wsCounter, groupCounter, renameRevision }),
   );
 }
 
@@ -4338,8 +4339,8 @@ async function buildPaletteItems(): Promise<PaletteItem[]> {
 
   // ── (3) 노드 재기동(명령 주입) — role별 처방. 파괴적이므로 confirm. ──
   const RESTART: Record<string, string> = {
-    cso: "cys launch-agent --role cso --agent claude",
-    worker: "cys launch-agent --role worker --agent claude",
+    cso: "wave launch-agent --role cso --agent claude",
+    worker: "wave launch-agent --role worker --agent claude",
     "reviewer-gemini": "agy --dangerously-skip-permissions",
     "reviewer-codex": "codex --dangerously-bypass-approvals-and-sandbox",
   };
@@ -4708,7 +4709,7 @@ async function start() {
         "daemon-hint",
         "health",
         "데몬 시작 대기 중",
-        "백그라운드 서비스(cysd) 시작을 기다리고 있습니다. 계속 이 상태면: 시스템 설정 → 일반 → 로그인 항목에서 cys 관련 항목을 허용해 주세요. 허용 즉시 자동으로 연결됩니다.",
+        "백그라운드 서비스(waved) 시작을 기다리고 있습니다. 계속 이 상태면: 시스템 설정 → 일반 → 로그인 항목에서 Wave 관련 항목을 허용해 주세요. 허용 즉시 자동으로 연결됩니다.",
       );
     });
     listen("daemon-ready", () => dismissToast("daemon-hint"));
@@ -4717,8 +4718,8 @@ async function start() {
         await invoke("daemon_status");
         clearInterval(probe);
         resolve();
-      } catch {
-        /* not yet */
+      } catch (error) {
+        info.textContent = String(error);
       }
     }, 300);
   });
@@ -4829,7 +4830,7 @@ async function start() {
       `perm-${p.folder ?? "folder"}`,
       "health",
       `⚠ macOS ${f} 폴더 접근 차단`,
-      `pane 안의 claude 등이 EPERM으로 꺼질 수 있습니다 — 시스템 설정 → 개인정보 보호 및 보안 → 파일 및 폴더(또는 전체 디스크 접근 권한)에서 cys를 허용한 뒤 앱을 재시작하세요.`,
+      `pane 안의 claude 등이 EPERM으로 꺼질 수 있습니다 — 시스템 설정 → 개인정보 보호 및 보안 → 파일 및 폴더(또는 전체 디스크 접근 권한)에서 Wave Terminal을 허용한 뒤 앱을 재시작하세요.`,
     );
   });
   await listen("restore-progress", (e) => {
@@ -4844,9 +4845,11 @@ async function start() {
       if (p.hq_ok === false) toast("health", "⚠ 본부 복원 실패 포함", `본부 노드 복원 실패 · 부서 성공 ${ok} · 실패 ${fail} — 상태를 점검하세요.`);
       else if (fail > 0) toast("health", "⚠ 직원 복귀 일부 실패", `부서 복원 성공 ${ok} · 실패 ${fail} — 상태를 점검하세요.`);
       else toast("watchdog", "✅ 직원 복귀 완료", `노드 세션 복원 완료 (부서 ${ok}).`);
+      void refreshPaneTitles(); // Carry 1 R2: bind restored seats once the restore has finished.
     } else if (p.phase === "error") {
       dismissToast("restore");
       toast("health", "복원 실패", p.detail ?? "노드 복원 실행에 실패했습니다.");
+      void refreshPaneTitles(); // Seats restored before the failure are still adopted.
     }
   });
 
@@ -4887,9 +4890,12 @@ async function start() {
 
   // Session restore (멀티마스터 F4): 저장본 먼저 로드(ws.socket 포함) → 부서 데몬 확보를 list 대조보다
   // 선행 → 소켓별 대조. 데몬 일시 미가동 ws는 보존(영구 삭제 방지, 검증 mustFix).
+  let savedLayout: Record<string, unknown> = {};
   try {
     const saved = JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? "null");
     if (saved && Array.isArray(saved.workspaces)) {
+      savedLayout = saved;
+      renameRevision = typeof saved.renameRevision === "string" ? saved.renameRevision : undefined;
       workspaces = saved.workspaces;
       groups = Array.isArray(saved.groups) ? saved.groups : []; // 06: 하위호환 — 옛 저장본엔 groups 없음
       activeWs = saved.active ?? 0;
@@ -4903,6 +4909,34 @@ async function start() {
   for (const ws of workspaces) ws.socket = ws.socket ?? undefined; // 하위호환 마이그레이션(기본 데몬)
   // 같은 socket의 여러 패널을 보존하고 id·좌석 중복만 정리한다.
   workspaces = normalizeWorkspaces(workspaces);
+  // C4d: 업데이트 배치 정보가 없거나 손상돼도 앱은 항상 시작한다 — 저장 레이아웃 유지 + 한국어 안내.
+  let rawHandover: RenameSurfaceMap | null = null;
+  let startupNotice: string | undefined;
+  try {
+    rawHandover = await invoke("take_rename_surface_map") as RenameSurfaceMap | null;
+  } catch {
+    startupNotice = "업데이트 배치 정보를 읽지 못해 저장된 레이아웃과 기존 복원을 사용합니다.";
+  }
+  const startup = applyRenameLayoutSafely({ ...savedLayout, workspaces, renameRevision }, rawHandover);
+  const handover = startup.handover;
+  const renamedLayout = startup.layout;
+  startupNotice = startup.notice ?? startupNotice;
+  if (startup.backup) {
+    try { localStorage.setItem(`${LAYOUT_KEY}.pre-rename`, startup.backup); } catch { /* 백업 실패는 시작을 막지 않는다 */ }
+  }
+  if (handover?.revision) {
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify(renamedLayout));
+    workspaces = renamedLayout.workspaces;
+    renameRevision = renamedLayout.renameRevision;
+    try {
+      await invoke("ack_rename_surface_map", { revision: handover.revision });
+    } catch {
+      // 확인 실패(스냅샷 소모 실패 포함)는 시작을 막지 않는다 — 복원 기록은 백엔드에 남아 다음 시작에 재시도한다.
+      startupNotice = startupNotice ?? "업데이트 배치 기록을 정리하지 못했습니다. 다음 실행 때 다시 확인합니다.";
+    }
+  }
+  if (typeof rawHandover?.notice === "string" && rawHandover.notice) { startupNotice = startupNotice ?? rawHandover.notice; }
+  if (startupNotice) { try { toast("update", "layout", startupNotice); } catch { /* 안내 표시 실패도 시작을 막지 않는다 */ } }
   // 카운터 보정: 신규 id/이름이 항상 기존 최댓값 초과하도록(중복·손상 저장본에도 강건)
   wsCounter = Math.max(wsCounter, 0, ...workspaces.map((w) => w.id)) + 1;
   // 06: 고아 그룹 청소 + groupCounter를 기존 최대 id+1로 보정(중복·손상 저장본에도 강건).
@@ -5133,7 +5167,7 @@ document.getElementById("btn-install-cli")?.addEventListener("click", async () =
       cys_link: string; cysd_link: string; shadowed_by: string | null; warnings: string[];
     };
     // B-11: alert()는 WKWebView에서 억제될 수 있음(confirm() 무동작 실측과 동계열) — toast로 통일
-    let msg = `${r.cys_link} · ${r.cysd_link} — 새 터미널에서 'cys' 사용 가능`;
+    let msg = `${r.cys_link} · ${r.cysd_link} — 새 터미널에서 'wave' 사용 가능`;
     if (r.warnings?.length) msg += ` ⚠ ${r.warnings.join(" ⚠ ")}`;
     toast("system", "셸 설치 완료", msg);
   } catch (e) {

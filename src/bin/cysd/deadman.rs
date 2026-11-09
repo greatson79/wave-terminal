@@ -138,11 +138,12 @@ pub fn pid_alive(pid: u32) -> bool {
     pid != 0 && unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
-/// pid의 프로세스명이 정확히 cysd인가(kill 오살상 차단 — pid 재사용 방어).
-/// `ps -p <pid> -o comm=` 출력의 basename이 정확히 "cysd"인지 확인(부분일치 금지 —
+/// pid의 프로세스명이 정확히 데몬(waved, 구 cysd)인가(kill 오살상 차단 — pid 재사용 방어).
+/// `ps -p <pid> -o comm=` 출력의 basename이 정확히 "waved" 또는 "cysd"인지 확인(부분일치 금지 —
 /// `cysd-<hash>` 테스트 바이너리 등 유사명 오살상 차단, fail-closed 강화).
 /// macOS comm=실행 절대경로(basename=cysd), Linux comm=15자 스레드명(cysd, 미절단). 배포 sibling·앱
-/// 번들 실행 바이너리 모두 basename이 정확히 "cysd"다.
+/// 번들 실행 바이너리 모두 basename이 정확히 "waved"다(0.3.2 — mac cysd forwarder 는 waved 로 exec).
+/// "cysd" 는 0.3.2 이전 세대 lame-duck 홀더용으로만 남긴다.
 pub fn pid_is_cysd(pid: u32) -> bool {
     let out = match std::process::Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "comm="])
@@ -151,12 +152,12 @@ pub fn pid_is_cysd(pid: u32) -> bool {
         Ok(o) if o.status.success() => o,
         _ => return false,
     };
-    String::from_utf8_lossy(&out.stdout)
-        .trim()
-        .rsplit('/')
-        .next()
-        .map(|b| b == "cysd")
-        .unwrap_or(false)
+    comm_is_daemon(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `ps -o comm=` 출력의 basename 정확 일치 판정(순수 함수 — 부분일치 금지).
+pub fn comm_is_daemon(comm: &str) -> bool {
+    comm.trim().rsplit('/').next().map(|b| b == "waved" || b == "cysd").unwrap_or(false)
 }
 
 /// 락 경합 시 홀더 판정 — 순수 함수(부수효과 없음, 진리표 테스트 가능).
@@ -374,6 +375,17 @@ mod tests {
         // 부재 소켓: 연결 자체 실패 → false.
         assert!(!probe_holder(&d.join("nope.sock"), PROBE_TIMEOUT));
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn comm_is_daemon_accepts_only_exact_daemon_names() {
+        // 0.3.2: the running daemon image is waved (mac forwarder execs it); cysd = a pre-0.3.2 lame-duck holder.
+        for ok in ["waved", "cysd", "/Applications/Wave Terminal.app/Contents/MacOS/waved", "/x/MacOS/cysd\n"] {
+            assert!(comm_is_daemon(ok), "{ok}");
+        }
+        for bad in ["", "wave", "waved-0a1b", "cysd-1234", "xwaved", "waved.prev", "/x/cys", "wave-app"] {
+            assert!(!comm_is_daemon(bad), "{bad}");
+        }
     }
 
     #[test]

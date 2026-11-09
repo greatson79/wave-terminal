@@ -23,7 +23,7 @@ javis_phoenix_win_smoke.py — 불사조(무손실 복원) Windows 전용 경량
 
 mac(비-Windows)에서 실행 시: "Windows 전용" 정직 안내 후 exit 0(skip).
 
-환경: PHOENIX_CYS(cys.exe)·PHOENIX_CYSD(cysd.exe) 미설정 시 PATH. 자기 stdout·phoenix 하위프로세스는 utf-8 고정.
+환경: PHOENIX_CYS(wave.exe)·PHOENIX_CYSD(waved.exe) 미설정 시 PATH(0.3.2: cys/cysd 는 forwarder). 자기 stdout·phoenix 하위프로세스는 utf-8 고정.
 """
 
 import importlib.util
@@ -191,8 +191,8 @@ def case2_schtasks():
     dl = _PH._schtasks("/Delete", "/TN", task, "/F")
     check("② schtasks /Delete rc0", getattr(dl, "returncode", 1) == 0)
     check("② 삭제후->unmanaged", _PH._schtasks_status(task).get("state") == "unmanaged")
-    real = _PH.supervisor_status("cysd")
-    check("② supervisor_status('cysd') 분류(읽기전용)",
+    real = _PH.supervisor_status("waved")
+    check("② supervisor_status('waved') 분류(읽기전용)",
           real.get("supervisor") == "schtasks" and real.get("state") in ("managed", "orphan", "unmanaged"), real)
 
 
@@ -343,11 +343,11 @@ def case7_keepalive_respawn():
     정리(태스크 uninstall→데몬 kill)는 finally."""
     _cp("⑦ keepalive setup")
     default_pipe = r"\\.\pipe\cys"
-    task = "cysd"
+    task = "waved"   # 0.3.2 canonical scheduler task (src/bin/cys.rs TASK)
     installed = False
     try:
         # 클린 시작: 잔류 cysd 제거 + 기존 태스크 해제
-        subprocess.run(["taskkill", "/IM", "cysd.exe", "/F"], capture_output=True, timeout=15)
+        subprocess.run(["taskkill", "/IM", "waved.exe", "/F"], capture_output=True, timeout=15)
         _PH.cys("daemon", "uninstall", socket=None, timeout=20)
         time.sleep(1)
         inst = _PH.cys("daemon", "install", socket=None, timeout=30)
@@ -417,7 +417,7 @@ def case7_keepalive_respawn():
         _cp("⑦ teardown")
         if installed:
             _PH.cys("daemon", "uninstall", socket=None, timeout=20)  # ★태스크 먼저 제거(추가 respawn 차단)
-        subprocess.run(["taskkill", "/IM", "cysd.exe", "/F"], capture_output=True, timeout=15)
+        subprocess.run(["taskkill", "/IM", "waved.exe", "/F"], capture_output=True, timeout=15)
 
 
 def _alive_pid(pid):
@@ -594,11 +594,16 @@ def case8_real_autorestore():
 
 def resolve_bins():
     import shutil
-    cys = os.environ.get("PHOENIX_CYS") or shutil.which("cys") or shutil.which("cys.exe")
+    cys = os.environ.get("PHOENIX_CYS") or shutil.which("wave") or shutil.which("cys") or shutil.which("cys.exe")
     cysd = os.environ.get("PHOENIX_CYSD")
     if not cysd and cys:
-        cand = os.path.join(os.path.dirname(cys), "cysd.exe")
-        cysd = cand if os.path.exists(cand) else (shutil.which("cysd") or shutil.which("cysd.exe"))
+        # 0.3.2: the canonical daemon image is waved.exe; cysd.exe is only a forwarder (legacy fallback).
+        for name in ("waved.exe", "cysd.exe"):
+            cand = os.path.join(os.path.dirname(cys), name)
+            if os.path.exists(cand):
+                cysd = cand
+                break
+        cysd = cysd or shutil.which("waved") or shutil.which("cysd")
     return cys, cysd
 
 

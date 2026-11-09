@@ -124,7 +124,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Release path leak gate failed' }
 
       # ★CRT 게이트(운영판 9eacc2e 이식): 산출 setup.exe 를 7z 로 풀어 전 exe 의 PE 임포트 표를 스윕한다.
-      #   cys.exe·cysd.exe·cys-app.exe 가 VCRUNTIME140*.dll 을 임포트하면 exit 1 → 잡 실패
+      #   wave/waved/wave-app.exe 와 cys/cysd/cys-app.exe forwarder 가 VCRUNTIME140*.dll 을 임포트하면 exit 1 → 잡 실패
       #   (정책 SOT = .cargo/config.toml crt-static). 아티팩트 업로드는 if: always() 라 진단용으로 남는다.
       - name: CRT gate (VCRUNTIME import sweep on NSIS setup.exe)
         shell: bash
@@ -155,10 +155,10 @@ jobs:
           Write-Host ("installer: {0}  size={1}MB" -f $exe.FullName, [math]::Round($exe.Length/1MB,1))
           Start-Process -FilePath $exe.FullName -ArgumentList '/S' -Wait
           Start-Sleep -Seconds 6
-          Get-Process cys,cysd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-          # CRT inspection also extracts cysd.exe under LOCALAPPDATA/Temp; never select that copy.
-          $inst = Get-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Wave Terminal\cysd.exe') -ErrorAction Stop
-          if (-not $inst) { throw "설치 후 Wave Terminal\cysd.exe 미발견" }
+          Get-Process wave,waved,cys,cysd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          # CRT inspection also extracts waved.exe under LOCALAPPDATA/Temp; never select that copy.
+          $inst = Get-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Wave Terminal\waved.exe') -ErrorAction Stop
+          if (-not $inst) { throw "설치 후 Wave Terminal\waved.exe 미발견" }
           $dir = $inst.Directory.FullName
           $rt = Join-Path $dir 'runtime'
           Write-Host "install dir: $dir"
@@ -180,6 +180,18 @@ jobs:
           & $py.FullName -c "import sqlite3, ssl, json, hashlib, urllib.request, ast; print('embeddable stdlib OK (sqlite3+ssl+json+hashlib+urllib+ast)')"
           if ($LASTEXITCODE -ne 0) { throw "동봉 python3 stdlib import 실패" }
           Write-Host "OK: 자기완결 런타임 설치·실행·경로일치 검증 통과"
+
+      # 0.3.2 rename gate 2: list the install dir and require canonical + legacy entrypoints (evidence before later smokes).
+      - name: Install dir listing (0.3.2 canonical + legacy names)
+        if: github.ref != 'refs/heads/feat/v0.3.0-custom'
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:LOCALAPPDATA 'Wave Terminal'
+          Write-Host "== install dir: $dir =="
+          Get-ChildItem -LiteralPath $dir -File | Sort-Object Name | Format-Table Name, Length, LastWriteTime -AutoSize | Out-String -Width 200 | Write-Host
+          $missing = @('wave-app.exe','wave.exe','waved.exe','cys.exe','cysd.exe','cys-app.exe') | Where-Object { -not (Test-Path -LiteralPath (Join-Path $dir $_)) }
+          if ($missing) { throw ("설치 폴더에 없는 실행 파일: " + ($missing -join ', ')) }
+          Write-Host "OK: wave-app.exe, wave.exe, waved.exe + cys.exe, cysd.exe, cys-app.exe 설치 확인"
 
       - name: Cold startup timing regression (unchanged 4-second CLI budget)
         if: github.ref != 'refs/heads/feat/v0.3.0-custom'
@@ -204,11 +216,11 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # CRT inspection also extracts cysd.exe under LOCALAPPDATA/Temp; never select that copy.
-          $inst = Get-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Wave Terminal\cysd.exe') -ErrorAction Stop
-          if (-not $inst) { throw "설치된 cysd.exe 미발견" }
+          # CRT inspection also extracts waved.exe under LOCALAPPDATA/Temp; never select that copy.
+          $inst = Get-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Wave Terminal\waved.exe') -ErrorAction Stop
+          if (-not $inst) { throw "설치된 waved.exe 미발견" }
           $dir = $inst.Directory.FullName
-          $cys = Join-Path $dir 'cys.exe'
+          $cys = Join-Path $dir 'wave.exe'
           # list가 형제 cysd를 자동 기동(4초 대기 내장) — ping은 순수 프로브라 autostart가
           # 의도적으로 꺼져 있어(cys.rs) 부트스트랩에 못 쓴다. 첫 시도 실패 시 1회 재시도.
           & $cys list; if ($LASTEXITCODE -ne 0) { Start-Sleep -Seconds 3; & $cys list }
@@ -239,7 +251,7 @@ jobs:
           }
           if (-not $ok) { Write-Host "== screen(roundtrip) =="; Write-Host $screen; throw "실행 왕복 실패 — PTY 입력 또는 셸 실행 경로 결함" }
           Write-Host "OK: ConPTY 프롬프트·실행 왕복 실측 통과"
-          Get-Process cys,cysd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Get-Process wave,waved,cys,cysd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
       # ─────────────────────────────────────────────────────────────────────────
       # T3 기능 스모크 (WINFIX_T3_SMOKE_PLAN.md · row별 PASS/FAIL). release 무관.
@@ -250,11 +262,11 @@ jobs:
         shell: pwsh
         timeout-minutes: 12   # ★백스톱: 어떤 하위 호출이 hang해도 12분에 스텝 종료(6h 방지)
         run: |
-          # CRT inspection also extracts cysd.exe under LOCALAPPDATA/Temp; never select that copy.
-          $inst = Get-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Wave Terminal\cysd.exe') -ErrorAction Stop
-          if (-not $inst) { throw "설치된 cysd.exe 미발견" }
+          # CRT inspection also extracts waved.exe under LOCALAPPDATA/Temp; never select that copy.
+          $inst = Get-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Wave Terminal\waved.exe') -ErrorAction Stop
+          if (-not $inst) { throw "설치된 waved.exe 미발견" }
           $dir = $inst.Directory.FullName
-          $cys = Join-Path $dir 'cys.exe'
+          $cys = Join-Path $dir 'wave.exe'
           $results = @{}
           $userHome = $env:USERPROFILE
           function Rec($id,$ok,$note){ $results["$id"] = [bool]$ok; Write-Host ("T3-{0} RESULT: {1}  {2}" -f $id, ($(if($ok){'PASS'}else{'FAIL'})), $note) }
@@ -284,10 +296,10 @@ jobs:
           # ── T3-1b(autostart) daemon install → schtasks 등록 + ★진짜 KeepAlive(RestartOnFailure·ExecutionTimeLimit PT0S) ──
           try {
             (Bx $cys @('daemon','install') 30000).Out | Out-Host
-            $q = (schtasks /Query /TN cysd 2>&1); $reg = ($LASTEXITCODE -eq 0)
-            $xml = (schtasks /Query /TN cysd /XML 2>&1) -join "`n"
+            $q = (schtasks /Query /TN waved 2>&1); $reg = ($LASTEXITCODE -eq 0)
+            $xml = (schtasks /Query /TN waved /XML 2>&1) -join "`n"
             $hasRof = ($xml -match 'RestartOnFailure'); $hasPt0 = ($xml -match 'PT0S')
-            Rec '1b' ($reg -and $hasRof -and $hasPt0) "cysd reg=$reg RestartOnFailure=$hasRof ExecTimeLimit_PT0S=$hasPt0"
+            Rec '1b' ($reg -and $hasRof -and $hasPt0) "waved reg=$reg RestartOnFailure=$hasRof ExecTimeLimit_PT0S=$hasPt0"
           } catch { Rec '1b' $false "$_" }
 
           # ── 데몬 기동(named pipe 바인드·RC-4 기본) — 바운드 ──
@@ -335,7 +347,7 @@ jobs:
           # ── 집계 + 크리티컬 게이트 ──
           Write-Host "== T3 SMOKE 집계 =="
           $results.GetEnumerator() | Sort-Object Name | ForEach-Object { Write-Host ("  T3-{0}: {1}" -f $_.Key, ($(if($_.Value){'PASS'}else{'FAIL'}))) }
-          Get-Process cys,cysd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Get-Process wave,waved,cys,cysd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
           $crit = @('1','2','1b','pipe','13')
           $failed = $crit | Where-Object { -not $results["$_"] }
           if ($failed) { throw ("크리티컬 T3 행 실패: " + ($failed -join ',')) }
@@ -362,20 +374,20 @@ jobs:
               return @{Code=$p.ExitCode;Out="$(Get-Content $o -Raw -ErrorAction SilentlyContinue)$(Get-Content $e -Raw -ErrorAction SilentlyContinue)"}
             } finally { Remove-Item $o,$e -Force -ErrorAction SilentlyContinue }
           }
-          # CRT inspection also extracts cysd.exe under LOCALAPPDATA/Temp; never select that copy.
-          $inst = Get-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Wave Terminal\cysd.exe') -ErrorAction Stop
-          if (-not $inst) { throw "T4: 설치된 cysd.exe 미발견" }
-          $dir = $inst.Directory.FullName; $cys = Join-Path $dir 'cys.exe'; $cysd = $inst.FullName
+          # CRT inspection also extracts waved.exe under LOCALAPPDATA/Temp; never select that copy.
+          $inst = Get-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Wave Terminal\waved.exe') -ErrorAction Stop
+          if (-not $inst) { throw "T4: 설치된 waved.exe 미발견" }
+          $dir = $inst.Directory.FullName; $cys = Join-Path $dir 'wave.exe'; $cysd = $inst.FullName
           $setup = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           if (-not $setup) { throw "T4: setup.exe 미발견" }
 
           # ① 데몬 기동 + PID 기록 + 라이브 세션(role=master 셸) 생성
-          Get-Process cys,cysd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Get-Process wave,waved,cys,cysd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
           Start-Sleep 1
           Start-Process -FilePath $cysd -WindowStyle Hidden
           $r = $null; foreach($i in 1..20){ Start-Sleep 1; $r = Bx $cys @('list') 15000; if($r.Code -eq 0){ break } }
           if ($r.Code -ne 0) { throw "T4: 데몬 기동 실패(pipe 미응답)" }
-          $pidBefore = (Get-Process cysd | Select-Object -First 1).Id
+          $pidBefore = (Get-Process waved | Select-Object -First 1).Id
           (Bx $cys @('new-surface','--role','master') 30000).Out | Out-Host
           $before = (Bx $cys @('list') 15000).Out
           if ($before -notmatch 'role=master') { throw "T4: 사전 세션 생성 실패: $before" }
@@ -394,16 +406,16 @@ jobs:
           if ($ri.ExitCode -ne 0) { throw "T4-1: 재설치 실패 exit=$($ri.ExitCode)" }
           Start-Sleep 2
 
-          # ③ assert: 데몬 PID 불변 + pipe 응답 + 세션 생존 + prev 존재 + 새 cysd.exe 존재
+          # ③ assert: 데몬 PID 불변 + pipe 응답 + 세션 생존 + prev 존재 + 새 waved.exe 존재
           $alive = Get-Process -Id $pidBefore -ErrorAction SilentlyContinue
           Write-Host ("T4-2 RESULT: {0}  daemon pid={1} alive" -f ($(if($alive){'PASS'}else{'FAIL'})), $pidBefore)
           $after = (Bx $cys @('list') 20000)
           $sessOk = ($after.Code -eq 0 -and $after.Out -match 'role=master')
           Write-Host ("T4-3 RESULT: {0}  pipe+session (code={1})" -f ($(if($sessOk){'PASS'}else{'FAIL'})), $after.Code)
-          $prevOk = Test-Path (Join-Path $dir 'cysd.prev.exe')
-          Write-Host ("T4-4 RESULT: {0}  cysd.prev.exe 존재(rename 증거)" -f ($(if($prevOk){'PASS'}else{'FAIL'})))
+          $prevOk = Test-Path (Join-Path $dir 'waved.prev.exe')
+          Write-Host ("T4-4 RESULT: {0}  waved.prev.exe 존재(rename 증거)" -f ($(if($prevOk){'PASS'}else{'FAIL'})))
           $newOk = Test-Path $cysd
-          Write-Host ("T4-5 RESULT: {0}  새 cysd.exe 존재" -f ($(if($newOk){'PASS'}else{'FAIL'})))
+          Write-Host ("T4-5 RESULT: {0}  새 waved.exe 존재" -f ($(if($newOk){'PASS'}else{'FAIL'})))
           $bashAlive = -not $bp.HasExited
           Write-Host ("T4-7 RESULT: {0}  잠금 bash 생존(무사망)" -f ($(if($bashAlive){'PASS'}else{'FAIL'})))
           $msysOk = Test-Path (Join-Path $dir 'runtime\git\usr\bin\msys-2.0.dll')
@@ -426,14 +438,14 @@ jobs:
           if ($r2.Code -ne 0) { throw "T4: 새 데몬 기동 실패" }
           Start-Sleep 2
           # T4-10 rotate 세대교체 증거: 새 데몬 PID ≠ 구 PID (교대가 재사용이 아니라 신 바이너리 프로세스).
-          $pidAfter = (Get-Process cysd | Select-Object -First 1).Id
+          $pidAfter = (Get-Process waved | Select-Object -First 1).Id
           $swapOk = ($pidAfter -ne $pidBefore)
           Write-Host ("T4-10 RESULT: {0}  데몬 세대교체(신 pid={1} ≠ 구 pid={2})" -f ($(if($swapOk){'PASS'}else{'FAIL'})), $pidAfter, $pidBefore)
-          $rootPrev = Test-Path (Join-Path $dir 'cysd.prev.exe')
+          $rootPrev = (Test-Path (Join-Path $dir 'waved.prev.exe')) -or (Test-Path (Join-Path $dir 'cysd.prev.exe'))
           $rtPrev = @(Get-ChildItem (Join-Path $dir 'runtime') -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*.prev*' }).Count
           $cleaned = (-not $rootPrev) -and ($rtPrev -eq 0)
           Write-Host ("T4-6 RESULT: {0}  새 cysd 기동 후 prev 잔해 재귀 청소(P1b — root+runtime, 잔존 {1}개)" -f ($(if($cleaned){'PASS'}else{'FAIL'})), $rtPrev)
-          Get-Process cys,cysd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Get-Process wave,waved,cys,cysd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
           if (-not $cleaned) { throw "T4-6: prev 잔해 미청소" }
           if (-not $swapOk) { throw "T4-10: 데몬 세대교체 실패(PID 불변 — 구 데몬 잔존)" }
           Write-Host "OK: T4 무중단 재설치 스모크 전행 통과 — 업데이트 중 데몬·세션 무사망 실증"
@@ -454,20 +466,20 @@ jobs:
           PYTHONUTF8: '1'     # 한글 stdout cp1252 크래시 방지(RC-16 관례)
         run: |
           $ErrorActionPreference = 'Stop'
-          # CRT inspection also extracts cysd.exe under LOCALAPPDATA/Temp; never select that copy.
-          $inst = Get-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Wave Terminal\cysd.exe') -ErrorAction Stop
-          if (-not $inst) { throw "T5: 설치된 cysd.exe 미발견" }
+          # CRT inspection also extracts waved.exe under LOCALAPPDATA/Temp; never select that copy.
+          $inst = Get-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Wave Terminal\waved.exe') -ErrorAction Stop
+          if (-not $inst) { throw "T5: 설치된 waved.exe 미발견" }
           $dir = $inst.Directory.FullName
-          $cys = Join-Path $dir 'cys.exe'
+          $cys = Join-Path $dir 'wave.exe'
           $cysd = $inst.FullName
           $py = Join-Path $dir 'runtime\python\python3.exe'
           if (-not (Test-Path $py))  { throw "T5: 동봉 python3.exe 미발견: $py" }
-          if (-not (Test-Path $cys)) { throw "T5: 설치된 cys.exe 미발견: $cys" }
+          if (-not (Test-Path $cys)) { throw "T5: 설치된 wave.exe 미발견: $cys" }
           $smoke = Join-Path (Get-Location) 'cysjavis-pack\bin\javis_phoenix_win_smoke.py'
           if (-not (Test-Path $smoke)) { throw "T5: 스모크 파일 미발견(checkout 경로): $smoke" }
           Write-Host "cys=$cys"; Write-Host "cysd=$cysd"; Write-Host "py=$py"; Write-Host "smoke=$smoke"
           # 사전 정리(이전 스텝 잔류 데몬) — 스모크는 테스트 전용 파이프(cys-phxsmoke-*)를 쓰지만 결정성 위해 정돈.
-          Get-Process cys,cysd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Get-Process wave,waved,cys,cysd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
           Start-Sleep 1
           $env:PHOENIX_CYS = $cys
           $env:PHOENIX_CYSD = $cysd
@@ -475,7 +487,7 @@ jobs:
           $code = $LASTEXITCODE
           # ★케이스⑦ 정리: 실 cysd 스케줄러 태스크가 남으면 안 됨(스모크가 finally 로 uninstall 하나 방어적 재정리)
           & $cys daemon uninstall 2>$null
-          Get-Process cys,cysd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Get-Process wave,waved,cys,cysd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
           if ($code -ne 0) { throw "T5: 피닉스 Windows 패리티 스모크 실패 (exit=$code)" }
           Write-Host "OK: T5 피닉스 Windows 패리티 스모크 통과 (경로매핑·schtasks·재시작·snapshot/ps1·stub restore·deploy plan·★KeepAlive respawn·★⑧실경로 auto-restore[주입 없이 cysd 자체 decide_auto_restore]·★⑨Job Object 자식트리 동반사망[D3 P2-9])"
           # ★Actions pwsh 래퍼는 스크립트 말미에 exit $LASTEXITCODE 를 붙인다 — 위 방어적 uninstall(스모크 finally 가

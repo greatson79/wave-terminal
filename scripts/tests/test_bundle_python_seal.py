@@ -43,7 +43,7 @@ class BundlePythonSealTests(unittest.TestCase):
             fixture.write_text("VALUE = 12345\n")
             before = snapshot(bundle)
             result = subprocess.run([
-                "cargo", "test", "--offline", "--package", "cys-app",
+                "cargo", "test", "--offline", "--package", "wave-app",
                 "tests::bundled_python_launch_probe", "--", "--ignored", "--exact", "--nocapture"],
                 cwd=ROOT, env=env, capture_output=True, text=True, timeout=600)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

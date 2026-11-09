@@ -238,8 +238,25 @@ mod tests {
     use std::process::{Child, Stdio};
     use std::time::Duration;
 
+
+    fn test_root() -> std::path::PathBuf {
+        use std::path::{Component, PathBuf};
+        let root = PathBuf::from(std::env::var_os("CYS_DEPT_TEST_ROOT")
+            .expect("CYS_DEPT_TEST_ROOT must name an explicit isolated fixture root"));
+        let forbidden = ["applications", "library", ".cys", "usr", "opt", "system", "windows", "program files"];
+        assert!(root.is_absolute() && root.components().count() >= 3 && root.components().all(|part| {
+            !matches!(part, Component::ParentDir) && !forbidden.contains(&part.as_os_str().to_string_lossy().to_lowercase().as_str())
+        }), "CYS_DEPT_TEST_ROOT must name an explicit isolated fixture root");
+        for ancestor in root.ancestors() {
+            assert!(!std::fs::symlink_metadata(ancestor).unwrap().file_type().is_symlink(), "test root must not traverse symlinks");
+        }
+        assert_eq!(std::fs::read_to_string(root.join(".cys-dept-test-root")).unwrap(), "owned-dept-fixture\n");
+        root
+    }
+
     #[test]
     fn child_fixture() {
+        let _root = test_root();
         match std::env::var("CYS_DEPT_TEARDOWN_TEST_CHILD")
             .ok()
             .as_deref()
@@ -250,6 +267,8 @@ mod tests {
             }
             Some("delayed") => std::thread::sleep(Duration::from_millis(400)),
             Some("hang") => std::thread::sleep(Duration::from_secs(5)),
+            // Survivor that outlives any plausible test duration (killed by OwnedChild::drop).
+            Some("linger") => std::thread::sleep(Duration::from_secs(120)),
             _ => (),
         }
         if let Ok(receipt) = std::env::var("CYS_DEPT_TEARDOWN_TEST_RECEIPT") {
@@ -258,7 +277,35 @@ mod tests {
     }
 
     fn command(mode: &str) -> Command {
-        let mut command = Command::new(std::env::current_exe().unwrap());
+        command_for(&fresh_exe(), mode)
+    }
+
+    /// Fresh copy of the test binary, already run once to completion. The first exec
+    /// of a new file can stall for seconds under load; pay it here, before any caller
+    /// starts a deadline or spawns a time-limited survivor.
+    fn fresh_exe() -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = test_root();
+        let executable = root.join(format!("dept-test-child-{}-{}{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed), std::env::consts::EXE_SUFFIX));
+        std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+        // Neutral mode: falls to the fixture's default arm, exits at once, prints no receipt.
+        assert!(command_for(&executable, "warm").status().unwrap().success());
+        executable
+    }
+
+    fn command_for(executable: &std::path::Path, mode: &str) -> Command {
+        let root = test_root();
+        let mut command = Command::new(executable);
+        command.env_clear().current_dir(&root)
+            .env("CYS_DEPT_TEST_ROOT", &root)
+            .env("HOME", &root).env("USERPROFILE", &root)
+            .env("TMPDIR", &root).env("TMP", &root).env("TEMP", &root);
+        #[cfg(windows)]
+        for key in ["SystemRoot", "WINDIR"] {
+            let value = std::env::var_os(key).expect("reviewed Windows OS loader path is required");
+            assert!(std::path::Path::new(&value).is_absolute());
+            command.env(key, value);
+        }
         command
             .args([
                 "--exact",
@@ -274,7 +321,11 @@ mod tests {
     }
 
     fn verified_command(tree: &ProcessTree) -> Command {
-        let mut cmd = command("success");
+        verified_command_for(&fresh_exe(), tree)
+    }
+
+    fn verified_command_for(executable: &std::path::Path, tree: &ProcessTree) -> Command {
+        let mut cmd = command_for(executable, "success");
         cmd.env(
             "CYS_DEPT_TEARDOWN_TEST_RECEIPT",
             receipt(&tree.root).to_string(),
@@ -312,6 +363,7 @@ mod tests {
 
     #[test]
     fn teardown_propagates_helper_status_and_stderr() {
+        let _root = test_root();
         tauri::async_runtime::block_on(async {
             let error = run(
                 command("exit7"),
@@ -330,9 +382,10 @@ mod tests {
 
     #[test]
     fn teardown_propagates_spawn_error() {
+        let _root = test_root();
         tauri::async_runtime::block_on(async {
             let missing =
-                std::env::temp_dir().join(format!("missing-dept-command-{}", std::process::id()));
+                test_root().join(format!("missing-dept-command-{}", std::process::id()));
             let error = run(
                 Command::new(missing),
                 empty_tree(),
@@ -346,12 +399,14 @@ mod tests {
 
     #[test]
     fn teardown_waits_for_captured_process_after_helper_success() {
+        let _root = test_root();
+        let helper = fresh_exe(); // warm before the 400 ms survivor starts
         let owned = child("delayed");
         let tree = ProcessTree::capture(&[owned.0.id()]).unwrap();
         let start = std::time::Instant::now();
         tauri::async_runtime::block_on(async {
             run(
-                verified_command(&tree),
+                verified_command_for(&helper, &tree),
                 tree,
                 Instant::now() + Duration::from_secs(2),
             )
@@ -366,17 +421,22 @@ mod tests {
 
     #[test]
     fn teardown_rejects_old_helper_success_with_surviving_process() {
-        let mut owned = child("hang");
+        let _root = test_root();
+        let mut owned = child("linger");
         let tree = ProcessTree::capture(&[owned.0.id()]).unwrap();
         tauri::async_runtime::block_on(async {
-            let error = run(
-                command("success"),
-                tree,
-                Instant::now() + Duration::from_millis(80),
-            )
-            .await
-            .unwrap_err();
-            assert!(error.contains("종료") && error.contains("확인"), "{error}");
+            // Outcome is driven by the helper exiting 0 without a receipt, not by
+            // how fast it starts. HANG_GUARD is only a watchdog: if it fires the
+            // helper-wait message differs from the pin below and the test FAILS.
+            const HANG_GUARD: Duration = Duration::from_secs(10);
+            // Byte-exact copy of the first sentence of the inline literal in verify_receipt.
+            const RECEIPT_REFUSAL: &str = "부서 종료 확인 영수증이 없거나 올바르지 않습니다.";
+            // command() already ran the helper once to completion (warm), so the
+            // first-exec cost of a new binary is paid before run() starts its clock.
+            let error = run(command("success"), tree, Instant::now() + HANG_GUARD)
+                .await
+                .unwrap_err();
+            assert!(error.starts_with(RECEIPT_REFUSAL), "{error}");
         });
         assert!(
             owned.0.try_wait().unwrap().is_none(),
@@ -386,11 +446,13 @@ mod tests {
 
     #[test]
     fn teardown_valid_receipt_still_waits_for_surviving_identity() {
+        let _root = test_root();
+        let helper = fresh_exe(); // warm before the 5 s survivor starts
         let mut owned = child("hang");
         let tree = ProcessTree::capture(&[owned.0.id()]).unwrap();
         tauri::async_runtime::block_on(async {
             let error = run(
-                verified_command(&tree),
+                verified_command_for(&helper, &tree),
                 tree,
                 Instant::now() + Duration::from_millis(80),
             )
@@ -403,8 +465,9 @@ mod tests {
 
     #[test]
     fn teardown_expired_deadline_never_starts_the_command() {
+        let _root = test_root();
         tauri::async_runtime::block_on(async {
-            let missing = std::env::temp_dir().join("missing-dept-expired-command");
+            let missing = test_root().join("missing-dept-expired-command");
             let error = run(
                 Command::new(missing),
                 empty_tree(),
@@ -421,10 +484,12 @@ mod tests {
 
     #[test]
     fn teardown_bounds_a_hung_helper() {
+        let _root = test_root();
+        let helper = command("hang");
         let start = std::time::Instant::now();
         tauri::async_runtime::block_on(async {
             let error = run(
-                command("hang"),
+                helper,
                 empty_tree(),
                 Instant::now() + Duration::from_millis(80),
             )
@@ -437,6 +502,8 @@ mod tests {
 
     #[test]
     fn teardown_does_not_wait_for_a_reused_pid_identity() {
+        let _root = test_root();
+        let helper = fresh_exe(); // warm before the 5 s survivor starts
         let mut owned = child("hang");
         let mut tree = ProcessTree::capture(&[owned.0.id()]).unwrap();
         assert!(!tree.identities.is_empty());
@@ -445,7 +512,7 @@ mod tests {
         }
         tauri::async_runtime::block_on(async {
             run(
-                verified_command(&tree),
+                verified_command_for(&helper, &tree),
                 tree,
                 Instant::now() + Duration::from_secs(2),
             )
@@ -457,11 +524,13 @@ mod tests {
 
     #[test]
     fn teardown_rejects_an_unavailable_process_snapshot() {
+        let _root = test_root();
         assert!(snapshot_from_system(&System::new()).is_err());
     }
 
     #[test]
     fn teardown_captures_rpc_daemon_and_live_shell_ids() {
+        let _root = test_root();
         assert_eq!(process_ids(&serde_json::json!({"daemon_pid":42}), &serde_json::json!({"surfaces":[{"pid":43,"exited":false},{"pid":44,"exited":true}]})).unwrap(), vec![42,43]);
         assert!(process_ids(
             &serde_json::json!({"daemon_pid":0}),
@@ -477,6 +546,7 @@ mod tests {
 
     #[test]
     fn teardown_discovers_orphan_with_dead_parent_link() {
+        let _root = test_root();
         let mut tree = ProcessTree {
             root: Identity {
                 pid: 42,
@@ -500,6 +570,7 @@ mod tests {
 
     #[test]
     fn teardown_unknown_start_time_fails_closed() {
+        let _root = test_root();
         let mut tree = ProcessTree {
             root: Identity {
                 pid: 42,
@@ -515,6 +586,7 @@ mod tests {
 
     #[test]
     fn teardown_missing_receipt_is_visible_failure() {
+        let _root = test_root();
         tauri::async_runtime::block_on(async {
             let error = run(
                 command("success"),
@@ -529,6 +601,7 @@ mod tests {
 
     #[test]
     fn teardown_rejects_invalid_or_unbound_receipts() {
+        let _root = test_root();
         let root = Identity {
             pid: 42,
             started: 100,
@@ -560,6 +633,7 @@ mod tests {
 
     #[test]
     fn teardown_accepts_only_identity_bound_verified_receipt() {
+        let _root = test_root();
         let root = Identity {
             pid: 42,
             started: 100,
@@ -570,6 +644,7 @@ mod tests {
 
     #[test]
     fn teardown_rejects_invalid_capture_identity() {
+        let _root = test_root();
         assert!(
             ProcessTree::capture(&[u32::MAX]).is_err(),
             "a missing daemon identity must fail closed"

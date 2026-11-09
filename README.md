@@ -490,7 +490,7 @@ cargo build --release
 ./target/release/cysd &                      # 데몬 (중복 기동 자동 거부)
 
 cd ui && sh build.sh                          # 프런트엔드 번들 (bun)
-cargo build -p cys-app                        # dev 실행: ./target/debug/cys-app
+cargo build -p wave-app                       # dev 실행: ./target/debug/wave-app
 bun x @tauri-apps/cli build                   # 배포 번들
 ```
 

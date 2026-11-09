@@ -14,7 +14,103 @@ use tauri_plugin_updater::UpdaterExt;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 mod user_settings;
+mod rename_migration;
 mod dept_teardown;
+mod rename_checkpoint;
+mod rename_layout;
+
+static STARTUP_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static STARTUP_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+#[tauri::command]
+async fn take_rename_surface_map(app: AppHandle) -> Result<Value, String> {
+    let Some(marker) = cys::rename_handover::read_marker()? else { return Ok(json!({"revision":"","map":{}})); };
+    let record = &marker["rename_handover"];
+    if record["phase"] != "awaiting-layout" { return Err("업데이트 좌석 복원이 아직 끝나지 않았습니다.".into()); }
+    rename_migration::validate_layout_owner(&marker,user_settings_file(&app)?).await?;
+    if cys::rename_handover::read_marker()?.as_ref()!=Some(&marker) { return Err("배치 저장 기록이 확인 중 바뀌어 기존 기록을 유지합니다.".into()); }
+    Ok(rename_handover_payload(record))
+}
+
+/// Carry 1 R2: `fallback` tells the UI that no old→new map exists, so it detaches every old primary SID.
+fn rename_handover_payload(record: &Value) -> Value {
+    json!({"revision":record["revision"],"map":record["surface_map"],"notice":record["snapshot"]["notice"],
+        "fallback":record["snapshot"]["restore_fallback"] == true})
+}
+
+/// Carry 1 (C4d): after a fallback handover's layout ack has cleared the marker, the EXISTING restore runs.
+fn fallback_restore_after_ack(record: &Value, marker_now: &Result<Option<Value>, String>) -> bool {
+    record["snapshot"]["restore_fallback"] == true && matches!(marker_now, Ok(None))
+}
+
+#[cfg(test)]
+mod fallback_restore_after_ack_tests {
+    use serde_json::json;
+    #[test]
+    fn fallback_restore_runs_existing_restore_only_after_ack() {
+        let fallback = json!({"phase":"awaiting-layout","snapshot":{"restore_fallback":true,"notice":"안내"}});
+        assert!(super::fallback_restore_after_ack(&fallback, &Ok(None)), "marker gone + fallback → existing restore");
+        assert!(!super::fallback_restore_after_ack(&fallback, &Ok(Some(json!({"rename_handover":{}})))), "marker still present");
+        assert!(!super::fallback_restore_after_ack(&fallback, &Err("unreadable".into())), "unknown marker state");
+        let normal = json!({"phase":"awaiting-layout","snapshot":{"notice":null}});
+        assert!(!super::fallback_restore_after_ack(&normal, &Ok(None)), "Native already restored the seats");
+        let other = json!({"phase":"awaiting-layout","snapshot":{"restore_fallback":"yes"}});
+        assert!(!super::fallback_restore_after_ack(&other, &Ok(None)), "only an explicit true");
+    }
+
+    #[test]
+    fn empty_legacy_marker_after_ack_routes_to_existing_restore() {
+        // write_marker(None) leaves the empty legacy marker; the existing restore must Apply even at the current stamp.
+        let current = env!("CARGO_PKG_VERSION");
+        assert!(matches!(super::decide_pending_update(true, Some(current), current, true), super::PendingUpdatePlan::Apply));
+    }
+
+    #[test]
+    fn handover_payload_flags_only_an_explicit_fallback() {
+        let fallback = json!({"revision":"r1","surface_map":{},"snapshot":{"restore_fallback":true,"notice":"안내"}});
+        assert_eq!(super::rename_handover_payload(&fallback),
+            json!({"revision":"r1","map":{},"notice":"안내","fallback":true}));
+        let normal = json!({"revision":"r2","surface_map":{"1":11},"snapshot":{"notice":null}});
+        assert_eq!(super::rename_handover_payload(&normal)["fallback"], false);
+        assert_eq!(super::rename_handover_payload(&normal)["map"], json!({"1":11}));
+        let other = json!({"revision":"r3","surface_map":{},"snapshot":{"restore_fallback":"yes"}});
+        assert_eq!(super::rename_handover_payload(&other)["fallback"], false);
+    }
+}
+
+#[tauri::command]
+async fn ack_rename_surface_map(app: AppHandle, revision: String) -> Result<(), String> {
+    let Some(marker) = cys::rename_handover::read_marker()? else { return Ok(()); };
+    let record = &marker["rename_handover"];
+    if record["phase"] != "awaiting-layout" || record["revision"].as_str() != Some(revision.as_str()) {
+        return Err("저장한 좌석 배치가 현재 업데이트 복원 기록과 다릅니다. 기록을 유지합니다.".into());
+    }
+    rename_migration::validate_layout_owner(&marker,user_settings_file(&app)?).await?;
+    match cys::rename_handover::read_marker()? {
+        None => Ok(()),
+        Some(current) if current==marker => {
+            // Consume only after the frontend's durable layout write (this ack); keep the snapshot file.
+            // A failed consume keeps the marker for retry instead of clearing the only receipt.
+            rename_migration::consume_layout_snapshot_with(record,|r|cys::update_snapshot::mark_consumed(r))?;
+            cys::rename_handover::write_marker(None)?;
+            // Carry 1: once per ack (a later ack finds no marker), only for a fallback handover whose marker is gone.
+            if fallback_restore_after_ack(record, &cys::rename_handover::read_marker()) {
+                let app2 = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    // Existing restore (init-pack + org restore). Its restore-progress done/error is the UI's
+                    // completion signal; if the restore never started, still end with an error so the UI is not left waiting.
+                    let started = tokio::task::spawn_blocking({ let app3 = app2.clone(); move || maybe_apply_pending_update(&app3) }).await;
+                    if !matches!(started, Ok(true)) {
+                        let _ = app2.emit("restore-progress", json!({"phase":"error",
+                            "detail":"기존 좌석 복원을 시작하지 못했습니다. 앱은 계속 사용할 수 있으며 다시 열면 복원을 재시도합니다."}));
+                    }
+                });
+            }
+            Ok(())
+        }
+        Some(_) => Err("배치 저장 기록이 확인 중 바뀌어 복원 기록을 유지합니다.".into()),
+    }
+}
 
 type Stream = Box<dyn AsyncReadWrite>;
 trait AsyncReadWrite: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -181,6 +277,10 @@ async fn rpc_on(socket: &std::path::Path, method: &str, params: Value) -> Result
 
 #[tauri::command]
 async fn daemon_status(socket: Option<String>) -> Result<Value, String> {
+    if socket.is_none() && !STARTUP_READY.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(STARTUP_ERROR.lock().map_err(|_| "업데이트 시작 상태 확인 실패")?.clone()
+            .unwrap_or_else(|| "업데이트 복원과 서비스 시작을 확인하고 있습니다. 권한 안내가 뜨면 확인해 주세요.".into()));
+    }
     rpc_on(&resolve_socket(&socket), "system.identify", json!({"caller": "ui"})).await
 }
 
@@ -742,7 +842,7 @@ fn resolve_sidecar(name: &str) -> std::path::PathBuf {
 // ── CLI PATH 설치(명시 메뉴) — 가드/스크립트 순수 헬퍼 ─────────────────
 #[derive(PartialEq, Debug)]
 enum BundleKind {
-    Canonical,    // /Applications/cys.app 또는 ~/Applications/cys.app
+    Canonical,    // Wave Terminal.app or legacy cys.app in an Applications directory
     Translocated, // Gatekeeper AppTranslocation 휘발 경로
     Backup,       // cys.app.bak-*/*.prev*
     NonStandard,  // 그 외(Downloads 등) — 경고와 함께 진행
@@ -773,10 +873,12 @@ fn classify_bundle_dir(macos_dir: &std::path::Path) -> BundleKind {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        if name.starts_with("cys.app.bak") || name.starts_with("cys.app.prev") {
+        if name.starts_with("cys.app.bak") || name.starts_with("cys.app.prev")
+            || name.starts_with("Wave Terminal.app.bak") || name.starts_with("Wave Terminal.app.prev")
+        {
             return BundleKind::Backup;
         }
-        if name == "cys.app" {
+        if name == "cys.app" || name == "Wave Terminal.app" {
             let parent = b
                 .parent()
                 .map(|p| p.to_string_lossy().to_string())
@@ -789,7 +891,7 @@ fn classify_bundle_dir(macos_dir: &std::path::Path) -> BundleKind {
     BundleKind::NonStandard
 }
 
-/// `do shell script` 본문: target_dir 생성 + cys·cysd 심볼릭 멱등 생성(`ln -sf`).
+/// Runtime-unused compatibility planner for legacy quoting/location tests; never execute this script.
 fn build_install_script(
     cys: &std::path::Path,
     cysd: &std::path::Path,
@@ -805,7 +907,7 @@ fn build_install_script(
     )
 }
 
-/// `which -a cys` 출력 → precedence 순 경로 리스트(공백줄 제거).
+/// `which -a wave` 출력 → precedence 순 경로 리스트(공백줄 제거); legacy text fixtures remain valid.
 fn parse_which_a(stdout: &str) -> Vec<String> {
     stdout
         .lines()
@@ -814,7 +916,7 @@ fn parse_which_a(stdout: &str) -> Vec<String> {
         .collect()
 }
 
-/// 설치 계획(순수): 가드 판정 + 소스 경로 + osascript 인자 + 경고. osascript 실행은 포함하지 않는다.
+/// Pure legacy compatibility plan: runtime uses only location guards/warnings; script fields remain for tests.
 struct CliInstallPlan {
     cys_src: std::path::PathBuf,
     cysd_src: std::path::PathBuf,
@@ -828,13 +930,13 @@ fn plan_cli_install(
 ) -> Result<CliInstallPlan, String> {
     match classify_bundle_dir(macos_dir) {
         BundleKind::Translocated => {
-            return Err("cys.app이 Gatekeeper에 의해 임시 위치에서 실행 중입니다. \
-Finder에서 cys.app을 Applications 폴더로 옮긴 뒤 다시 열고 시도하세요."
+            return Err("Wave Terminal.app이 Gatekeeper에 의해 임시 위치에서 실행 중입니다. \
+Finder에서 Wave Terminal.app을 Applications 폴더로 옮긴 뒤 다시 열고 시도하세요."
                 .into());
         }
         BundleKind::Backup => {
             return Err("백업 번들에서 실행 중입니다. \
-정규 cys.app(Applications)에서 실행한 뒤 시도하세요."
+정규 Wave Terminal.app(Applications)에서 실행한 뒤 시도하세요."
                 .into());
         }
         BundleKind::Canonical | BundleKind::NonStandard => {}
@@ -842,7 +944,7 @@ Finder에서 cys.app을 Applications 폴더로 옮긴 뒤 다시 열고 시도�
     let mut warnings = vec![];
     if classify_bundle_dir(macos_dir) == BundleKind::NonStandard {
         warnings.push(
-            "cys.app이 표준 위치(Applications)가 아닌 곳에서 실행 중입니다. \
+            "Wave Terminal.app이 표준 위치(Applications)가 아닌 곳에서 실행 중입니다. \
 앱을 옮기면 심볼릭이 깨지니 Applications로 이동을 권장합니다."
                 .into(),
         );
@@ -872,12 +974,12 @@ struct InstallCliReport {
     cys_link: String,
     cysd_link: String,
     source_cys: String,
-    effective_cys: Option<String>, // which -a cys 1순위
-    shadowed_by: Option<String>,   // /usr/local/bin/cys 앞을 가리는 다른 cys
+    effective_cys: Option<String>, // compatibility field name: first which -a wave result
+    shadowed_by: Option<String>,   // another PATH entry before the guarded canonical links
     warnings: Vec<String>,
 }
 
-/// 명시 메뉴 트리거. macOS에서 cys·cysd를 /usr/local/bin에 1회 승격으로 심볼릭한다.
+/// Explicit menu: delegate canonical/compatibility link repair to the shared guarded implementation.
 #[tauri::command]
 fn install_cli_to_path() -> Result<InstallCliReport, String> {
     #[cfg(not(target_os = "macos"))]
@@ -894,28 +996,13 @@ fn install_cli_to_path() -> Result<InstallCliReport, String> {
             .to_path_buf();
 
         let plan = plan_cli_install(&macos_dir, target_dir)?;
-        if !plan.cys_src.exists() || !plan.cysd_src.exists() {
-            return Err("번들 내 cys/cysd 바이너리를 찾지 못했습니다.".into());
-        }
+        rename_migration::repair_cli_paths()?;
+        let wave_src = macos_dir.join("wave");
 
-        // osascript 1회 승격(cys·cysd 동시 → 단일 프롬프트).
-        let out = std::process::Command::new("osascript")
-            .arg("-e")
-            .arg(&plan.osascript_arg)
-            .output()
-            .map_err(|e| format!("osascript 실행 실패: {e}"))?;
-        if !out.status.success() {
-            let err = String::from_utf8_lossy(&out.stderr);
-            if err.contains("-128") || err.contains("User canceled") {
-                return Err("설치가 취소되었습니다.".into());
-            }
-            return Err(format!("심볼릭 생성 실패: {}", err.trim()));
-        }
-
-        // 검증: 로그인 PATH 기준 which -a cys.
-        let which = std::process::Command::new("bash")
+        // Report canonical PATH discovery after the shared repair; do not execute the legacy plan.
+        let which = std::process::Command::new("/bin/bash")
             .arg("-lc")
-            .arg("which -a cys")
+            .arg("which -a wave")
             .output()
             .ok();
         let entries = which
@@ -923,17 +1010,17 @@ fn install_cli_to_path() -> Result<InstallCliReport, String> {
             .map(|o| parse_which_a(&String::from_utf8_lossy(&o.stdout)))
             .unwrap_or_default();
         let effective_cys = entries.first().cloned();
-        let target_cys = format!("{target_dir}/cys");
+        let target_cys = format!("{target_dir}/wave");
         let shadowed_by = match &effective_cys {
-            Some(p) if *p != target_cys => Some(p.clone()),
+            Some(p) if *p != target_cys && p != "/opt/homebrew/bin/wave" => Some(p.clone()),
             _ => None,
         };
 
         let mut warnings = plan.warnings;
         if let Some(sh) = &shadowed_by {
             warnings.push(format!(
-                "PATH 선행 위치의 다른 cys가 우선합니다: {sh} \
-(예: dev deploy_gate의 /opt/homebrew/bin). 새로 설치한 {target_cys}는 그 뒤에 있습니다."
+                "wave는 PATH 선행 위치의 다른 설치가 우선합니다: {sh} \
+확인한 명령 연결 {target_cys}는 그 뒤에 있습니다."
             ));
         }
 
@@ -941,8 +1028,8 @@ fn install_cli_to_path() -> Result<InstallCliReport, String> {
             ok: true,
             target_dir: target_dir.to_string(),
             cys_link: target_cys,
-            cysd_link: format!("{target_dir}/cysd"),
-            source_cys: plan.cys_src.to_string_lossy().to_string(),
+            cysd_link: format!("{target_dir}/waved"),
+            source_cys: wave_src.to_string_lossy().to_string(),
             effective_cys,
             shadowed_by,
             warnings,
@@ -1035,7 +1122,14 @@ fn take_update_preserved_notices(state: State<PreservedNotices>) -> Vec<String> 
 ///  ② 자동복귀 — 팩 반영 성공 시에만 조직 전체(본부+등록 부서) 노드를 복원(T2 spawn_org_restore).
 ///     init-pack 실패 시 마커·스탬프를 보존하고 복원을 보류해, 노드가 구 디렉티브로 조용히 각성하는
 ///     침묵 실패를 막는다(적대검증 fatal). restore는 멱등(run_restore).
-fn maybe_apply_pending_update(app: &AppHandle) {
+/// Returns true only when the org restore was started (its restore-progress events follow).
+fn maybe_apply_pending_update(app: &AppHandle) -> bool {
+    // The GUI must durably remap its saved layout before acknowledging this completed handover.
+    match cys::rename_handover::read_marker() {
+        Ok(Some(_)) => return false,
+        Err(error) => { let _ = app.emit("update-error", error); return false; },
+        Ok(None) => (),
+    }
     let marker = pending_restore_path();
     let stamp_path = last_app_version_path();
     let current = env!("CARGO_PKG_VERSION");
@@ -1046,11 +1140,11 @@ fn maybe_apply_pending_update(app: &AppHandle) {
     // 기존 설치 증거 — 디스크 팩 버전 파일(check_pack_update:1711·install_pack_update:1895와 동일 SOT).
     let prior_state = cys::pack::pack_dir().join(".pack-version").exists();
     match decide_pending_update(marker_exists, stamp.as_deref(), current, prior_state) {
-        PendingUpdatePlan::Skip => return,
+        PendingUpdatePlan::Skip => return false,
         PendingUpdatePlan::RecordStampOnly => {
             // 최초 설치 — 복원할 topology가 없다. 스탬프만 기록해 다음 재시작을 정상상태로 만든다.
             let _ = std::fs::write(&stamp_path, current);
-            return;
+            return false;
         }
         PendingUpdatePlan::Apply => {}
     }
@@ -1066,7 +1160,7 @@ fn maybe_apply_pending_update(app: &AppHandle) {
             "update-error",
             "새 팩 반영(init-pack) 실패 — 노드 복원 보류, 다음 재시작에 재시도",
         );
-        return;
+        return false;
     }
     if let Ok(out) = pack_output {
         emit_pack_preserved_notices(app, &String::from_utf8_lossy(&out.stdout));
@@ -1082,6 +1176,7 @@ fn maybe_apply_pending_update(app: &AppHandle) {
     let _ = std::fs::remove_file(&marker);
     let _ = std::fs::write(&stamp_path, current);
     spawn_org_restore(app.clone());
+    true
 }
 
 /// (T2) `cys restore --include-master`를 사이드카로 1회 실행한다. socket=Some이면 그 부서 소켓
@@ -1565,7 +1660,7 @@ async fn maybe_autoregister_launchd() -> bool {
     // 번들 동봉 cysd 절대경로(ensure_daemon과 동일 규칙) — 형제 cysd가 없으면 보류.
     let daemon = match std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join("cysd")))
+        .and_then(|p| p.parent().map(|d| d.join("waved")))
     {
         Some(p) if p.exists() => p,
         _ => return false,
@@ -1621,7 +1716,7 @@ fn onboard_init_pack(cys: &std::path::Path) -> bool {
 /// ② `cys daemon install`: 기존 schtasks ONLOGON 자동기동 등록 재사용(cys.rs:3139·/F 멱등).
 #[cfg(windows)]
 fn maybe_windows_onboard() -> bool {
-    let cys = resolve_sidecar("cys.exe");
+    let cys = resolve_sidecar("wave.exe");
     let init_ok = onboard_init_pack(&cys);
     // ② autostart 등록 (기존 cys daemon install = schtasks ONLOGON 재사용, /F 멱등)
     let mut reg = std::process::Command::new(&cys);
@@ -1651,7 +1746,7 @@ fn maybe_windows_onboard() -> bool {
 /// 팩+Claude hook만 등록한다. init-pack 멱등 — 기존 사용자에 재실행돼도 무해(already→skip·.bak-cys 불변).
 #[cfg(target_os = "macos")]
 fn maybe_macos_onboard() -> bool {
-    let cys = resolve_sidecar("cys");
+    let cys = resolve_sidecar("wave");
     onboard_init_pack(&cys)
 }
 
@@ -1700,6 +1795,9 @@ async fn ensure_daemon() -> Result<(), String> {
     if connect().await.is_ok() {
         return Ok(());
     }
+    if cys::rename_handover::autostart_blocked(&default_socket())? {
+        return Err("업데이트 이름 변경이 진행 중입니다. 복원이 끝날 때까지 기다려 주세요.".into());
+    }
     #[cfg(target_os = "macos")]
     if cys::launchd::is_loaded() {
         // ponytail: 반복 연결 실패가 launchd를 계속 재시작하지 않도록 앱 실행당 세 번만 kickstart한다.
@@ -1713,7 +1811,7 @@ async fn ensure_daemon() -> Result<(), String> {
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-    let daemon_name = if cfg!(windows) { "cysd.exe" } else { "cysd" };
+    let daemon_name = if cfg!(windows) { "waved.exe" } else { "waved" };
     let candidate = exe_dir.as_ref().map(|d| d.join(daemon_name));
     let program = match candidate {
         Some(p) if p.exists() => p,
@@ -1957,10 +2055,22 @@ fn read_dept_catalog() -> Result<Value, String> {
 /// ★WP-3(BOOTSTRAP_HARDENING): 소켓 문자열에서 부서명 파생 — cys-dept-<name> 슬러그
 /// (unix `.../cys-dept-<n>/cys.sock` · pipe `\\.\pipe\cys-dept-<n>` 공통 · cys-dept D8 파생과 동일 규약).
 fn dept_name_from_socket(sock: &str) -> Option<String> {
-    let norm = sock.replace('\\', "/");
-    norm.split('/')
-        .find_map(|seg| seg.strip_prefix("cys-dept-").map(str::to_string))
-        .filter(|n| !n.is_empty())
+    // Q3: same anchored parse as the shared classifier — never a dept-like user/ancestor folder.
+    cys::dept_socket_name(std::path::Path::new(sock))
+}
+
+#[cfg(test)]
+mod dept_name_from_socket_tests {
+    #[test]
+    fn dept_name_comes_only_from_the_anchored_department_endpoint() {
+        // Q3: a primary socket under a user folder must never name a department (wrong tombstone target).
+        assert_eq!(super::dept_name_from_socket("/home/cys-dept-kim/.local/state/cys/cys.sock"), None);
+        assert_eq!(super::dept_name_from_socket("/home/wave-dept-kim/.local/state/cys/cys.sock"), None);
+        assert_eq!(super::dept_name_from_socket("/Users/user/.local/state/cys-dept-dev/cys.sock").as_deref(), Some("dev"));
+        assert_eq!(super::dept_name_from_socket(r"\\.\pipe\cys-dept-3").as_deref(), Some("3"));
+        assert_eq!(super::dept_name_from_socket("/tmp/x/cys-dept-dept-3.sock").as_deref(), Some("dept-3"));
+        assert_eq!(super::dept_name_from_socket(r"\\.\pipe\cys"), None);
+    }
 }
 
 /// ★WP-3 의도 선기록: 부서 삭제 클릭의 **제1행위** — base 데몬에 dept 묘비를 기록한다(견고
@@ -1988,7 +2098,7 @@ async fn dept_tombstones() -> Result<Vec<String>, String> {
 /// base 데몬 대상(부서 오염 불가 — 소켓 격리와 동일 축). 생성된 surface는 GUI 자동입양이 수용.
 #[tauri::command]
 async fn start_master() -> Result<(), String> {
-    let cys = resolve_sidecar("cys");
+    let cys = resolve_sidecar("wave");
     let out = tokio::task::spawn_blocking(move || {
         let mut cmd = std::process::Command::new(&cys);
         inject_runtime_path(&mut cmd);
@@ -2050,7 +2160,7 @@ async fn promote_pending_ceo() -> Result<String, String> {
 /// claim도 그 부서 레지스트리 대상(데몬당 살아있는 마스터 1명 규칙은 부서별 독립 적용).
 #[tauri::command]
 async fn start_dept_master(socket: String) -> Result<(), String> {
-    let cys = resolve_sidecar("cys");
+    let cys = resolve_sidecar("wave");
     let out = tokio::task::spawn_blocking(move || {
         let mut cmd = std::process::Command::new(&cys);
         inject_runtime_path(&mut cmd);
@@ -2685,6 +2795,8 @@ fn main() {
             rotate_daemon,
             install_pack_update,
             take_update_preserved_notices,
+            take_rename_surface_map,
+            ack_rename_surface_map,
             launch_dept_daemon,
             allocate_dept_daemon,
             stop_dept_daemon,
@@ -2698,6 +2810,15 @@ fn main() {
         .setup(|app| {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                let settings_file=match user_settings_file(&handle) {
+                    Ok(path)=>path,
+                    Err(error)=>{ if let Ok(mut retained)=STARTUP_ERROR.lock(){*retained=Some(error.clone());} let _=handle.emit("daemon-error",error);return; },
+                };
+                if let Err(error) = rename_migration::run(settings_file).await {
+                    if let Ok(mut retained) = STARTUP_ERROR.lock() { *retained = Some(error.clone()); }
+                    let _ = handle.emit("daemon-error", error);
+                    return;
+                }
                 // ★온보딩 게이트(v4) — GUI 전용 완료 마커(.gui-onboarded) 기준. 팩 마커(.pack-version)
                 // 기준이던 v3는 CLI autostart·잔존 schtasks 등으로 cysd가 GUI보다 먼저 돈 머신에서
                 // 게이트가 선점돼 ~/.claude hook이 영구 미설치됐다(0.12.52 cys-neo 실사고 — "너는
@@ -2748,9 +2869,11 @@ fn main() {
                 }
                 if let Err(e) = result {
                     eprintln!("[cys-app] daemon connection failed: {e}");
+                    if let Ok(mut error) = STARTUP_ERROR.lock() { *error = Some(DAEMON_CONNECTION_ERROR.into()); }
                     let _ = handle.emit("daemon-error", DAEMON_CONNECTION_ERROR);
                     return;
                 }
+                STARTUP_READY.store(true, std::sync::atomic::Ordering::Release);
                 let _ = handle.emit("daemon-ready", ());
                 // event-forwarder를 먼저 띄워 init-pack 블로킹이 양방향 이벤트 파이프를 막지 않게 한다(반쪽 부팅 방지).
                 spawn_event_forwarder(handle.clone(), default_socket());
@@ -2787,6 +2910,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     #[test]
+    #[cfg(target_os = "macos")]
     #[ignore = "run through scripts/tests/test_bundle_python_seal.py with a copied runtime"]
     fn bundled_python_launch_probe() {
         let python = std::env::var_os("WAVE_TEST_PYTHON").expect("copied bundled Python required");
@@ -3242,6 +3366,22 @@ ln -sf '/Applications/cys.app/Contents/MacOS/cysd' '/usr/local/bin/cysd'"
     fn classify_bundle_dir_distinguishes_canonical_translocated_backup_nonstandard() {
         use std::path::Path;
         assert_eq!(
+            classify_bundle_dir(Path::new("/Applications/Wave Terminal.app/Contents/MacOS")),
+            BundleKind::Canonical
+        );
+        assert_eq!(
+            classify_bundle_dir(Path::new("/Users/x/Applications/Wave Terminal.app/Contents/MacOS")),
+            BundleKind::Canonical
+        );
+        assert_eq!(
+            classify_bundle_dir(Path::new("/Applications/Wave Terminal.app.bak-044/Contents/MacOS")),
+            BundleKind::Backup
+        );
+        assert_eq!(
+            classify_bundle_dir(Path::new("/Applications/Wave Terminal.app.prev-210050/Contents/MacOS")),
+            BundleKind::Backup
+        );
+        assert_eq!(
             classify_bundle_dir(Path::new("/Applications/cys.app/Contents/MacOS")),
             BundleKind::Canonical
         );
@@ -3314,6 +3454,10 @@ ln -sf '/Applications/cys.app/Contents/MacOS/cysd' '/usr/local/bin/cysd'"
             "/usr/local/bin"
         ).expect("정규 번들은 진행");
         assert!(plan.warnings.iter().all(|w| !w.contains("표준 위치")));
+        for path in ["/Applications/Wave Terminal.app/Contents/MacOS", "/Users/x/Applications/Wave Terminal.app/Contents/MacOS"] {
+            let canonical = plan_cli_install(std::path::Path::new(path), "/usr/local/bin").unwrap();
+            assert!(canonical.warnings.is_empty());
+        }
         // osascript 인자는 do shell script + 승격 + 멱등 스크립트를 감싼다(AppleScript 큰따옴표 리터럴)
         assert!(plan.osascript_arg.starts_with("do shell script \""));
         assert!(plan.osascript_arg.ends_with("\" with administrator privileges"));

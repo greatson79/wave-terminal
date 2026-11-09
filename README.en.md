@@ -476,7 +476,7 @@ cargo build --release
 ./target/release/cysd &                       # daemon (duplicate boot auto-refused)
 
 cd ui && sh build.sh                           # frontend bundle (bun)
-cargo build -p cys-app                         # dev run: ./target/debug/cys-app
+cargo build -p wave-app                        # dev run: ./target/debug/wave-app
 bun x @tauri-apps/cli build                    # distribution bundle
 ```
 

@@ -13,6 +13,10 @@ pub mod pack;
 pub mod packsig;
 pub mod overrides;
 pub mod wire;
+pub mod rename_handover;
+pub mod restore_key;
+pub mod update_snapshot;
+pub mod windows_autostart;
 #[cfg(target_os = "macos")]
 pub mod launchd;
 
@@ -513,16 +517,29 @@ pub fn dept_socket_path(name: &str) -> PathBuf {
     }
 }
 
+/// Department name of a dept endpoint, matched only at the anchored department layout (Q3 · Theo 0207):
+/// Windows pipe `\\.\pipe\cys-dept-<name>` (final segment) · Unix runtime dir `cys-dept-<name>/cys.sock`
+/// (immediate parent + exact basename) · leaf `cys-dept-<name>.sock`. Never any other path part; lexical only.
+pub fn dept_socket_name(socket_path: &std::path::Path) -> Option<String> {
+    const PIPE: &str = r"\\.\pipe\";
+    let text = socket_path.to_string_lossy();
+    let named = |value: &str| value.strip_prefix("cys-dept-")
+        .filter(|name| !name.is_empty() && !name.contains(['/', '\\'])).map(str::to_string);
+    if let Some(leaf) = text.get(..PIPE.len()).filter(|p| p.eq_ignore_ascii_case(PIPE)).map(|_| &text[PIPE.len()..]) {
+        return named(leaf);
+    }
+    let mut parts = text.rsplit(['/', '\\']);
+    let leaf = parts.next()?;
+    if leaf == "cys.sock" { return parts.next().and_then(named); }
+    leaf.strip_suffix(".sock").and_then(named)
+}
+
 /// 이 소켓/파이프 경로가 부서(dept) 데몬의 것인가 — 부서 규약 `cys-dept-<name>`(dept_socket_path와 정합).
 /// 채널은 메인 cysd 단독 소유(DESIGN §2.5)이므로 부서 데몬의 브리지 스폰을 구조적으로 거부하는 데 쓴다.
-/// 판별: 경로 컴포넌트(unix 부모 디렉토리 `cys-dept-<name>` / windows 파이프명 `cys-dept-<name>`) 중
-/// `cys-dept-` 접두 이름이 있으면 부서. 메인 데몬(슬러그 `cys`·`cys.sock`)은 오판하지 않는다
-/// (`cys`는 `cys-dept-` 접두가 아님 — 오탐 시 채널 전면 불능이라 접두를 정확히 요구).
+/// 판별은 `dept_socket_name`의 고정 위치(부서 런타임 폴더+`cys.sock` / 잎 `.sock` / 파이프 잎)만 본다 —
+/// 사용자 폴더 등 다른 경로 조각에 `cys-dept-`가 있어도 메인 데몬을 부서로 오판하지 않는다(Q3).
 pub fn is_dept_socket(socket_path: &std::path::Path) -> bool {
-    socket_path
-        .to_string_lossy()
-        .split(|c| c == '/' || c == '\\')
-        .any(|comp| comp.starts_with("cys-dept-"))
+    dept_socket_name(socket_path).is_some()
 }
 
 /// Parse a surface reference: "surface:31", "31", or 31 → 31.
@@ -649,6 +666,36 @@ mod tests {
         assert!(!is_dept_socket(Path::new("/x/.local/state/cys/cys.sock")), "메인 unix");
         assert!(!is_dept_socket(Path::new(r"\\.\pipe\cys")), "메인 windows");
         assert!(!is_dept_socket(Path::new("/tmp/cys_chan_test_1_tag/cysd.sock")), "테스트 임시");
+    }
+
+    #[test]
+    fn is_dept_socket_is_anchored_to_the_department_layout() {
+        // Q3 (Theo 0207): exact dept identity — dept runtime dir + anchored basename / pipe leaf, never any path part.
+        let dept = [
+            "/Users/user/.local/state/cys-dept-dev/cys.sock",       // real Mac/Unix dept socket
+            "/private/tmp/cys-dept-chtest-1-t/cys.sock",           // channels test fixture shape
+            r"\\.\pipe\cys-dept-3",                                // Windows dept pipe
+            r"\\.\PIPE\cys-dept-3",                                // pipe namespace is case-insensitive
+            "/tmp/x/cys-dept-dept-3.sock",                         // anchored leaf form (pack convention)
+        ];
+        for path in dept { assert!(is_dept_socket(Path::new(path)), "dept must match: {path}"); }
+        let primary = [
+            "/home/cys-dept-x/.local/state/cys/cys.sock",         // user folder named cys-dept-x
+            "/home/wave-dept-x/.local/state/cys/cys.sock",        // user folder named wave-dept-...
+            "/private/tmp/cys-dept-x/run/cys/cys.sock",            // dept-like ancestor, not the runtime dir
+            "/Users/user/.local/state/cys-dept-dev/other.sock",     // dept dir but not the anchored basename
+            "/Users/user/.local/state/cys-dept-/cys.sock",          // empty dept name
+            "/tmp/x/cys-dept-.sock",                               // empty leaf name
+            r"C:\Users\cys-dept-a\pipes\cys",                      // not the pipe namespace
+            r"\\.\pipe\cys-dept-a\extra",                           // pipe leaf must be the final segment
+            r"\\.\pipe\cys",                                       // primary pipe
+            "/Users/user/.local/state/cys/cys.sock",                // primary socket (control)
+        ];
+        for path in primary { assert!(!is_dept_socket(Path::new(path)), "primary must not match: {path}"); }
+        assert_eq!(dept_socket_name(Path::new("/Users/user/.local/state/cys-dept-dev/cys.sock")).as_deref(), Some("dev"));
+        assert_eq!(dept_socket_name(Path::new(r"\\.\pipe\cys-dept-3")).as_deref(), Some("3"));
+        assert_eq!(dept_socket_name(Path::new("/tmp/x/cys-dept-dept-3.sock")).as_deref(), Some("dept-3"));
+        assert_eq!(dept_socket_name(Path::new("/home/cys-dept-x/.local/state/cys/cys.sock")), None);
     }
 
     #[test]

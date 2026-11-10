@@ -1,0 +1,124 @@
+name: Hotfix live Windows entry check (login STUBBED)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['hotfix/**']
+
+permissions:
+  contents: read
+
+jobs:
+  live-check:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        cmd: [new, old, winfix]
+    steps:
+      - name: Prepare fresh profile and Claude login stub
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1) {
+            throw 'Native Windows PowerShell 5.1 is required'
+          }
+          $minimum = [string](Invoke-RestMethod -UseBasicParsing https://github.com/greatson79/wave-terminal/releases/download/v0.3.3/steps.json).tooling.claude_code_min_version
+          if ($minimum -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid Claude minimum pin' }
+          $evidence = Join-Path $env:RUNNER_TEMP 'hotfix-live-${{ matrix.cmd }}'
+          $profile = Join-Path $env:RUNNER_TEMP ('live-home-' + [guid]::NewGuid().ToString('N'))
+          $stubs = Join-Path $profile 'stubs'
+          New-Item -ItemType Directory -Force -Path $evidence, $stubs | Out-Null
+          $stub = @(
+            '@echo off',
+            'if "%~1"=="--version" (',
+            "  echo $minimum",
+            '  exit /b 0',
+            ')',
+            'if "%~1 %~2"=="auth status" exit /b 0',
+            'echo Claude is STUBBED; unexpected invocation: %* 1>&2',
+            'exit /b 99'
+          ) -join "`r`n"
+          [IO.File]::WriteAllText((Join-Path $stubs 'claude.cmd'), $stub + "`r`n", [Text.Encoding]::ASCII)
+          $stubs | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          @(
+            "USERPROFILE=$profile",
+            "HOME=$profile",
+            "WAVE_HOME=$(Join-Path $profile '.wave')",
+            'WAVE_NO_PROGRESS=1'
+          ) | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # WAVE_NO_PROGRESS disables both progress and help: bootstrap.ps1:130,1673; lib/install-help.ps1:154.
+          @{command='${{ matrix.cmd }}'; minimum=$minimum; login='STUBBED, auth status always exits 0'; profile=$profile; commit=$env:GITHUB_SHA} |
+            ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $evidence 'setup.json')
+      - name: Run exact live learner command (20-minute cap; later failures recorded)
+        id: live
+        shell: powershell
+        timeout-minutes: 20
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $evidence = Join-Path $env:RUNNER_TEMP 'hotfix-live-${{ matrix.cmd }}'
+          Start-Transcript -Path (Join-Path $evidence 'command.log')
+          try {
+            Write-Host "Claude command: $((Get-Command claude).Source); LOGIN IS STUBBED"
+            if ('${{ matrix.cmd }}' -eq 'new') {
+              iex ((irm https://waveainetworks.com/win) -replace '^[^&]*','')
+            } elseif ('${{ matrix.cmd }}' -eq 'old') {
+              irm https://waveainetworks.com/win | iex
+            } else {
+              irm waveainetworks.com/winfix.txt | iex
+            }
+            Write-Host "Learner command returned; LASTEXITCODE=$LASTEXITCODE"
+          } catch {
+            $_ | Out-String | Set-Content -Encoding UTF8 (Join-Path $evidence 'command-error.txt')
+            Write-Host "Learner command failed; the separate S04 gate decides: $_"
+          } finally {
+            Stop-Transcript
+          }
+          exit 0
+      - name: Gate only S04 completed and step 6 started
+        if: always()
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $evidence = Join-Path $env:RUNNER_TEMP 'hotfix-live-${{ matrix.cmd }}'
+          foreach ($file in @('install.log', 'install-state.json')) {
+            $source = Join-Path $env:WAVE_HOME $file
+            if (Test-Path -LiteralPath $source) { Copy-Item -LiteralPath $source -Destination (Join-Path $evidence $file) }
+          }
+          $logPath = Join-Path $evidence 'install.log'
+          $statePath = Join-Path $evidence 'install-state.json'
+          if (-not (Test-Path -LiteralPath $logPath) -or -not (Test-Path -LiteralPath $statePath)) {
+            throw 'Missing real install.log or install-state.json; S04 gate cannot pass'
+          }
+          $lines = @(Get-Content -LiteralPath $logPath -Encoding UTF8)
+          $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
+          # Bootstrap logs step starts; completion is persisted in state, not fabricated in install.log.
+          $startWord = [string][char]0xC2DC + [char]0xC791
+          $five = @($lines | Select-String -Pattern ('\[5/10\].*' + $startWord))
+          $six = @($lines | Select-String -Pattern ('\[6/10\].*' + $startWord))
+          $s04 = $state.steps.S04_INSTALL_LINK
+          if ($five.Count -eq 0 -or $six.Count -eq 0 -or $five[0].LineNumber -ge $six[0].LineNumber) {
+            throw 'Missing ordered install.log step 5 start -> step 6 start'
+          }
+          if ($s04.status -ne 'passed' -or -not $s04.completed_at) {
+            throw 'S04_INSTALL_LINK did not complete successfully in install-state.json'
+          }
+          $laterFailures = @($state.steps.PSObject.Properties | Where-Object {
+            $_.Name -match '^S0[5-9]_' -and $_.Value.status -in @('failed', 'skipped_with_reason')
+          } | ForEach-Object { @{step=$_.Name; status=$_.Value.status; error_id=$_.Value.error_id} })
+          @{gate='PASS'; login='STUBBED'; command_outcome='${{ steps.live.outcome }}'; step5_log_line=$five[0].Line; step6_log_line=$six[0].Line; s04_status=$s04.status; s04_completed_at=$s04.completed_at; later_failures=$laterFailures} |
+            ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 (Join-Path $evidence 'gate.json')
+          Write-Host "GATE PASS: S04_INSTALL_LINK=$($s04.status), completed_at=$($s04.completed_at)"
+          Write-Host $five[0].Line
+          Write-Host $six[0].Line
+          Write-Host "Later-step failures (outside this gate): $($laterFailures | ConvertTo-Json -Compress)"
+      - name: Upload live check evidence (login STUBBED)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hotfix-live-${{ matrix.cmd }}-${{ github.sha }}
+          path: ${{ runner.temp }}/hotfix-live-${{ matrix.cmd }}/
+          if-no-files-found: error

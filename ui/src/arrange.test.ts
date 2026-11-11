@@ -49,7 +49,7 @@ test("autoGrid forwards the saved preference to the pure layout module", () => {
 test("saved trees are protected until arrange is explicitly requested", () => {
   const restore = source.slice(source.indexOf("workspaces = saved.workspaces;"), source.indexOf("groups = Array.isArray(saved.groups)"));
   const saved = { workspaces: [{ tree: { type: "pane", sid: 1 }, manual: false }, { tree: { type: "pane", sid: 2 }, manual: true }] };
-  const restored = new Function("saved", `let workspaces; ${restore} return workspaces;`)(saved);
+  const restored = new Function("saved", "preserveSavedLayoutOnUpgrade", `let workspaces; ${restore} return workspaces;`)(saved, true);
   expect(restored.map((ws: any) => ws.manual)).toEqual([true, true]);
   expect(restored[0].tree).toBe(saved.workspaces[0].tree);
   const ws = { tree: saved.workspaces[0].tree, manual: true };
@@ -70,4 +70,47 @@ test("explicit arrange releases a saved tree and renders the selected automatic 
   expect(ws.manual).toBe(false);
   expect(ws.tree).toBe(automatic);
   expect(rendered).toBe(true);
+});
+
+function restoreWithSettings(raw: string | null) {
+  const storage = new Map<string, string>();
+  if (raw !== null) storage.set("settings", raw);
+  const initialize = new Function("localStorage", "SETTINGS_KEY", "readSettings",
+    block("const preserveSavedLayoutOnUpgrade", "function applyUsageSettings()") + "return preserveSavedLayoutOnUpgrade;");
+  const localStorage = { getItem: (key: string) => storage.get(key) ?? null,
+    setItem: (key: string, value: string) => storage.set(key, value) };
+  const restore = source.slice(source.indexOf("workspaces = saved.workspaces;"), source.indexOf("groups = Array.isArray(saved.groups)"));
+  const saved = { workspaces: [
+    { tree: { type: "pane", sid: 1 }, manual: false },
+    { tree: { type: "pane", sid: 2 }, manual: true },
+    { tree: { type: "pane", sid: 3 } },
+  ] };
+  const migrating = initialize(localStorage, "settings", readSettings);
+  const restored = new Function("saved", "preserveSavedLayoutOnUpgrade", `let workspaces; ${restore} return workspaces;`)(saved, migrating);
+  return { restored, stored: storage.get("settings")! };
+}
+
+test("first load without arrange protects saved trees once and persists the migration", () => {
+  const first = restoreWithSettings(JSON.stringify({ ver: 1, layout: { sidebarSide: "right" } }));
+  expect(first.restored.map((ws: any) => ws.manual)).toEqual([true, true, true]);
+  expect(JSON.parse(first.stored).layout.arrange).toBe("columns");
+  expect(JSON.parse(first.stored).layout.sidebarSide).toBe("right");
+  const later = restoreWithSettings(first.stored);
+  expect(later.restored.map((ws: any) => ws.manual)).toEqual([false, true, undefined]);
+});
+
+for (const arrange of ["columns", "grid"]) {
+  test(`${arrange} users retain stored manual values on subsequent loads`, () => {
+    const result = restoreWithSettings(JSON.stringify({ ver: 1, layout: { arrange } }));
+    expect(result.restored.map((ws: any) => ws.manual)).toEqual([false, true, undefined]);
+    expect(JSON.parse(result.stored).layout.arrange).toBe(arrange);
+  });
+}
+
+test("missing or damaged settings safely use the first-load migration", () => {
+  for (const raw of [null, "{"]) {
+    const first = restoreWithSettings(raw);
+    expect(first.restored.map((ws: any) => ws.manual)).toEqual([true, true, true]);
+    expect(restoreWithSettings(first.stored).restored.map((ws: any) => ws.manual)).toEqual([false, true, undefined]);
+  }
 });

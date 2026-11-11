@@ -1407,6 +1407,11 @@ function applyZoom(delta: number | null) {
 
 // 터미널 폰트 선택(cys-font-face · 오너 요청 2026-07-12) — 선택 폰트를 기본 스택 앞에 합성
 // (composeFontFamily · CJK 폴백 보존), null=기본. 폰트 메트릭 변화 → 셀 재계산(applyZoom과 동일 패턴).
+// Capture before saveSettings adds arrange; only the upgrade start protects old geometry.
+const preserveSavedLayoutOnUpgrade = (() => {
+  try { return JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "null")?.layout?.arrange === undefined; }
+  catch { return true; }
+})();
 let settings = readSettings(localStorage.getItem(SETTINGS_KEY), localStorage.getItem("cys-bg-color"), localStorage.getItem("cys-font-face"));
 const autoRemoveExited = localStorage.getItem("cys-auto-remove-exited") !== "0";
 const preserveEmptyWorkspace = localStorage.getItem("cys-preserve-empty-ws") !== "0";
@@ -4913,7 +4918,9 @@ async function start() {
       savedLayout = saved;
       renameRevision = typeof saved.renameRevision === "string" ? saved.renameRevision : undefined;
       workspaces = saved.workspaces;
-      for (const ws of workspaces) if (ws.tree) ws.manual = true; // 저장 배치는 정렬을 누를 때까지 보존
+      if (preserveSavedLayoutOnUpgrade) {
+        for (const ws of workspaces) if (ws.tree) ws.manual = true; // 업그레이드 첫 실행만 저장 배치 보존
+      }
       groups = Array.isArray(saved.groups) ? saved.groups : []; // 06: 하위호환 — 옛 저장본엔 groups 없음
       activeWs = saved.active ?? 0;
       wsCounter = saved.counter ?? 1;

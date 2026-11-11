@@ -153,20 +153,45 @@ fi
 # 본부장 = 새 역할이 아니다. role=worker 좌석 중 제목의 「·」 조각이 「본부장」으로 시작하는 좌석만
 # 워커 지침 뒤에 HEAD_BRIEF.md 를 **덧붙여** 받는다(판별 방식 = 조직 hook 과 동일: 내 좌석 행의 제목을 ·로 쪼갠다).
 # CYS_ROLE 은 기동 때 요청한 역할(worker)이라 worker-2 같은 번호 변형도 여기서는 worker 다.
-# 판별 불가(cys 없음·list 실패·내 행 없음)이거나 파일이 없으면 아무것도 출력하지 않는다 = 평범한 워커와 바이트 동일.
-if [ "$CYS_ROLE" = "worker" ] && [ -f "$JARVIS_DIR/directives/HEAD_BRIEF.md" ] && [ -n "$CYS_PY" ] \
-   && command -v cys >/dev/null 2>&1; then
-  IS_HEAD=$(cys list 2>/dev/null | CYS_REF="${CYS_SURFACE_REF:-surface:${CYS_SURFACE_ID}}" "$CYS_PY" -c 'import os, sys
+# 제목을 읽을 수 있는 길은 `cys list` 하나다(`cys identify` 는 제목을 주지 않는다). 그 출력 계약 = src/bin/cys.rs:1534-1546:
+#   좌석 TAB role= TAB pid= TAB exited= TAB 제목 TAB cwd TAB label=   (7열). 열 모양이 다르면 그 행을 믿지 않는다.
+# ★stdout 은 평범한 워커와 **바이트 동일**하게 둔다(주입 지침 불변). 제목을 판별할 수 없으면(cys 없음 · list 비0 종료(부분 출력
+#   포함) · 내 행 없음 · 깨진/열 부족 행) 본부장이어도 평범한 워커와 같은 stdout 이 나가고, **stderr 에 한 줄**로 드러낸다
+#   (본부장인지 모르는 좌석이라 stdout 에 쓰면 평범한 워커 출력이 바뀐다 — 그 둘이 부딪히면 C2 를 지키고 stderr 를 택한다).
+if [ "$CYS_ROLE" = "worker" ]; then
+  HEAD_STATE="indeterminate: cys 또는 python 없음"
+  if [ -n "$CYS_PY" ] && command -v cys >/dev/null 2>&1; then
+    LIST_OUT=$(cys list 2>/dev/null); LIST_RC=$?
+    if [ "$LIST_RC" -ne 0 ]; then
+      HEAD_STATE="indeterminate: cys list exit $LIST_RC"
+    else
+      HEAD_STATE=$(printf '%s\n' "$LIST_OUT" | CYS_REF="${CYS_SURFACE_REF:-surface:${CYS_SURFACE_ID}}" "$CYS_PY" -c 'import os, sys
 ref = os.environ.get("CYS_REF", "")
+state = "indeterminate: 내 좌석(" + ref + ") 행 없음"
 for line in sys.stdin.buffer.read().decode("utf-8", "replace").splitlines():
     f = line.split("\t")
-    if len(f) > 4 and f[0] == ref:
-        print("1" if any(p.strip().startswith("본부장") for p in f[4].split("·")) else "0")
-        break
+    if f[0] != ref:
+        continue
+    if len(f) != 7 or not (f[1].startswith("role=") and f[2].startswith("pid=") and f[3].startswith("exited=") and f[6].startswith("label=")):
+        state = "indeterminate: 내 좌석 행이 7열 형식이 아님"
+    else:
+        state = "head" if any(p.strip().startswith("본부장") for p in f[4].split("·")) else "plain"
+    break
+print(state)
 ' 2>/dev/null)
-  if [ "$IS_HEAD" = "1" ]; then
-    echo; echo "■ 본부장 지침 ($JARVIS_DIR/directives/HEAD_BRIEF.md — 이 좌석의 제목에 「본부장」이 있다)"
-    cat "$JARVIS_DIR/directives/HEAD_BRIEF.md"
+      [ -n "$HEAD_STATE" ] || HEAD_STATE="indeterminate: python 실패"
+    fi
   fi
+  case "$HEAD_STATE" in
+    head)
+      if [ -f "$JARVIS_DIR/directives/HEAD_BRIEF.md" ]; then
+        echo; echo "■ 본부장 지침 ($JARVIS_DIR/directives/HEAD_BRIEF.md — 이 좌석의 제목에 「본부장」이 있다)"
+        cat "$JARVIS_DIR/directives/HEAD_BRIEF.md"
+      else
+        echo "[session-start] 본부장 제목 확인 불가 — 제목은 본부장인데 $JARVIS_DIR/directives/HEAD_BRIEF.md 가 없다" >&2
+      fi ;;
+    plain) : ;;
+    *) echo "[session-start] 본부장 제목 확인 불가 (${HEAD_STATE#indeterminate: }) — 이 좌석이 본부장이어도 HEAD_BRIEF.md 를 주입하지 못했다" >&2 ;;
+  esac
 fi
 exit 0

@@ -136,7 +136,7 @@ cys daemon uninstall
 > **Goal / verify**가 붙어 있어, "사람용 한 줄"과 달리 워커가 자율로 실행·검증합니다.
 > 위 🚧 설치 경계(INST-DENY-01~04)는 이 스텝에서도 그대로 유효합니다.
 
-**Goal(부트 완료의 단일 정의)**: 4종 의무 노드(worker·CSO·reviewer×2)가 생존하고, 프리플라이트가
+**Goal(부트 완료의 단일 정의)**: 필수 좌석(master·CSO·워커)이 생존하고, 프리플라이트가
 GREEN이며, 역할 주소가 등록된 상태.
 
 ```sh
@@ -148,9 +148,9 @@ cys status                                   # 전 노드 1콜 관제 보드
 cys launch-agent --role master --agent claude  # 역할 에이전트 기동 + 디렉티브 자동 주입
 #   verify: launch-agent가 ①surface 생성 ②CLI 기동 ③절대지침 stdin 주입 ④레지스트리 등록 완료
 
-# 🤖 [AGENT] Step 3 — 일괄 부트 (worker + reviewers)
-cys boot                                     # 설치된 CLI 자동 감지 → worker+reviewers 일괄 기동
-#   verify: python3 "${CYS_PACK_DIR:-$HOME/.cys/pack}/bin/javis_orchestra.py" check  → 4종 생존 GREEN
+# 🤖 [AGENT] Step 3 — 일괄 부트 (CSO + worker · master 포함 3좌석)
+cys boot                                     # CSO·worker 기동 · 리뷰어는 필요할 때 boot-reviewers --spawn
+#   verify: python3 "${CYS_PACK_DIR:-$HOME/.cys/pack}/bin/javis_orchestra.py" check  → 필수 자식 좌석(CSO·worker) 생존 GREEN
 #   on_fail: python3 "${CYS_PACK_DIR:-$HOME/.cys/pack}/bin/javis_preflight.py" --fix  (처방 내장 진단)
 ```
 

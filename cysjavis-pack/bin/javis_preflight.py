@@ -61,7 +61,7 @@ CONTENT_PINS = {
         ("javis_route.py", "3단 사고 라우팅 결정론 엔진 편입(사고 모드 §1)"),
         ("기억 증류", "slow 종료 게이트 증류 의무(§10)"),
         ("javis_memory.py", "증류 결정론 도구 편입(§10)"),
-        ("4종 의무 노드", "LLM orchestrating 4노드 부트 의무(앵커4-1)"),
+        ("필수 좌석(master·CSO·워커)", "LLM orchestrating 필수 좌석 부트 의무(앵커4-1)"),
         ("javis_orchestra.py", "LLM 오케스트레이션 결정론 도구 편입(앵커4)"),
         ("5-1", "라운드 루프 5-1~5-8 명문화(앵커4-5)"),
         ("맥킨지급", "라운드 완료 기준(앵커4 5-6·5-8)"),
@@ -1669,7 +1669,7 @@ class Preflight:
             return
         p = self._check_bin_tool(cid, "javis_orchestra.py")
         if p:
-            self.add(cid, PASS, "%s self-test OK (4종 노드·라운드·제약 주입 검증)" % p)
+            self.add(cid, PASS, "%s self-test OK (필수 좌석·라운드·제약 주입 검증)" % p)
 
     # ── C41 스킬 보안·품질 결정론 게이트 (SkillSpector 규칙 stdlib 포트) ──
     def c41_skillscan(self):

@@ -9,7 +9,7 @@
 1. `~/.cys/pack/directives/` 의 해당 `*_DIRECTIVE.md` 와 `~/.cys/pack/soul.md` 를 읽고 각성한다.
 2. `cys claim-role <master|worker|cso|reviewer-gemini|reviewer-codex>` 로 자기 surface를
    역할 주소로 등록한다. ⚠리뷰어는 **에이전트별 역할명**(reviewer-gemini·reviewer-codex)을
-   쓴다 — generic `reviewer`로 등록하면 orchestra check의 4종 생존 판정이 실패한다.
+   쓴다 — generic `reviewer`가 아니라 `boot-reviewers`가 알려 주는 역할명을 그대로 쓴다.
    launch-agent/boot로 기동됐다면 이미 등록돼 있다(`cys list` role 열 확인 — 재등록 금지).
 3. 마스터 선언이면 MASTER_DIRECTIVE의 **부트 시퀀스**를 수행해 구동체제를 셋팅하고 결과를 보고한다.
    부트 시퀀스 ⓪은 결정론 프리플라이트다:
@@ -26,8 +26,8 @@
 `cys events` 구독).
 
 ```bash
-cys boot                                        # 4종 의무 노드 부트(CSO·worker·agy·codex+grok 선택)
-python3 "${CYS_PACK_DIR:-$HOME/.cys/pack}/bin/javis_orchestra.py" check   # 4종 생존 결정론 확인
+cys boot                                        # CSO·worker 부트(master 포함 3좌석 · 리뷰어는 boot-reviewers --spawn)
+python3 "${CYS_PACK_DIR:-$HOME/.cys/pack}/bin/javis_orchestra.py" check   # 필수 좌석(CSO·worker) 생존 결정론 확인
 cys launch-agent --role worker --agent claude   # 노드 개별 기동(지침 자동 주입)
 cys send --to master "..."                      # 역할 주소로 push (타이핑만)
 cys send-key --to master Return                 # 전송 확정 (send 후 필수)

@@ -33,21 +33,25 @@
    role 열로 확인하고 중복 등록하지 않는다).
 ③ **복원 점검**: `~/.cys/pack/round/SESSION_STATE.md` 를 읽는다. 미완 작업·미해결 게이트가
    있으면 RECOVERY.md 프로토콜로 **복원 모드**에 진입한다(완료된 단계 반복 금지).
-④ **노드 자동 기동 (생략 금지·앵커4-1 의무)**: `cys boot` 를 실행한다 — 설치된 CLI를 자동
-   감지해 **CSO·워커(claude)·리뷰어 agy(Antigravity CLI)·리뷰어 codex 4종을 의무 기동**하고(grok은 설치 시
-   추가 리뷰어로 선택 기동) 지침 주입·프롬프트 대기까지 완료한다(미설치 CLI 자동 건너뜀 ·
-   이미 가동 중인 역할 중복 기동 없음). **"필요할 때 띄우겠다"로 미루지 마라** — 이 4종이 떠야
-   '프로젝트 실행 준비 완료'다. 주소: `--to cso`/`--to worker`/`--to reviewer-gemini`/
-   `--to reviewer-codex`(+`--to reviewer-grok`).
-   ④-b **리뷰어 감지·무구독 폴백 (멈춤 금지 · 오너 2026-06-14)**: `cys boot`가 미설치
-   리뷰어를 건너뛰면 리뷰어 0개로 check가 영영 실패해 부트가 멈춘다. 이를 막기 위해
-   `python3 "${CYS_PACK_DIR:-$HOME/.cys/pack}/bin/javis_orchestra.py" boot-reviewers` 를
-   실행한다 — agy·codex를 **결정론으로 감지(이 스크립트 출력만이 사실 · 자연어 재추론 금지)**해
-   있으면 그대로, 없거나 각성 실패면 **멈추지 말고 곧바로 Claude 대체 리뷰어(reviewer-claude-1/2)로
-   자동 폴백** 기동한다. agy·codex는 *기본 전제*일 뿐 절대 전제가 아니다(다른 임무 부여 가능).
-   대체 시 벤더 다양성이 약해지므로 REVIEWER_DIRECTIVE §6(페르소나·렌즈·익명화)으로 보완하고,
-   구동 보고(⑥)에 대체 사실을 정직히 라벨링한다.
-   **4종 생존은 결정론으로 확인한다** —
+④ **노드 자동 기동 (생략 금지)**: `cys boot` 를 실행한다 — 이미 떠 있는 master 에 더해 **CSO와 워커(claude)
+   두 좌석**을 기동한다(합계 **master 포함 3좌석**). 지침 주입·프롬프트 대기까지 완료하고(미설치 CLI 자동
+   건너뜀 · 이미 가동 중인 역할 중복 기동 없음), **"필요할 때 띄우겠다"로 미루지 마라** — 이 두 좌석이 떠야
+   '프로젝트 실행 준비 완료'다. 리뷰어는 부팅이 열지 않는다(④-b). 주소: `--to cso`/`--to worker`.
+   ④-b **리뷰어 (명시 기동 · 감지·무구독 폴백 · 멈춤 금지 · 오너 2026-06-14)**: 리뷰어는 필요할 때 연다.
+   `python3 "${CYS_PACK_DIR:-$HOME/.cys/pack}/bin/javis_orchestra.py" boot-reviewers` 는 옵션이 없으면 후보와
+   감지 결과만 출력하고(스폰 0), `boot-reviewers --spawn` 이 실제로 연다 — agy·codex를 **결정론으로
+   감지(이 스크립트 출력만이 사실 · 자연어 재추론 금지)**해 있으면 그대로, 없거나 각성 실패면 **멈추지 말고
+   곧바로 Claude 대체 리뷰어(reviewer-claude-1/2)로 자동 폴백** 기동한다. agy·codex는 *기본 전제*일 뿐
+   절대 전제가 아니다. 대체 시 벤더 다양성이 약해지므로 REVIEWER_DIRECTIVE §6(페르소나·렌즈·익명화)으로
+   보완하고, 구동 보고(⑥)에 대체 사실을 정직히 라벨링한다.
+   ④-c **부서 셋팅 (사용자가 「우리 부서는 [ … ]부서이다 …」 문장을 붙여 넣을 때)**: `wave skill show department-setup`
+   을 읽고 그대로 따른다. 부서는 지금 작업공간에 **제목이 붙은 워커 좌석 다섯 개**(본부장 · CSO 제목 · 워커 ·
+   리뷰어1 · 리뷰어2)를 `cys launch-agent --title … [--model …]` 로 더하는 일이고, 새 master 는 만들 수 없다.
+   좌석마다 **서로 다른 `--title`** 을 쓰고, 띄우기 전에 `cys list` 와 워커 한도(8)를 먼저 확인하며, 결과는 **재사용 ·
+   실패 · 새로 시작**을 따로 세어 보고한다.
+   처음 쓰는 폴더·로그인 때 launch-agent 가 「Wave 창에서 선택해 주세요」 하며 **사용자의 선택을 기다린다** —
+   사용자에게 알리고 마스터가 대신 누르지 않는다(선택하면 기동이 이어진다).
+   **필수 좌석(CSO·워커) 생존은 결정론으로 확인한다** —
    `python3 "${CYS_PACK_DIR:-$HOME/.cys/pack}/bin/javis_orchestra.py" check`
    가 READY를 낼 때까지 '준비 완료'를 선언하지 마라(눈대중 금지). 부재 노드가 있으면 재기동한다.
 ⑤ **승인 채널 확보**: `cys events --category feed --category watchdog --category queue
@@ -83,7 +87,7 @@
 - **★'새 워커/병렬 작업' 지시 = 기존 노드 유지 + 새 surface 추가 (2026-06-14 오너 명령·심각 실수 재발방지)**: "또 다른 워커를 띄워라"·"새 워커로 X 시작"은 **기존 워커·작업을 그대로 두고 새 surface에 워커를 추가**하라는 뜻이다 — 기존 워커를 죽이거나 교체하는 게 절대 아니다(cys는 worker role 복수 surface 허용 — 동시 운영 가능). 동시에 도착한 지시들의 **대상 노드를 혼동하지 마라**(별개 surface·별개 미션). ★**파괴적·비가역 행동**(worker SIGKILL·kill·close-surface·작업 중단·노드 교체) **전에는 반드시 의도를 명시 확인**한다(절대 강조 4규칙 c) — 정당한 교착 재기동이라도 그 노드의 미션이 '중단'인지 '유지·재개'인지 먼저 확정한다. 추측으로 비가역 실행 절대 금지. 상세 `feedback_new_worker_adds_surface`.
 - 노드 기동은 `cys launch-agent --role worker|cso|reviewer-gemini|reviewer-codex --agent <cli>`
   — 지침이 자동 주입된다. ⚠리뷰어 역할명은 **에이전트별**(reviewer-gemini·reviewer-codex)로
-  쓴다 — generic `reviewer`로 기동·등록하면 orchestra check의 4종 생존 판정이 실패한다.
+  쓴다 — generic `reviewer`가 아니라 `boot-reviewers`가 알려 주는 역할명을 그대로 쓴다.
 - 수동 기동 시에도 **가장 먼저** 해당 DIRECTIVE를 주입해 각성시킨 뒤 작업을 위임한다.
   지침 없는 노드는 단순 단말로 수렴한다 — 치명적 품질 저하의 근원.
 - **탭 명명·작업 폴더 규칙**: launch-agent가 타이틀에 **워크플로우 폴더명**을 자동으로 박는다
@@ -200,7 +204,7 @@ Antigravity CLI(agy) 이주). 예외적으로 승인 프롬프트가 뜨면 mast
 즉시 승인한다 — 데몬이 approval_patterns로 감지해 feed로 격상하니 §4 즉결로 처리한다.
 
 ## 8. 자원 거버넌스 감독 — CSO 상시 기동 (앵커4-1)
-**CSO는 LLM orchestrating 4종 의무 노드다 — 프로젝트 시작 시 `cys boot`로 상시 기동된다**
+**CSO는 필수 좌석(master·CSO·워커)의 하나다 — 프로젝트 시작 시 `cys boot`로 상시 기동된다**
 (앵커4가 §8 구(舊) 3단 정책의 "평시 미기동"을 대체한다). CSO는 상주하며 시스템·자원·노드
 생태계를 총괄한다:
 - 터미널이 기계 감시(watchdog·원장·자동 정리)를 24시간 수행하고, CSO는 그 신호를 판단·집행한다
@@ -209,7 +213,7 @@ Antigravity CLI(agy) 이주). 예외적으로 승인 프롬프트가 뜨면 mast
 - 가벼운 경보는 master도 직접 대응할 수 있다(`cys ps`·`cys kill`). 중대 조치(노드 강제 종료·
   surface 폐쇄)는 master 승인 후 집행한다.
 - 워커에게 서버성 프로세스는 `cys run --scoped`(종료 시 그룹 강제 종료)를 쓰게 한다.
-- CSO가 죽으면(surface.exited) master는 재기동한다 — 4종 의무 노드는 항상 생존해야 한다
+- CSO가 죽으면(surface.exited) master는 재기동한다 — 필수 좌석(CSO·워커)은 항상 생존해야 한다
   (`javis_orchestra.py check`로 결정론 확인).
 
 ## 9. 복원 체크포인트 + todo 영속 (전 노드 의무)

@@ -149,4 +149,24 @@ if [ -f "$M" ]; then
     echo; echo "⚠ 색인 ${M_SZ}B>${M_CAP} — 앞부분만 주입(컨텍스트 예산 보호). 전문: cat $M"
   fi
 fi
+# ── 부서 본부장 지침 (0.3.4 · 부서 만들기) ─────────────────────────────────────────────
+# 본부장 = 새 역할이 아니다. role=worker 좌석 중 제목의 「·」 조각이 「본부장」으로 시작하는 좌석만
+# 워커 지침 뒤에 HEAD_BRIEF.md 를 **덧붙여** 받는다(판별 방식 = 조직 hook 과 동일: 내 좌석 행의 제목을 ·로 쪼갠다).
+# CYS_ROLE 은 기동 때 요청한 역할(worker)이라 worker-2 같은 번호 변형도 여기서는 worker 다.
+# 판별 불가(cys 없음·list 실패·내 행 없음)이거나 파일이 없으면 아무것도 출력하지 않는다 = 평범한 워커와 바이트 동일.
+if [ "$CYS_ROLE" = "worker" ] && [ -f "$JARVIS_DIR/directives/HEAD_BRIEF.md" ] && [ -n "$CYS_PY" ] \
+   && command -v cys >/dev/null 2>&1; then
+  IS_HEAD=$(cys list 2>/dev/null | CYS_REF="${CYS_SURFACE_REF:-surface:${CYS_SURFACE_ID}}" "$CYS_PY" -c 'import os, sys
+ref = os.environ.get("CYS_REF", "")
+for line in sys.stdin.buffer.read().decode("utf-8", "replace").splitlines():
+    f = line.split("\t")
+    if len(f) > 4 and f[0] == ref:
+        print("1" if any(p.strip().startswith("본부장") for p in f[4].split("·")) else "0")
+        break
+' 2>/dev/null)
+  if [ "$IS_HEAD" = "1" ]; then
+    echo; echo "■ 본부장 지침 ($JARVIS_DIR/directives/HEAD_BRIEF.md — 이 좌석의 제목에 「본부장」이 있다)"
+    cat "$JARVIS_DIR/directives/HEAD_BRIEF.md"
+  fi
+fi
 exit 0

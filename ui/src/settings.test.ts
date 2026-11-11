@@ -59,3 +59,23 @@ describe("settings", () => {
     });
   });
 });
+
+describe("arrange preference", () => {
+  it("defaults new and old saved settings to columns without resetting other layout preferences", () => {
+    expect(DEFAULT_SETTINGS.layout.arrange).toBe("columns");
+    expect(readSettings(null, null, null).layout.arrange).toBe("columns");
+    expect(readSettings(JSON.stringify({ ver: 1, layout: { sidebarSide: "right", sidebarCollapsed: true } }), null, null).layout)
+      .toEqual({ arrange: "columns", sidebarSide: "right", sidebarCollapsed: true });
+  });
+  it("round-trips both supported modes and rejects invalid values or versions", () => {
+    for (const arrange of ["columns", "grid"]) {
+      const s = readSettings(JSON.stringify({ ver: 1, layout: { arrange } }), null, null);
+      expect(s.layout.arrange).toBe(arrange);
+      expect(readSettings(JSON.stringify(s), null, null).layout.arrange).toBe(arrange);
+    }
+    for (const arrange of [null, false, "rows", {}]) {
+      expect(readSettings(JSON.stringify({ ver: 1, layout: { arrange } }), null, null).layout.arrange).toBe("columns");
+    }
+    expect(readSettings(JSON.stringify({ ver: 2, layout: { arrange: "grid" } }), null, null).layout.arrange).toBe("columns");
+  });
+});

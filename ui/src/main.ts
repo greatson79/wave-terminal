@@ -2593,7 +2593,7 @@ function autoGrid(ws: Workspace, roleOf?: Map<number, string | null>, sids = col
     const key = paneKey(sid, ws.socket);
     return { sid, role: roleOf?.get(sid) ?? paneTitleState.get(key)?.role ?? null, head: isHqLeadName(surfaceTitles.get(key) ?? "") };
   });
-  return gridLayout(seats, { w: root.offsetWidth, h: root.offsetHeight }, gridSpecFor(fontSize));
+  return gridLayout(seats, { w: root.offsetWidth, h: root.offsetHeight }, gridSpecFor(fontSize), settings.layout.arrange);
 }
 
 function applyGridSize(grid: GridResult | null) {
@@ -4913,6 +4913,7 @@ async function start() {
       savedLayout = saved;
       renameRevision = typeof saved.renameRevision === "string" ? saved.renameRevision : undefined;
       workspaces = saved.workspaces;
+      for (const ws of workspaces) if (ws.tree) ws.manual = true; // 저장 배치는 정렬을 누를 때까지 보존
       groups = Array.isArray(saved.groups) ? saved.groups : []; // 06: 하위호환 — 옛 저장본엔 groups 없음
       activeWs = saved.active ?? 0;
       wsCounter = saved.counter ?? 1;
@@ -5159,6 +5160,12 @@ document.getElementById("btn-split-v")!.addEventListener("click", () => actionSp
 document.getElementById("btn-equalize")!.addEventListener("click", (event) => {
   const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
   showCtxMenu(rect.left, rect.bottom, [
+    { label: "세로 열(기본)", action: () => {
+      settings.layout.arrange = "columns"; saveSettings(); return actionEqualize();
+    } },
+    { label: "격자", action: () => {
+      settings.layout.arrange = "grid"; saveSettings(); return actionEqualize();
+    } },
     { label: "역할별 표준 배치", action: actionEqualize },
     { label: settings.layout.sidebarCollapsed ? "사이드바 펼치기" : "사이드바 접기", action: () => {
       settings.layout.sidebarCollapsed = !settings.layout.sidebarCollapsed;

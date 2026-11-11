@@ -167,3 +167,62 @@ describe("수동 비율 보존", () => {
     expect(treeEquals(a, b)).toBe(true);
   });
 });
+
+describe("columns layout", () => {
+  for (const n of [1, 2, 4, 8, 12]) {
+    for (const w of [400, 1000, 8000]) {
+      test(`${n} seats at width ${w}: one full-height row with minimum-width scrolling`, () => {
+        const res = gridLayout(seats(n), { w, h: H }, SPEC, "columns");
+        expect(res.minWidth).toBe(w < n * SPEC.minW ? n * SPEC.minW : 0);
+        expect(res.minHeight).toBe(0);
+        const rs = rects(res.tree!, 0, 0, Math.max(w, res.minWidth), H);
+        expect(rs.map((r) => r.sid)).toEqual(seats(n).map((s) => s.sid));
+        for (const r of rs) {
+          expect(r.y).toBe(0);
+          expect(r.h).toBe(H);
+          expect(r.w).toBeGreaterThanOrEqual(SPEC.minW - 1e-6);
+        }
+      });
+    }
+  }
+
+  test("keeps role pairs at the edges and head first in the middle at wide and narrow widths", () => {
+    const s = seats(8, { 2: { role: "cso" }, 3: { role: "reviewer-codex" },
+      5: { head: true }, 6: { role: "master" }, 7: { role: "reviewer-gemini" } });
+    for (const w of [400, 8000]) {
+      const res = gridLayout(s, { w, h: H }, SPEC, "columns");
+      const width = Math.max(w, res.minWidth);
+      const rs = rects(res.tree!, 0, 0, width, H);
+      const by = (sid: number) => rs.find((r) => r.sid === sid)!;
+      expect(rs.map((r) => r.sid)).toEqual([6, 2, 5, 1, 4, 8, 7, 3]);
+      expect(by(6).x).toBe(0);
+      expect(by(2).x).toBe(0);
+      expect(by(6).h / by(2).h).toBeCloseTo(3);
+      expect(by(7).x + by(7).w).toBeCloseTo(width);
+      expect(by(3).x).toBe(by(7).x);
+      expect(by(7).h).toBe(by(3).h);
+      for (const sid of [5, 1, 4, 8]) {
+        expect(by(sid).y).toBe(0);
+        expect(by(sid).h).toBe(H);
+      }
+      expect(by(5).w / by(1).w).toBeCloseTo(w === 400 ? 1 : SPEC.headWeight);
+      for (const r of rs) expect(r.w).toBeGreaterThanOrEqual(SPEC.minW - 1e-6);
+    }
+  });
+
+  test("empty, hidden and short panels remain safe", () => {
+    expect(gridLayout([], { w: 0, h: 0 }, SPEC, "columns")).toEqual({ tree: null, minWidth: 0, minHeight: 0 });
+    const res = gridLayout(seats(4), { w: 0, h: 0 }, SPEC, "columns");
+    expect(res.minWidth).toBe(4 * SPEC.minW);
+    expect(res.minHeight).toBe(SPEC.minH);
+    const rs = rects(res.tree!, 0, 0, res.minWidth, res.minHeight);
+    expect(rs.every((r) => r.y === 0 && r.h === SPEC.minH)).toBe(true);
+  });
+
+  test("explicit grid mode matches the unchanged default for every regression input", () => {
+    for (const n of COUNTS) for (const w of WIDTHS) {
+      const s = seats(n, { 1: { role: "master" }, 2: { role: "cso" }, 3: { head: true } });
+      expect(gridLayout(s, { w, h: H }, SPEC, "grid")).toEqual(gridLayout(s, { w, h: H }, SPEC));
+    }
+  });
+});

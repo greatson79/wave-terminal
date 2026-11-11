@@ -68,7 +68,7 @@ function roleColumn(a: GridSeat | undefined, b: GridSeat | undefined, aShare: nu
   return one ? pane(one.sid) : null;
 }
 
-export function gridLayout(seats: readonly GridSeat[], panel: { w: number; h: number }, spec: GridSpec): GridResult {
+export function gridLayout(seats: readonly GridSeat[], panel: { w: number; h: number }, spec: GridSpec, mode: "columns" | "grid" = "grid"): GridResult {
   if (!seats.length) return { tree: null, minWidth: 0, minHeight: 0 };
 
   const first = (role: string) => seats.find((s) => s.role === role);
@@ -87,7 +87,7 @@ export function gridLayout(seats: readonly GridSeat[], panel: { w: number; h: nu
   const m = ordered.length;
 
   // 열·줄 수. 줄마다 좌석을 고르게 나눠(앞 줄이 하나 더) 한 줄짜리 고아를 만들지 않는다.
-  const cols = m ? Math.min(m, Math.max(1, Math.floor((panel.w - sides * spec.minW) / spec.minW))) : 0;
+  const cols = mode === "columns" ? m : m ? Math.min(m, Math.max(1, Math.floor((panel.w - sides * spec.minW) / spec.minW))) : 0;
   const rows = m ? Math.ceil(m / cols) : 0;
   const base = m ? Math.floor(m / rows) : 0;
   const extra = m ? m % rows : 0;
@@ -117,7 +117,7 @@ export function gridLayout(seats: readonly GridSeat[], panel: { w: number; h: nu
   if (right) parts.push({ node: right, weight: 1 });
   const tree = comb(parts.map((p) => p.node), parts.map((p) => p.weight), "row");
 
-  const needW = (sides + (m ? 1 : 0)) * spec.minW; // 한 열만 놓아도 필요한 폭
+  const needW = (sides + (mode === "columns" ? m : m ? 1 : 0)) * spec.minW; // 세로 열은 줄바꿈 대신 가로 스크롤
   const hasPair = (master && cso) || (agy && codex);
   const needH = Math.max(rows, hasPair ? 2 : 0) * spec.minH; // 역할 열의 위·아래 두 칸도 최소 높이를 지킨다
   return {

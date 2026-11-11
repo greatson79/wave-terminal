@@ -3919,15 +3919,24 @@ async function promptBinaryPatch() {
     return;
   }
   const v = updateAvailable.version;
-  const ok = await confirmModal(
-    `새 본체 버전 ${v} — 패치 설치`,
-    `새 본체(앱) ${v}을 패치 방식으로 설치합니다: 저장(drain) 신호 후 다운로드·서명 검증·교체하고 앱을 ` +
-      `재시작합니다. 부서·노드는 재시작 후 자동 복원됩니다(대화 기억 포함). 마지막 미저장분은 손실될 수 ` +
-      `있습니다.\n\n지금 설치하시겠습니까? (수동 설치는 다운로드 페이지 https://waveainetworks.com/get)`,
-    "설치",
-  );
-  if (!ok) return;
   try {
+    const fleet = await invoke("org_fleet") as { departments: { surfaces: { exited: boolean }[]; error?: string }[] };
+    const hasLiveSeats = fleet.departments.some((dept) => dept.surfaces.some((seat) => seat.exited === false));
+    if (!hasLiveSeats && fleet.departments.some((dept) => dept.error)) {
+      throw new Error("열린 좌석을 확인하지 못했습니다. 잠시 뒤 다시 시도해 주세요.");
+    }
+    const ok = hasLiveSeats ? await confirmModal(
+      `새 본체 버전 ${v} — 패치 설치`,
+      "업데이트하면 열린 좌석이 닫힙니다. 작업 파일은 그대로 남고, 업데이트 뒤 마스터에게 다시 열어 달라고 하면 됩니다.",
+      "지금 업데이트", "나중에",
+    ) : await confirmModal(
+      `새 본체 버전 ${v} — 패치 설치`,
+      `새 본체(앱) ${v}을 패치 방식으로 설치합니다: 저장(drain) 신호 후 다운로드·서명 검증·교체하고 앱을 ` +
+        `재시작합니다. 부서·노드는 재시작 후 자동 복원됩니다(대화 기억 포함). 마지막 미저장분은 손실될 수 ` +
+        `있습니다.\n\n지금 설치하시겠습니까? (수동 설치는 다운로드 페이지 https://waveainetworks.com/get)`,
+      "설치",
+    );
+    if (!ok) return;
     await invoke("install_update", { force: true });
     // 성공 시 백엔드가 app.restart()까지 수행 — 후속 UI 처리 없음(진행은 update-progress 리스너).
   } catch (e) {
@@ -4522,7 +4531,7 @@ async function openPalette() {
 
 // ★확인 버튼 라벨 매개변수화(오너 2026-07-15 실보고): 업데이트 창용 "설치" 하드코딩이 모든
 // 확인 창에 노출(완전 삭제 창의 확인 버튼이 "설치"로 표시). 호출부가 동작 동사를 지정한다.
-function confirmModal(title: string, body: string, yesLabel = "확인"): Promise<boolean> {
+function confirmModal(title: string, body: string, yesLabel = "확인", noLabel = "아니오"): Promise<boolean> {
   return new Promise((resolve) => {
     const ov = document.createElement("div");
     ov.className = "modal-overlay";
@@ -4533,6 +4542,7 @@ function confirmModal(title: string, body: string, yesLabel = "확인"): Promise
     (ov.querySelector("h3") as HTMLElement).textContent = title;
     (ov.querySelector("p") as HTMLElement).textContent = body;
     (ov.querySelector(".modal-yes") as HTMLElement).textContent = yesLabel;
+    (ov.querySelector(".modal-no") as HTMLElement).textContent = noLabel;
     const done = (v: boolean) => {
       ov.remove();
       resolve(v);

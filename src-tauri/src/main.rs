@@ -365,6 +365,13 @@ async fn usage_accounts_all() -> Result<Value, String> {
 }
 
 #[tauri::command]
+fn naming_config_mtime() -> Option<String> {
+    std::fs::metadata(cys::home_dir().join(".cys/naming.json")).ok()?
+        .modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()
+        .map(|time| time.as_nanos().to_string())
+}
+
+#[tauri::command]
 fn naming_config() -> Result<Option<String>, String> {
     let path = cys::home_dir().join(".cys/naming.json");
     let meta = match std::fs::metadata(&path) {
@@ -2756,6 +2763,7 @@ fn main() {
             list_surfaces,
             usage_accounts_all,
             naming_config,
+            naming_config_mtime,
             org_status,
             system_resume,
             drain_verify,

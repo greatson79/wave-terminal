@@ -61,6 +61,11 @@ const helpPreview = document.getElementById("help-preview")!;
 const helpPreviewDetails = document.getElementById("help-preview-details") as HTMLDetailsElement;
 const helpSend = document.getElementById("help-send") as HTMLButtonElement;
 const helpResult = document.getElementById("help-result")!;
+const helpDepartmentHint = document.createElement("div");
+helpDepartmentHint.textContent = "부서 만들기는 마스터 채팅창에 입력하세요";
+helpDepartmentHint.hidden = true;
+helpDepartmentHint.setAttribute("role", "status");
+helpMessage.after(helpDepartmentHint);
 let previewedHelp: Record<string, unknown> | null = null;
 let helpEditRevision = 0;
 let helpSent = false;
@@ -75,6 +80,7 @@ function invalidateHelpPreview() {
   helpResult.textContent = "";
   helpSent = false;
   document.getElementById("help-limit")!.hidden = helpMessage.value.length <= 500;
+  helpDepartmentHint.hidden = !(helpMessage.value.includes("만들") && /부서|조직|비서/.test(helpMessage.value));
 }
 helpMessage.addEventListener("input", invalidateHelpPreview);
 helpKind.addEventListener("change", invalidateHelpPreview);
@@ -1646,6 +1652,25 @@ function setRoleDot(el: HTMLElement, role: string | null) {
 //   이게 없으면 노드가 데몬 안에서 헤드리스로만 돌고 화면에 보이지 않는다.
 let refreshing = false;
 let started = false; // start()의 세션 복원이 끝나기 전 인터벌 자동 입양 차단 (이중 생성 방지)
+let namingMtime: string | null | undefined;
+async function refreshNamingConfig(): Promise<boolean> {
+  try {
+    const mtime = await invoke("naming_config_mtime") as string | null;
+    if (mtime === namingMtime) return false;
+    namingMtime = mtime;
+    if (mtime === null) return false;
+    const raw = await invoke("naming_config") as string | null;
+    if (raw === null) return false;
+    const roles = JSON.parse(raw)?.roles;
+    if (!roles || typeof roles !== "object" || Array.isArray(roles)) return false;
+    hierarchyEnabled = configureHierarchyNaming(raw);
+    hqColors = parseNamingColors(raw).colors;
+    return true;
+  } catch (error) {
+    console.warn("[naming] 로컬 설정을 읽지 못해 이전 묶음을 유지합니다", error);
+    return false;
+  }
+}
 const ghostStrikes = new Map<string, number>();
 async function refreshPaneTitles() {
   if (!started || refreshing) return; // 겹친 호출의 이중 입양 방지
@@ -1653,7 +1678,7 @@ async function refreshPaneTitles() {
   try {
     // 멀티마스터 F4: workspace별 소켓을 순회 — 각 데몬의 surface를 그 소켓 ws에만 귀속시킨다.
     const sockets = [...new Set([undefined, ...workspaces.map((w) => w.socket)])];
-    let adopted = false;
+    let adopted = await refreshNamingConfig();
     let verifiedDefault = false;
     for (const sk of sockets) {
       try {
@@ -4899,15 +4924,7 @@ async function start() {
     }
   })();
 
-  try {
-    const raw = await invoke("naming_config") as string | null;
-    hierarchyEnabled = configureHierarchyNaming(raw);
-    hqColors = parseNamingColors(raw).colors;
-  } catch (error) {
-    hierarchyEnabled = configureHierarchyNaming(null);
-    hqColors = {};
-    console.warn("[naming] 로컬 설정을 읽지 못해 기본 사이드바로 표시합니다", error);
-  }
+  await refreshNamingConfig();
 
   // Session restore (멀티마스터 F4): 저장본 먼저 로드(ws.socket 포함) → 부서 데몬 확보를 list 대조보다
   // 선행 → 소켓별 대조. 데몬 일시 미가동 ws는 보존(영구 삭제 방지, 검증 mustFix).
@@ -5293,7 +5310,7 @@ document.getElementById("btn-dept-master")?.addEventListener("click", async () =
 (async () => {
   try {
     if (await invoke("ceo_pending")) {
-      toast("feed", "CEO 승격 대기 중", "부서가 존재합니다 — base 부트 완료 후 명령 팔레트의 'CEO 승격 진행'으로 승인할 수 있습니다.");
+      toast("feed", "CEO 승격 대기 중", "부서가 존재합니다 — 마스터 채팅창에서 부트 완료와 CEO 승격 대기 상태를 확인해 달라고 요청하세요.");
     }
   } catch {
     /* 데몬 미가동 등 — 침묵(다음 시작·팔레트에서 재확인) */

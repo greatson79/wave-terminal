@@ -378,7 +378,7 @@ redaction) · **Trends & Weekly** (WoW deltas, efficiency leaders, skill assets)
 **Learning** (RSI round timeline, adopt/rollback, cumulative discoveries) · **Skill
 Board** (a curated skill button = a one-shot worker run with HITL preview) · **Work**
 (current tasks across every department × node, observe-only, self-report vs. derived
-trust badges) · **Approval Feed** (Allow/Deny). Plus: ⌘K Command Palette, Glance mode
+trust badges) · **Approval Feed** (Allow/Deny). Plus: Glance mode
 (⌘G, a summary screen for non-technical users), workspace groups, **departments**
 (project isolation via independent daemons), and RBAC PII redaction
 (`CYS_CONTROL_REDACT=1`).

@@ -54,3 +54,71 @@ test("IME Enter does not save a pane name; one later Enter does", () => {
   expect(calls).toEqual(["set_surface_label"]);
   expect(titleEl.contentEditable).toBe("false");
 });
+
+test("department heads use their title name without changing the routing role or status", () => {
+  const input = { sid: 1921, role: "worker-edu-claude-1", title: "스프링·교육본부·본부장·s1921",
+    label: "수업 준비", model: "claude-opus-5-5", ctx: 23 };
+  expect(paneHeading(input)).toBe("본부장 스프링 Opus 5.5 · s1921 · CTX 23% · 대기 중");
+  expect(input.role).toBe("worker-edu-claude-1");
+  expect(paneHeading({ ...input, title: "펄스·개발본부·본부장·s1921", tail: "작업", approximate: true }))
+    .toBe("본부장 펄스 Opus 5.5 · s1921 · CTX ~23% · 작업 중");
+});
+
+test("student department masters use the same explicit head title rule", () => {
+  expect(paneHeading({ sid: 4, role: "master", title: "스프링·교육본부·본부장·s4", model: "claude-opus-5-5" }))
+    .toBe("본부장 스프링 Opus 5.5 · s4 · CTX — · 대기 중");
+});
+
+test("an explicit named duty takes precedence over the department nickname", () => {
+  expect(paneHeading({ sid: 4, role: "worker-edu-claude-1", title: "교육·교육본부·스프링 본부장·s4" }))
+    .toBe("본부장 스프링 · s4 · CTX — · 대기 중");
+  expect(paneHeading({ sid: 4, role: "worker", title: "  스프링  · 교육본부 · 본부장 · s4 [exited] " }))
+    .toBe("본부장 스프링 · s4 · CTX — · 대기 중");
+});
+
+test("workers and other seat kinds keep their existing heading without an explicit head identity", () => {
+  for (const role of ["master", "cso", "coo", "secretary", "worker-edu-claude-2", "reviewer-codex"]) {
+    const input = { sid: 4, role, label: "숙제", model: "claude-opus-5-5", ctx: 23 };
+    expect(paneHeading({ ...input, title: "스프링·교육본부·작성자·s4" })).toBe(paneHeading(input));
+  }
+  expect(paneHeading({ sid: 4, role: "worker-edu-claude-2", label: "숙제", title: "팀원·교육본부·작성자·s4" }))
+    .toBe("워커(숙제)·s4 · CTX — · 대기 중");
+});
+
+test("nameless and odd titles fall back to today's heading, including labels", () => {
+  for (const role of ["master", "worker-edu-claude-1"]) {
+    for (const title of [null, "", "surface 4", "교육본부·본부장·s4", "·교육본부·본부장·s4",
+      "s4·교육본부·본부장·s4", "교육본부·교육본부·본부장·s4", "본부장·교육본부·본부장·s4",
+      "스프링·교육본부··본부장·s4", "스프링·교육본부·부본부장·s4", "스프링·교육본부·본부장 회의·s4",
+      "본부장 작업 메모", "스프링·본부장·s4"]) {
+      const input = { sid: 4, role, label: "숙제", ctx: 23 };
+      expect(paneHeading({ ...input, title })).toBe(paneHeading(input));
+    }
+  }
+});
+
+test("surface refresh forwards the current title through the actual header renderer", async () => {
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
+  const stateStart = source.indexOf("const state = { reported: tasks.get(s.surface_id)");
+  const stateEnd = source.indexOf("\n          paneTitleState.set", stateStart);
+  const rendererStart = source.indexOf("function displayPaneHeading(");
+  const rendererEnd = source.indexOf("\ninterface PaneRuntime", rendererStart);
+  expect(stateStart).toBeGreaterThan(0);
+  expect(rendererStart).toBeGreaterThan(0);
+  const transpiler = new Bun.Transpiler({ loader: "ts" });
+  const refreshState = new Function("s", "tasks", transpiler.transformSync(source.slice(stateStart, stateEnd)) + "return state;");
+  const render = new Function("paneHeading", "splitPaneHeading", "document", "sevClass",
+    transpiler.transformSync(source.slice(rendererStart, rendererEnd)) + "return displayPaneHeading;")(
+    paneHeading, splitPaneHeading, { createElement: () => ({ textContent: "" }) }, () => "warning");
+  let displayed = "";
+  const el = { isContentEditable: false, replaceChildren: (...nodes: any[]) => {
+    displayed = nodes.map((n) => typeof n === "string" ? n : n.textContent).join("");
+  } };
+  const surface = { surface_id: 1921, role: "worker-edu-claude-1", label: "수업", model: "claude-opus-5-5",
+    title: "스프링·교육본부·본부장·s1921", exited: false, usage: { ctx_pct: 23, source: "statusline" } };
+  render(el, 1921, refreshState(surface, new Map()));
+  expect(displayed).toBe("본부장 스프링 Opus 5.5 · s1921 · CTX 23% · 대기 중");
+  render(el, 1921, refreshState({ ...surface, title: "팀원·교육본부·작성자·s1921" }, new Map()));
+  expect(displayed).toBe("워커(수업) Opus 5.5·s1921 · CTX 23% · 대기 중");
+});

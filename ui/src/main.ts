@@ -166,7 +166,7 @@ const LAYOUT_KEY = "cys-layout-v2";
 const paneKey = (sid: number, socket?: string): string => `${socket ?? ""}#${sid}`;
 function displayPaneHeading(el: HTMLElement, sid: number, state?: PaneTitleState) {
   if (el.isContentEditable) return;
-  const heading = paneHeading({ sid, role: state?.role, label: state?.label, model: state?.model,
+  const heading = paneHeading({ sid, role: state?.role, title: state?.title, label: state?.label, model: state?.model,
     ctx: state?.usage?.ctx_pct, approximate: !!state?.usage && state.usage.source !== "statusline", tail: state?.reported });
   const [prefix, context] = splitPaneHeading(heading);
   const ctx = document.createElement("span");
@@ -1477,7 +1477,7 @@ let renameRevision: string | undefined;
 let focusedSid: number | null = null;
 const panes = new Map<string, PaneRuntime>(); // 키 = paneKey(sid, socket)
 applyFontFace(fontFace); // keep the rollback key synchronized with the new settings key
-interface PaneTitleState { reported: string | null; exited: boolean; role?: string | null; label?: string | null; model?: string | null; usage?: ObservedUsage | null; cwd?: string | null }
+interface PaneTitleState { reported: string | null; exited: boolean; role?: string | null; title?: string | null; label?: string | null; model?: string | null; usage?: ObservedUsage | null; cwd?: string | null }
 const paneTitleState = new Map<string, PaneTitleState>();
 const surfaceTitles = new Map<string, string>();
 // 부서 데몬 socket_slug(F3 백엔드 단일진실) → socket 경로. launch_dept_daemon 반환·daemon-event로 채운다.
@@ -1679,7 +1679,7 @@ async function refreshPaneTitles() {
           renderUsage(rt.usageEl, s.exited ? null : s.usage); // 종료 pane은 배지 제거 (혼동 방지)
           setRoleDot(rt.roleEl, s.exited ? null : s.role); // 역할 점도 동일 주기 갱신
           const state = { reported: tasks.get(s.surface_id) ?? null, exited: s.exited,
-            role: s.role, label: s.label, model: s.usage?.model ?? s.model, usage: s.usage, cwd: s.live_cwd };
+            role: s.role, title: s.title, label: s.label, model: s.usage?.model ?? s.model, usage: s.usage, cwd: s.live_cwd };
           paneTitleState.set(paneKey(s.surface_id, sk), state);
           displayPaneHeading(rt.titleEl, s.surface_id, state);
         }

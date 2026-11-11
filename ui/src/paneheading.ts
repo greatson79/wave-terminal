@@ -1,6 +1,9 @@
-export function paneHeading({ sid, role, label, model, ctx, approximate, tail }: {
+import { HQ_SEP, isAddressToken, isHqLeadName, isHqToken } from "./hierarchy";
+
+export function paneHeading({ sid, role, title, label, model, ctx, approximate, tail }: {
   sid: number;
   role?: string | null;
+  title?: string | null;
   label?: string | null;
   model?: string | null;
   ctx?: number | null;
@@ -12,7 +15,14 @@ export function paneHeading({ sid, role, label, model, ctx, approximate, tail }:
   const modelName = model?.replace(/^claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d+))?.*$/i,
     (_, family: string, major: string, minor?: string) => `${family[0].toUpperCase()}${family.slice(1).toLowerCase()} ${major}${minor ? `.${minor}` : ""}`)
     .replace(/^claude-/, "") || "";
-  const prefix = label ? roleName ? `${roleName}(${label})${modelName ? ` ${modelName}` : ""}·s${sid}`
+  // Structured titles identify heads independently of the roles used by routing hooks.
+  const parts = (title ?? "").split(HQ_SEP).map((part) => part.trim());
+  const dept = parts.findIndex(isHqToken);
+  const duty = dept >= 0 ? parts[dept + 1] : undefined;
+  const name = duty?.match(/^(.+?)\s+본부장$/)?.[1].trim()
+    ?? (duty === "본부장" && dept === 1 ? parts[0] : "");
+  const headName = name && !isHqToken(name) && !isAddressToken(name) && !isHqLeadName(name) ? name : "";
+  const prefix = headName ? `${["본부장", headName, modelName].filter(Boolean).join(" ")} · s${sid}` : label ? roleName ? `${roleName}(${label})${modelName ? ` ${modelName}` : ""}·s${sid}`
     : `${label} · s${sid}`
     : `${[roleName, modelName].filter(Boolean).join(" ")}${roleName || modelName ? "·" : ""}s${sid}`;
   return `${prefix} · CTX ${ctx == null ? "—" : `${approximate ? "~" : ""}${Math.round(ctx)}%`} · ${tail ? "작업 중" : "대기 중"}`;

@@ -1,7 +1,8 @@
-import { expect, test } from "bun:test";
+import { expect, mock, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { readSettings } from "./settings";
 import * as layouts from "./gridlayout";
+import { normalizeWorkspaces } from "./wsrestore";
 import { dedupeTree, treeSids, type LayoutNode } from "./treededupe";
 
 // Exercise actual app functions without loading Tauri or contacting a daemon.
@@ -25,10 +26,11 @@ function harness(initial: Workspace, arrange = "columns", cachedRoles = new Map<
   const root = { offsetWidth: 1512, offsetHeight: 900, style: { overflow: "auto" },
     firstElementChild: { style: { minWidth: "3906px", minHeight: "999px" } },
     innerHTML: "", appendChild: (_: unknown) => {} };
-  const autoGrid = new Function("root", "collectSids", "arrangeModes", "equalWidthLayout", "paneKey", "paneTitleState", "surfaceTitles", "isHqLeadName", "gridLayout", "gridSpecFor", "fontSize", "settings",
+  const equalWidthLayout = mock(layouts.equalWidthLayout), gridLayout = mock(layouts.gridLayout);
+  const autoGrid = mock(new Function("root", "collectSids", "arrangeModes", "equalWidthLayout", "paneKey", "paneTitleState", "surfaceTitles", "isHqLeadName", "gridLayout", "gridSpecFor", "fontSize", "settings",
     block("function autoGrid(", "\nfunction applyGridSize") + "return autoGrid;")(
-    root, treeSids, modes, layouts.equalWidthLayout, (sid: number) => sid, cachedRoles, new Map(), () => false,
-    layouts.gridLayout, layouts.gridSpecFor, 13, { layout: { arrange } });
+    root, treeSids, modes, equalWidthLayout, (sid: number) => sid, cachedRoles, new Map(), () => false,
+    gridLayout, layouts.gridSpecFor, 13, { layout: { arrange } }));
   const applyGridSize = new Function("root", block("function applyGridSize(", "\n// 창·패널") + "return applyGridSize;")(root);
   const panes = new Map(treeSids(ws.tree).map(sid => [sid, {}]));
   const render = new Function("coalesceHqPanels", "panes", "root", "current", "dedupeTree", "autoGrid", "keepManualTree", "renderNode", "applyGridSize", "hierarchyEnabled", "renderWsTabs", "requestAnimationFrame", "saveLayout",
@@ -44,7 +46,7 @@ function harness(initial: Workspace, arrange = "columns", cachedRoles = new Map<
   const actionNew = new Function("current", "newSurface", "render", "setFocus",
     block("async function actionNew()", "\nasync function actionSplit") + "return actionNew;")(
     () => ws, async () => 8, render, () => {});
-  return { root, modes, autoGrid, applyGridSize, render, actionEqualize, reflow, actionNew,
+  return { root, modes, autoGrid, equalWidthLayout, gridLayout, applyGridSize, render, actionEqualize, reflow, actionNew,
     calls: () => calls, switchTo: (next: Workspace) => { ws = next; }, panes };
 }
 function restore(raw: string | null, workspaces: Workspace[]) {
@@ -182,4 +184,74 @@ test("arrange menu saves equal/grid modes and keeps standard and sidebar actions
   await items[1].action(); await items[0].action(); await items[2].action(); await items[3].action();
   expect(calls).toEqual(["save:grid", "arrange:grid", "save:equal", "arrange:equal", "arrange:equal", "save:equal", "sidebar"]);
   expect(settings.layout.sidebarCollapsed).toBe(true);
+});
+
+
+test("restored grid and equal tabs stay locked across restart until explicitly arranged", async () => {
+  const a = { id: 1, name: "A", tree: oldColumns().tree, manual: true };
+  const b = { id: 2, name: "B", tree: JSON.parse(JSON.stringify(oldColumns().tree),
+    (key, value) => key === "sid" ? value + 7 : value) as LayoutNode, manual: true };
+  const before = harness(a);
+  await before.actionEqualize("grid");
+  before.switchTo(b);
+  await before.actionEqualize("equal");
+  const savedTrees = [a, b].map(ws => JSON.stringify(ws.tree));
+  expect(savedTrees[0]).not.toBe(savedTrees[1]);
+
+  let serialized = "";
+  const save = new Function("workspaces", "normalizeWorkspaces", "localStorage", "LAYOUT_KEY",
+    `let groups = [], activeWs = 1, wsCounter = 2, groupCounter = 0, renameRevision;
+     ${block("function normalizeGroups(", "\nfunction collectSids(")}
+     return saveLayout;`)([a, b], normalizeWorkspaces,
+    { setItem: (_key: string, value: string) => { serialized = value; } }, "cys-layout-v2");
+  save(); // Actual saveLayout, including real workspace/group normalization and JSON encoding.
+  const saved = JSON.parse(serialized);
+  expect(saved.workspaces.map((ws: Workspace) => JSON.stringify(ws.tree))).toEqual(savedTrees);
+  const restored = restore(JSON.stringify(readSettings(null, null, null)), saved.workspaces).restored;
+  expect(restored.map(ws => ws.manual)).toEqual([true, true]);
+  expect(restored[0]).not.toBe(a);
+  expect(restored[1]).not.toBe(b);
+  const fresh = harness(restored[0]);
+  expect(restored.map(ws => fresh.modes.has(ws))).toEqual([false, false]);
+
+  function widths(node: LayoutNode, width: number): number[] {
+    if (node.type === "pane") { expect(width).toBeGreaterThan(0); return [width]; }
+    if (node.dir === "col") return [...widths(node.a, width), ...widths(node.b, width)];
+    const left = (width - 1) * (node.ratio ?? .5);
+    return [...widths(node.a, left), ...widths(node.b, width - left - 1)];
+  }
+  for (const [index, ws] of restored.entries()) {
+    fresh.switchTo(ws);
+    fresh.root.offsetWidth = 1512;
+    fresh.render();
+    expect(JSON.stringify(ws.tree)).toBe(savedTrees[index]);
+    fresh.root.offsetWidth = 1200;
+    fresh.reflow(); // Actual ResizeObserver target, with a changed viewport width.
+    expect(ws.manual).toBe(true);
+    expect(JSON.stringify(ws.tree)).toBe(savedTrees[index]);
+    expect(fresh.root.firstElementChild.style).toEqual({ minWidth: "", minHeight: "" });
+    expect(fresh.root.style.overflow).toBe("");
+    expect(widths(ws.tree!, 1200).every(width => width <= 1200)).toBe(true);
+  }
+  expect(fresh.autoGrid).not.toHaveBeenCalled();
+  expect(fresh.equalWidthLayout).not.toHaveBeenCalled();
+  expect(fresh.gridLayout).not.toHaveBeenCalled();
+
+  fresh.switchTo(restored[0]);
+  await fresh.actionEqualize("grid");
+  const expectedGrid = layouts.gridLayout(treeSids(JSON.parse(savedTrees[0])).map(sid => ({ sid, role: null, head: false })),
+    { w: 1200, h: 900 }, layouts.gridSpecFor(13), "grid");
+  expect(restored[0].manual).toBe(false);
+  expect(restored[0].tree).toEqual(expectedGrid.tree);
+  expect(fresh.gridLayout).toHaveBeenCalled();
+  expect(fresh.equalWidthLayout).not.toHaveBeenCalled();
+  fresh.switchTo(restored[1]);
+  await fresh.actionEqualize("equal");
+  expect(restored[1].manual).toBe(false);
+  expect(fresh.modes.get(restored[1])).toBe("equal");
+  expect(fresh.equalWidthLayout).toHaveBeenCalled();
+  const equalWidths = widths(restored[1].tree!, 1200);
+  expect(equalWidths).toHaveLength(7);
+  for (const width of equalWidths) expect(width).toBeCloseTo((1200 - 6) / 7, 9);
+  console.log("restart PASS: 2 locked trees byte-equal after render/resize; autoGrid/equalWidthLayout/gridLayout calls=0; minWidth/minHeight/overflow cleared; explicit grid/equal verified");
 });

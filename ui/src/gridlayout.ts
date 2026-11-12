@@ -68,6 +68,30 @@ function roleColumn(a: GridSeat | undefined, b: GridSeat | undefined, aShare: nu
   return one ? pane(one.sid) : null;
 }
 
+// Column demand: vertical stacks share width; only row splits add columns.
+export function equalWidthLayout(tree: LayoutNode | null, width: number): GridResult {
+  const counts = new Map<LayoutNode, number>();
+  function count(node: LayoutNode): number {
+    const n = node.type === "pane" ? 1 : node.dir === "row"
+      ? count(node.a) + count(node.b) : Math.max(count(node.a), count(node.b));
+    counts.set(node, n);
+    return n;
+  }
+  function visit(node: LayoutNode, w: number): LayoutNode {
+    if (node.type === "pane") return node;
+    const n = counts.get(node)!;
+    const left = counts.get(node.a)!;
+    // shortcut: dividers are 1px in style.css; update this math if their width changes.
+    const ratio = node.dir === "col" ? node.ratio ?? 0.5
+      : w > n - 1 ? (left * (w - (n - 1)) / n + left - 1) / (w - 1) : left / n;
+    const a = visit(node.a, node.dir === "row" ? Math.max(0, w - 1) * ratio : w);
+    const b = visit(node.b, node.dir === "row" ? Math.max(0, w - 1) * (1 - ratio) : w);
+    return { ...node, a, b, ...(node.dir === "row" ? { ratio } : {}) };
+  }
+  if (tree) count(tree);
+  return { tree: tree ? visit(tree, width) : null, minWidth: 0, minHeight: 0 };
+}
+
 export function gridLayout(seats: readonly GridSeat[], panel: { w: number; h: number }, spec: GridSpec, mode: "columns" | "grid" = "grid"): GridResult {
   if (!seats.length) return { tree: null, minWidth: 0, minHeight: 0 };
 

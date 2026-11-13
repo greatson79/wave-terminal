@@ -151,10 +151,11 @@ jobs:
         shell: bash
         run: |
           python - <<'PY'
-          import os, pathlib, shutil
+          import os, pathlib, runpy
           live = os.environ.get('AGY_LIVE_OUT')
           if live and pathlib.Path(live).is_dir():
-              shutil.copytree(live, 'agy-live-evidence/live', dirs_exist_ok=True)
+              helpers = runpy.run_path('scripts/proofs/agy-live-probe.py')
+              helpers['retain_evidence'](pathlib.Path(live), pathlib.Path('agy-live-evidence/live'))
           PY
       - name: Upload evidence only
         if: always()

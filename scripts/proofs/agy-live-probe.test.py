@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import os
+import socket
 from pathlib import Path
 import subprocess
 import tempfile
@@ -20,6 +21,36 @@ class OwnedProcess:
 
 
 class ProofTests(unittest.TestCase):
+    @unittest.skipUnless(os.name != "nt", "Unix socket fixture")
+    def test_retention_copies_regular_and_hidden_files_but_skips_socket(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, destination = Path(directory) / "source", Path(directory) / "retained"
+            (source / ".hidden").mkdir(parents=True)
+            (source / "result.json").write_bytes(b'{"result":"PASS"}\n')
+            (source / ".hidden/state").write_bytes(b"fixture state\x00\xff")
+            subjects = {str(path.relative_to(source)): probe.sha256(path)
+                        for path in source.rglob("*") if path.is_file()}
+            probe.write_json(source / "SHA256.json", subjects)
+            expected = dict(subjects, **{"SHA256.json": probe.sha256(source / "SHA256.json")})
+            owned_socket = socket.socket(socket.AF_UNIX)
+            try:
+                owned_socket.bind(str(source / "daemon.sock"))
+                probe.retain_evidence(source, destination)
+                actual = {str(path.relative_to(destination)): probe.sha256(path)
+                          for path in destination.rglob("*") if path.is_file()}
+                self.assertEqual(actual, expected)
+                self.assertFalse((destination / "daemon.sock").exists())
+                self.assertTrue((destination / ".hidden/state").is_file())
+                retained_manifest = json.loads((destination / "SHA256.json").read_text())
+                for subject, digest in retained_manifest.items():
+                    self.assertTrue((destination / subject).is_file())
+                    self.assertEqual(probe.sha256(destination / subject), digest)
+                with patch.object(probe.shutil, "copy2", side_effect=OSError("fixture copy failure")):
+                    with self.assertRaises(OSError):
+                        probe.retain_evidence(source, Path(directory) / "failed-copy")
+            finally:
+                owned_socket.close()
+
     def test_fake_cli_and_wrong_arguments(self):
         fake = Path(os.environ["AGY_TEST_FAKE"]).resolve(strict=True)
         with tempfile.TemporaryDirectory() as directory:

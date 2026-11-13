@@ -11,3 +11,8 @@ foreach($report in @("$([char]27)[5~","$([char]27)[<64;11;11M",([string][char]27
  }
 }
 Write-Output 'STUB_SPLIT_REPORT_CONTROLS_PASS'
+
+$line=300;$burst=[ScrollStub]::Burst([ref]$line)
+if($line -ne 305 -or ([regex]::Matches($burst,"`r`n").Count-3) -ne 5 -or [regex]::Matches($burst,[regex]::Escape([char]27+'[2K')).Count -ne 3 -or -not $burst.Contains([char]27+'[3A')){throw 'burst cursor/net-line contract failed'}
+if($burst.Contains([char]27+'[2J')){throw 'full-screen erase forbidden during stream'}
+'BURST_REPAINT_CONTROLS_PASS'

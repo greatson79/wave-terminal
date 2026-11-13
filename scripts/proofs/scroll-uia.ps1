@@ -3,8 +3,9 @@ param([Parameter(Mandatory=$true)][int]$AppPid,
  [Parameter(Mandatory=$true)][string]$Role,
  [Parameter(Mandatory=$true)][int]$SurfaceId,
  [Parameter(Mandatory=$true)][string]$Out,
- [ValidateSet('snapshot','wheel','small','PageUp','ShiftPageUp')][string]$Action='snapshot')
+ [ValidateSet('snapshot','wheel','small','PageUp','ShiftPageUp','triplet','stream-wheel','stream-ShiftPageUp')][string]$Action='snapshot')
 $ErrorActionPreference='Stop'
+$script:CaptureClock=$null
 if ($env:OS -ne 'Windows_NT') { throw 'Windows UIA only' }
 if (Test-Path -LiteralPath $Out) { throw 'fresh output directory required' }
 New-Item -ItemType Directory -Path $Out | Out-Null
@@ -102,7 +103,7 @@ public static class ScrollInput {
   $bitmap=New-Object Drawing.Bitmap([int]$ocrBounds.Width,[int]$ocrBounds.Height)
   try {
    $g=[Drawing.Graphics]::FromImage($bitmap)
-   try { $g.CopyFromScreen([int]$ocrBounds.X,[int]$ocrBounds.Y,0,0,$bitmap.Size) } finally { $g.Dispose() }
+   try { $g.CopyFromScreen([int]$ocrBounds.X,[int]$ocrBounds.Y,0,0,$bitmap.Size);$script:CapturedAt=[DateTime]::UtcNow.ToString('o');if($script:CaptureClock){$script:CapturedElapsed=$script:CaptureClock.ElapsedMilliseconds} } finally { $g.Dispose() }
    $large=New-Object Drawing.Bitmap($bitmap,([Drawing.Size]::new($bitmap.Width*3,$bitmap.Height*3)))
    try { $large.Save((Join-Path $Out ($name+'.raw.png')),[Drawing.Imaging.ImageFormat]::Png); [ScrollInput]::PrepareOcr($large,155); $large.Save((Join-Path $Out $name),[Drawing.Imaging.ImageFormat]::Png) } finally { $large.Dispose() }
   } finally { $bitmap.Dispose() }
@@ -126,22 +127,37 @@ public static class ScrollInput {
  Capture-Terminal 'observer.png'
  Read-VisibleMarkers 'observer.png'
  Capture-Terminal 'pre-input.png'
- $r.preInputTime=[DateTime]::UtcNow.ToString('o')
- if ($Action -in @('wheel','small')) {
+ $r.preInputTime=$script:CapturedAt
+ if ($Action -in @('wheel','small','triplet','stream-wheel')) {
   [ScrollInput]::SetCursorPos([int]($bounds.X+$bounds.Width/2),[int]($bounds.Y+$bounds.Height/2)) | Out-Null
-  if ($Action -eq 'wheel') { [ScrollInput]::Wheel(120); $r.input=@{kind='native-wheel';delta=120;unit='WHEEL_DELTA units; DOM deltaMode unobserved'} }
+  if ($Action -in @('triplet','stream-wheel')) {for($i=0;$i -lt 3;$i++){[ScrollInput]::Wheel(120);if($i -lt 2){Start-Sleep -Milliseconds 16}};$r.input=@{kind='native-wheel';delta=120;count=3;unit='native units, DOM deltaMode unobserved'}}
+  elseif ($Action -eq 'wheel') { [ScrollInput]::Wheel(120); $r.input=@{kind='native-wheel';delta=120;unit='WHEEL_DELTA units; DOM deltaMode unobserved'} }
   else { for($i=0;$i -lt 40;$i++) { [ScrollInput]::Wheel(4); Start-Sleep -Milliseconds 16 }; $r.input=@{kind='native-small-wheel';delta=4;count=40;unit='native wheel units, NOT pixels'} }
- } elseif ($Action -in @('PageUp','ShiftPageUp')) {
-  try { if ($Action -eq 'ShiftPageUp') { [ScrollInput]::Key(0x10,$false) }; [ScrollInput]::Key(0x21,$false) }
-  finally { [ScrollInput]::Key(0x21,$true); if ($Action -eq 'ShiftPageUp') { [ScrollInput]::Key(0x10,$true) } }
+ } elseif ($Action -in @('PageUp','ShiftPageUp','stream-ShiftPageUp')) {
+  try { if ($Action -in @('ShiftPageUp','stream-ShiftPageUp')) { [ScrollInput]::Key(0x10,$false) }; [ScrollInput]::Key(0x21,$false) }
+  finally { [ScrollInput]::Key(0x21,$true); if ($Action -in @('ShiftPageUp','stream-ShiftPageUp')) { [ScrollInput]::Key(0x10,$true) } }
   $r.input=@{kind='native-key';key=$Action}
  }
+ if($Action.StartsWith('stream-')) {
+  $script:CaptureClock=[Diagnostics.Stopwatch]::StartNew();$r.inputEndedAt=[DateTime]::UtcNow.ToString('o');$captures=@()
+  foreach($target in @(50,150,700,2800)) {
+   while($script:CaptureClock.ElapsedMilliseconds -lt $target){Start-Sleep -Milliseconds ([Math]::Max(1,$target-$script:CaptureClock.ElapsedMilliseconds))}
+   $name="frame-$target.png";Capture-Terminal $name
+   $captures+=,@{name=$name;elapsedMs=$script:CapturedElapsed;time=$script:CapturedAt}
+  }
+  Read-VisibleMarkers 'pre-input.png';$r.preInputMarkers=@($r.markers);$r.frames=@()
+  foreach($capture in $captures) {
+   Read-VisibleMarkers $capture.name
+   $r.frames+=,@{name=$capture.name;elapsedMs=$capture.elapsedMs;time=$capture.time;source='terminal-visible-markers';markers=@($r.markers);ocrCandidates=$r.ocrCandidates}
+  }
+ } else {
  Start-Sleep -Milliseconds 150
  Capture-Terminal 'post-input.png'
  $r.postInputTime=[DateTime]::UtcNow.ToString('o')
  Read-VisibleMarkers 'pre-input.png'
  $r.preInputMarkers=@($r.markers)
  Read-VisibleMarkers 'post-input.png'
+ }
  if ($r.markers.Count -ge 2) { $r.outcome='VISIBLE_MARKERS' }
 } catch { $r.error=$_.ToString() }
 finally {

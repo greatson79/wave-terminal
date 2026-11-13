@@ -10,6 +10,13 @@ using System.Threading.Tasks;
 using System.Text.RegularExpressions;
 using System.Runtime.InteropServices;
 public static class ScrollStub {
+ public static string Burst(ref int line) {
+  var output=new StringBuilder();
+  for(int i=0;i<5;i++)output.Append("WR"+(++line+1000).ToString("D4")+"\r\n");
+  output.Append("\x1b[3A\r");
+  for(int i=line-2;i<=line;i++)output.Append("\x1b[2KWR"+(i+1000).ToString("D4")+"\r\n");
+  return output.ToString();
+ }
  public static int Parse(ref string tail,string chunk) {
   tail+=chunk; int delta=0, consumed=0;
   foreach(Match m in Regex.Matches(tail,@"\x1b\[5~|\x1b\[<64;[0-9]+;[0-9]+M|\x1b\[M`..")) {
@@ -33,7 +40,7 @@ public static class ScrollStub {
    string data=Encoding.GetEncoding(28591).GetString(b,0,n);
    Interlocked.Add(ref pending,Parse(ref tail,data));
   }} catch(Exception e) { File.WriteAllText(Path.Combine(dir,"reader-fault.txt"),e.ToString()); throw; }});
-  string last="",activeMode=""; bool stream=false; int line=300; bool alt=false; int top=281;
+  string last="",activeMode=""; bool stream=false,burst=false; int line=300; int burstCount=0; bool alt=false; int top=281;
   for(;;) {
    if(reader.IsCompleted) throw new Exception("input reader stopped",reader.Exception);
    string[] commands=Directory.GetFiles(dir,"control-*.txt"); Array.Sort(commands,StringComparer.Ordinal);
@@ -42,11 +49,11 @@ public static class ScrollStub {
     string value=File.ReadAllText(control).Trim();
     if(value!=last) {
      var parts=value.Split('|'); if(parts.Length!=3) throw new Exception("invalid control");
-     if(parts[2]=="stream-go") {
+     if(parts[2]=="stream-go" || parts[2]=="burst-go" || parts[2]=="pause") {
       if(parts[1]!=activeMode || alt)throw new Exception("invalid streaming activation");
-      last=value;stream=true;File.WriteAllText(Path.Combine(dir,"ready.txt"),last);continue;
+      last=value;stream=parts[2]!="pause";burst=parts[2]=="burst-go";File.WriteAllText(Path.Combine(dir,"ready.txt"),last);continue;
      }
-     activeMode=parts[1];last=value; stream=parts[2]=="stream"; line=300; alt=parts[1].StartsWith("alt-"); top=281; Interlocked.Exchange(ref pending,0);
+     burst=false;burstCount=0;activeMode=parts[1];last=value; stream=parts[2]=="stream"; line=300; alt=parts[1].StartsWith("alt-"); top=281; Interlocked.Exchange(ref pending,0);
      Console.Write("\x1b[?1049l\x1b[?1000l\x1b[?1006l\x1b[3J\x1b[2J\x1b[H");
      if(alt) { Console.Write("\x1b[?1049h"); Draw(top); }
      else for(int i=1;i<=300;i++) Console.Write("WR"+(i+1000).ToString("D4")+"\r\n");
@@ -58,8 +65,13 @@ public static class ScrollStub {
    }
    int delta=Interlocked.Exchange(ref pending,0);
    if(alt && delta!=0){top=Math.Max(1,Math.Min(281,top+delta));Draw(top);}
-   Thread.Sleep(75);
-   if(stream) { Console.Write("WR"+(++line+1000).ToString("D4")+"\r\n"); Console.Out.Flush(); }
+   Thread.Sleep(burst?150:75);
+   if(stream && burst) {
+    string output=Burst(ref line);Console.Write(output);Console.Out.Flush();
+    File.AppendAllText(Path.Combine(dir,"producer.raw"),output);
+    File.AppendAllText(Path.Combine(dir,"producer.tsv"),DateTime.UtcNow.ToString("o")+"\t"+(++burstCount)+"\t"+line+"\n");
+   }
+   else if(stream) { Console.Write("WR"+(++line+1000).ToString("D4")+"\r\n"); Console.Out.Flush(); }
   }
  }
 }

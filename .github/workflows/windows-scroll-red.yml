@@ -12,10 +12,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ['0.3.5']
+        version: ['0.3.5', '0.3.4']
     env:
       SCROLL_VERSION: ${{ matrix.version }}
-      SCROLL_CAPTURE_ONLY: '1'
+      SCROLL_CAPTURE_ONLY: '0'
+      SCROLL_OWNER_CASE: '1'
       CYS_NO_AUTOSTART: '1'
     steps:
       - uses: actions/checkout@v4
@@ -32,7 +33,7 @@ jobs:
       - name: Harness controls and PowerShell parsing
         shell: pwsh
         run: |
-          node --test scripts/proofs/scroll-contract.test.mjs scripts/proofs/scroll-claude-modes.test.mjs
+          node --test scripts/proofs/scroll-contract.test.mjs scripts/proofs/scroll-claude-modes.test.mjs scripts/proofs/scroll-owner-contract.test.mjs
           if ($LASTEXITCODE -ne 0) { throw 'marker controls failed' }
           Get-ChildItem scripts/proofs/scroll-*.ps1 | ForEach-Object {
             $tokens=$null;$errors=$null
@@ -45,12 +46,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'stub parser controls failed' }
           powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/proofs/scroll-ocr.test.ps1
           if ($LASTEXITCODE -ne 0) { throw 'OCR pixel controls failed' }
-      - name: Prepare pinned Claude executable
-        shell: pwsh
-        run: |
-          npm install --prefix "$env:RUNNER_TEMP/claude-f3" @anthropic-ai/claude-code@2.1.323 --no-audit --no-fund
-          if($LASTEXITCODE -ne 0){throw 'pinned Claude install failed'}
-      - name: Pinned app and ConPTY capture in same process scope
+      - name: Pinned app owner-case burst/repaint stream gate
         shell: pwsh
         run: ./scripts/proofs/scroll-install.ps1
       - name: Channel invariant
@@ -67,6 +63,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: claude-conpty-startup
+          name: owner-stream-${{ matrix.version }}
           path: scroll-evidence/**
           if-no-files-found: warn

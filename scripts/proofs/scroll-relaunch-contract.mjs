@@ -1,0 +1,14 @@
+import {classifyViewport} from './scroll-contract.mjs';
+
+export function classifyRelaunch({control, beforeIdentity, afterIdentity, sameSeat, baseline, attempts}) {
+ if (!control || !sameSeat || !Number.isInteger(beforeIdentity?.daemon_pid) ||
+     beforeIdentity.daemon_pid !== afterIdentity?.daemon_pid ||
+     !Number.isFinite(beforeIdentity.started_at) || beforeIdentity.started_at !== afterIdentity?.started_at)
+  return 'NOT EXECUTED';
+ const valid = attempt => attempt?.input && !attempt.error && !attempt.helperError &&
+  classifyViewport(baseline, attempt) !== 'NOT_PROVEN';
+ // A single valid route proves retained history; RED needs all three routes.
+ if (attempts.some(a => valid(a) && classifyViewport(baseline, a) === 'MOVED_UP')) return 'PASS';
+ return ['wheel','ShiftPageUp','scrollbar'].every(action =>
+  attempts.some(a => a.action === action && valid(a))) ? 'RED' : 'NOT EXECUTED';
+}

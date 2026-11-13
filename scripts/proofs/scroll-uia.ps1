@@ -4,7 +4,7 @@ param([Parameter(Mandatory=$true)][int]$AppPid,
  [Parameter(Mandatory=$true)][int]$SurfaceId,
  [Parameter(Mandatory=$true)][string]$Out,
  [string]$GeometryPath,
- [ValidateSet('snapshot','wheel','small','PageUp','ShiftPageUp','triplet','stream-wheel','stream-ShiftPageUp','wheel-high')][string]$Action='snapshot')
+ [ValidateSet('snapshot','wheel','small','PageUp','ShiftPageUp','ShiftPageDown','triplet','stream-wheel','stream-ShiftPageUp','wheel-high')][string]$Action='snapshot')
 $ErrorActionPreference='Stop'
 $script:CaptureClock=$null
 if ($env:OS -ne 'Windows_NT') { throw 'Windows UIA only' }
@@ -146,9 +146,10 @@ public static class ScrollInput {
   if ($Action -in @('triplet','stream-wheel')) {for($i=0;$i -lt 3;$i++){[ScrollInput]::Wheel(120);if($i -lt 2){Start-Sleep -Milliseconds 16}};$r.input=@{kind='native-wheel';delta=120;count=3;unit='native units, DOM deltaMode unobserved'}}
   elseif ($Action -in @('wheel','wheel-high')) { [ScrollInput]::Wheel(120); $r.input=@{kind='native-wheel';delta=120;unit='WHEEL_DELTA units; DOM deltaMode unobserved'} }
   else { for($i=0;$i -lt 40;$i++) { [ScrollInput]::Wheel(4); Start-Sleep -Milliseconds 16 }; $r.input=@{kind='native-small-wheel';delta=4;count=40;unit='native wheel units, NOT pixels'} }
- } elseif ($Action -in @('PageUp','ShiftPageUp','stream-ShiftPageUp')) {
-  try { if ($Action -in @('ShiftPageUp','stream-ShiftPageUp')) { [ScrollInput]::Key(0x10,$false) }; [ScrollInput]::Key(0x21,$false) }
-  finally { [ScrollInput]::Key(0x21,$true); if ($Action -in @('ShiftPageUp','stream-ShiftPageUp')) { [ScrollInput]::Key(0x10,$true) } }
+ } elseif ($Action -in @('PageUp','ShiftPageUp','ShiftPageDown','stream-ShiftPageUp')) {
+  $pageKey=if($Action -eq 'ShiftPageDown'){0x22}else{0x21}
+  try { if ($Action -in @('ShiftPageUp','ShiftPageDown','stream-ShiftPageUp')) { [ScrollInput]::Key(0x10,$false) }; [ScrollInput]::Key($pageKey,$false) }
+  finally { [ScrollInput]::Key($pageKey,$true); if ($Action -in @('ShiftPageUp','ShiftPageDown','stream-ShiftPageUp')) { [ScrollInput]::Key(0x10,$true) } }
   $r.input=@{kind='native-key';key=$Action}
  }
  if($Action.StartsWith('stream-')) {

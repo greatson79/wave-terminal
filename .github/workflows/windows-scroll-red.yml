@@ -13,11 +13,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build: ['0.3.5', 'candidate']
+        build: ['0.3.5']
     env:
       SCROLL_VERSION: '0.3.5'
       SCROLL_BUILD: ${{ matrix.build }}
       SCROLL_FIX_LIVE: '1'
+      SCROLL_RELAUNCH: '1'
       SCROLL_CAPTURE_ONLY: '0'
       SCROLL_OWNER_CASE: '0'
       CYS_NO_AUTOSTART: '1'
@@ -36,7 +37,7 @@ jobs:
       - name: Harness controls and PowerShell parsing
         shell: pwsh
         run: |
-          node --test scripts/proofs/scroll-contract.test.mjs scripts/proofs/scroll-claude-modes.test.mjs scripts/proofs/scroll-owner-contract.test.mjs scripts/proofs/scroll-fix-contract.test.mjs
+          node --test scripts/proofs/scroll-contract.test.mjs scripts/proofs/scroll-claude-modes.test.mjs scripts/proofs/scroll-owner-contract.test.mjs scripts/proofs/scroll-fix-contract.test.mjs scripts/proofs/scroll-relaunch-contract.test.mjs
           if ($LASTEXITCODE -ne 0) { throw 'marker controls failed' }
           Get-ChildItem scripts/proofs/scroll-*.ps1 | ForEach-Object {
             $tokens=$null;$errors=$null
@@ -49,22 +50,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'stub parser controls failed' }
           powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/proofs/scroll-ocr.test.ps1
           if ($LASTEXITCODE -ne 0) { throw 'OCR pixel controls failed' }
-      - name: Download exact candidate build artifact
-        if: matrix.build == 'candidate'
-        uses: actions/download-artifact@v4
-        with:
-          name: cys-windows-x64-nsis
-          run-id: 43418003914
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: candidate
-      - name: Native display geometry for column95 inside the same pane
+      - name: Native display geometry for existing observer
         shell: powershell
         run: |
           Set-DisplayResolution -Width 1920 -Height 1080 -Force -ErrorAction Stop
           Add-Type -AssemblyName System.Windows.Forms
           $screen=[System.Windows.Forms.SystemInformation]::VirtualScreen
-          if($screen.Width -lt 1800){throw 'wide native display unavailable; high-column input not executed'}
-      - name: Pinned release vs candidate scroll L1-L5 and C6
+          if($screen.Width -lt 1800){throw 'native display unavailable; relaunch row not executed'}
+      - name: Installed 0.3.5 Row 1 relaunch only
         shell: pwsh
         run: ./scripts/proofs/scroll-install.ps1
       - name: Channel invariant
@@ -81,6 +74,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: scroll-fix-${{ matrix.build }}
+          name: scroll-relaunch-${{ matrix.build }}
           path: scroll-evidence/**
           if-no-files-found: warn

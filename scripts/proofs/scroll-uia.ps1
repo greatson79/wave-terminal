@@ -16,10 +16,18 @@ function Save-ScrollScreen {
 }
 try {
  Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes,WindowsBase,System.Drawing,System.Windows.Forms
- Add-Type -TypeDefinition @'
+ Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 public static class ScrollInput {
+ public static void PrepareOcr(System.Drawing.Bitmap bitmap) {
+  var data=bitmap.LockBits(new System.Drawing.Rectangle(0,0,bitmap.Width,bitmap.Height),System.Drawing.Imaging.ImageLockMode.ReadWrite,System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+  try { var bytes=new byte[Math.Abs(data.Stride)*data.Height]; Marshal.Copy(data.Scan0,bytes,0,bytes.Length);
+   for(int i=0;i<bytes.Length;i+=4){int gray=(299*bytes[i+2]+587*bytes[i+1]+114*bytes[i]+500)/1000;byte color=(byte)(gray<155?255:0);bytes[i]=bytes[i+1]=bytes[i+2]=color;bytes[i+3]=255;}
+   Marshal.Copy(bytes,0,data.Scan0,bytes.Length);
+  } finally { bitmap.UnlockBits(data); }
+ }
+
  [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint type; public DATA data; }
  [StructLayout(LayoutKind.Explicit)] public struct DATA { [FieldOffset(0)] public MOUSE mouse; [FieldOffset(0)] public KEY key; }
  [StructLayout(LayoutKind.Sequential)] public struct MOUSE { public int x,y; public uint data,flags,time; public UIntPtr extra; }
@@ -95,7 +103,7 @@ public static class ScrollInput {
    $g=[Drawing.Graphics]::FromImage($bitmap)
    try { $g.CopyFromScreen([int]$ocrBounds.X,[int]$ocrBounds.Y,0,0,$bitmap.Size) } finally { $g.Dispose() }
    $large=New-Object Drawing.Bitmap($bitmap,([Drawing.Size]::new($bitmap.Width*3,$bitmap.Height*3)))
-   try { $large.Save((Join-Path $Out $name),[Drawing.Imaging.ImageFormat]::Png) } finally { $large.Dispose() }
+   try { $large.Save((Join-Path $Out ($name+'.raw.png')),[Drawing.Imaging.ImageFormat]::Png); [ScrollInput]::PrepareOcr($large); $large.Save((Join-Path $Out $name),[Drawing.Imaging.ImageFormat]::Png) } finally { $large.Dispose() }
   } finally { $bitmap.Dispose() }
  }
  function Read-VisibleMarkers([string]$name) {

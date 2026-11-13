@@ -41,6 +41,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'readiness controls failed' }
           powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/proofs/scroll-stub.test.ps1
           if ($LASTEXITCODE -ne 0) { throw 'stub parser controls failed' }
+          powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/proofs/scroll-ocr.test.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'OCR pixel controls failed' }
       - name: Pinned installed app observer FIRST and native matrix
         shell: pwsh
         run: ./scripts/proofs/scroll-install.ps1

@@ -69,9 +69,9 @@ try {
  for(let page=1;page<=5;page++) reset=await observe(`control-reset-${page}`,'ShiftPageDown');
  assert.ok(reset.input && classifyViewport(baseline,reset)==='STATIONARY','bottom reset failed: do not relaunch');
  control=true;
- const quit=JSON.parse(execFileSync(ps,['-NoProfile','-NonInteractive','-Command',
-  `$ErrorActionPreference='Stop';$p=Get-Process -Id ${app.pid};$actual=(Get-CimInstance Win32_Process -Filter 'ProcessId=${app.pid}').ExecutablePath;if($actual -ne ${quote(app.path)}){throw 'GUI process identity mismatch'};if(-not $p.CloseMainWindow()){throw 'GUI close refused'};if(-not $p.WaitForExit(15000)){throw 'GUI did not exit; no forced kill'};@{pid=$p.Id;path=$actual;exited=$true}|ConvertTo-Json -Compress`],{encoding:'utf8',timeout:20000,windowsHide:true}));
+ const quit=JSON.parse(execFileSync(ps,['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',resolve('scripts/proofs/scroll-relaunch-close.ps1'),'-GuiPid',String(app.pid),'-DaemonPid',String(identity.daemon_pid),'-ExpectedPath',app.path],{encoding:'utf8',timeout:45000,windowsHide:true}));
  save('relaunch-gui-quit.json',quit);
+ assert.equal(quit.pid,app.pid);assert.equal(quit.gone,true,'old GUI PID not proven gone');
  const survived=JSON.parse(cli(['identify']));save('relaunch-daemon-gui-closed.json',survived);
  assert.equal(survived.daemon_pid,identity.daemon_pid);assert.equal(survived.started_at,identity.started_at);
  const relaunched=JSON.parse(execFileSync(ps,['-NoProfile','-NonInteractive','-Command',
@@ -88,7 +88,7 @@ try {
  for(const action of ['wheel','ShiftPageUp']) {const observation=await observe(action,action);attempts.push(observation);save(`relaunch-${action}.json`,observation);}
  // Shipped CSS hides the scrollbar; do not substitute a fabricated native input.
  save('relaunch-scrollbar.json',{action:'scrollbar',status:'ABSENT BY DESIGN',source:'bcfa8bc6396035885fc66ed79e5507afedb2a2bd ui/src/style.css:516-518',input:null,reason:'shipped ui/src/style.css:517-518 hides viewport scrollbar; no native scrollbar attempt proven'});
- const verdict=classifyRelaunch({control,beforeIdentity:identity,afterIdentity,sameSeat,baseline,attempts});
+ const verdict=classifyRelaunch({guiGone:quit.gone,control,beforeIdentity:identity,afterIdentity,sameSeat,baseline,attempts});
  save('relaunch-result.json',{os:'Windows',verdict,criteria:'criteria_relaunch_row_v2.md (requires Theo activation)',control,sameSeat,attempts,scrollbar:'ABSENT BY DESIGN (source-verified; not a tested input)',ownerCase:'NOT PROVEN',touchpad:'NOT PROVEN'});
  assert.notEqual(verdict,'NOT EXECUTED','row incomplete; retain evidence, never label RED');
 } catch(error) {

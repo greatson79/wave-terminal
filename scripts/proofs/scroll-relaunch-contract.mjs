@@ -1,7 +1,7 @@
 import {classifyViewport} from './scroll-contract.mjs';
 
-export function classifyRelaunch({control, beforeIdentity, afterIdentity, sameSeat, baseline, attempts}) {
- if (!control || !sameSeat || !Number.isInteger(beforeIdentity?.daemon_pid) ||
+export function classifyRelaunch({guiGone, control, beforeIdentity, afterIdentity, sameSeat, baseline, attempts}) {
+ if (guiGone !== true || !control || !sameSeat || !Number.isInteger(beforeIdentity?.daemon_pid) ||
      beforeIdentity.daemon_pid !== afterIdentity?.daemon_pid ||
      !Number.isFinite(beforeIdentity.started_at) || beforeIdentity.started_at !== afterIdentity?.started_at)
   return 'NOT EXECUTED';

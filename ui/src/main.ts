@@ -15,7 +15,7 @@ import { clampWsbarWidth, clampWsbarFont, WSBAR_W_DEFAULT, WSBAR_FONT_STEP } fro
 import { composeFontFamily, FONT_CHOICES, ROLE_COLOR, roleDotColor } from "./appearance";
 import { BAR_IDS, DEFAULT_SETTINGS, readSettings, SETTINGS_KEY } from "./settings";
 import { safeHelpText } from "./help";
-import { bindPaneRename, paneHeading, splitPaneHeading } from "./paneheading";
+import { bindPaneRename, paneHeading } from "./paneheading";
 import { resetTime, sidebarUsage, type UsageAccount } from "./usagebar";
 import { inputSource } from "./inputsource";
 import { routeOnData } from "./mousefilter";
@@ -174,12 +174,7 @@ function displayPaneHeading(el: HTMLElement, sid: number, state?: PaneTitleState
   if (el.isContentEditable) return;
   const heading = paneHeading({ sid, role: state?.role, title: state?.title, label: state?.label, model: state?.model,
     ctx: state?.usage?.ctx_pct, approximate: !!state?.usage && state.usage.source !== "statusline", tail: state?.reported });
-  const [prefix, context] = splitPaneHeading(heading);
-  const ctx = document.createElement("span");
-  ctx.textContent = `CTX ${context.split(" · ")[0]}`;
-  const pct = state?.usage?.ctx_pct;
-  if (pct != null) ctx.className = sevClass(pct, 75, 85);
-  el.replaceChildren(prefix + " · ", ctx, context.includes(" · ") ? ` · ${context.split(" · ").slice(1).join(" · ")}` : "", state?.exited ? " [종료]" : "");
+  el.replaceChildren(heading, state?.exited ? " [종료]" : "");
   el.title = "두 번 눌러 이름 바꾸기";
 }
 
@@ -2847,17 +2842,25 @@ function buildTab(ws: Workspace): HTMLElement {
     sub.appendChild(txt);
   }
   tab.append(titleRow, sub);
-  if (spec?.memberSids.length) {
+  const memberSids = spec?.memberSids ?? (!ws.pending && !ws.collapsed ? sids : []);
+  if (memberSids.length) {
     const members = document.createElement("div");
     members.className = "ws-members";
-    const sorted = sortHqMembers(spec.memberSids.map((sid) => ({ sid,
+    const sorted = sortHqMembers(memberSids.map((sid) => ({ sid,
       title: surfaceTitles.get(paneKey(sid, ws.socket)) ?? "" })));
     for (const member of teamMemberRows(sorted.map(({ sid, title }) => ({ sid, title,
       role: nodeSig.get(`${ws.socket}#${sid}`)?.role ?? null })))) {
       const row = document.createElement("button");
       row.type = "button";
       row.className = "ws-member" + (focusedSid === member.sid ? " focused" : "");
-      row.textContent = member.label;
+      const working = !!paneTitleState.get(paneKey(member.sid, ws.socket))?.reported;
+      const dot = document.createElement("span");
+      dot.className = "ws-dot " + (working ? "working" : "idle");
+      const status = document.createElement("span");
+      status.textContent = working ? "작업 중" : "대기 중";
+      const name = document.createElement("span");
+      name.textContent = " · " + member.label;
+      row.append(dot, status, name);
       row.addEventListener("mousedown", (event) => event.stopPropagation());
       row.addEventListener("click", (event) => {
         event.stopPropagation();

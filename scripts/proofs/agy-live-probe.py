@@ -17,6 +17,16 @@ CANDIDATE_SHA = "c80e2dfb838f9823d5bb413f8cfb8db6dcaa5b53"
 COLLECTOR_ARGS = ["-p", "/usage", "--output-format", "json", "--print-timeout", "10s"]
 
 
+
+def retain_evidence(source, destination):
+    destination.mkdir(parents=True, exist_ok=True)
+    for path in source.rglob("*"):
+        if path.is_file():
+            target = destination / path.relative_to(source)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, target)
+
+
 def write_json(path, value):
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 

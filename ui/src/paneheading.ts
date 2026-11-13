@@ -1,6 +1,6 @@
 import { HQ_SEP, isAddressToken, isHqLeadName, isHqToken } from "./hierarchy";
 
-export function paneHeading({ sid, role, title, label, model, ctx, approximate, tail }: {
+export function paneHeading({ sid, role, title, label }: {
   sid: number;
   role?: string | null;
   title?: string | null;
@@ -12,9 +12,6 @@ export function paneHeading({ sid, role, title, label, model, ctx, approximate, 
 }): string {
   const roleName = role === "master" ? "마스터" : role === "worker" || role?.startsWith("worker-") ? "워커"
     : role === "cso" ? "CSO" : role?.startsWith("reviewer") ? "리뷰어" : role || "";
-  const modelName = model?.replace(/^claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d+))?.*$/i,
-    (_, family: string, major: string, minor?: string) => `${family[0].toUpperCase()}${family.slice(1).toLowerCase()} ${major}${minor ? `.${minor}` : ""}`)
-    .replace(/^claude-/, "") || "";
   // Structured titles identify heads independently of the roles used by routing hooks.
   const parts = (title ?? "").split(HQ_SEP).map((part) => part.trim());
   const dept = parts.findIndex(isHqToken);
@@ -22,10 +19,14 @@ export function paneHeading({ sid, role, title, label, model, ctx, approximate, 
   const name = duty?.match(/^(.+?)\s+본부장$/)?.[1].trim()
     ?? (duty === "본부장" && dept === 1 ? parts[0] : "");
   const headName = name && !isHqToken(name) && !isAddressToken(name) && !isHqLeadName(name) ? name : "";
-  const prefix = headName ? `${["본부장", headName, modelName].filter(Boolean).join(" ")} · s${sid}` : label ? roleName ? `${roleName}(${label})${modelName ? ` ${modelName}` : ""}·s${sid}`
-    : `${label} · s${sid}`
-    : `${[roleName, modelName].filter(Boolean).join(" ")}${roleName || modelName ? "·" : ""}s${sid}`;
-  return `${prefix} · CTX ${ctx == null ? "—" : `${approximate ? "~" : ""}${Math.round(ctx)}%`} · ${tail ? "작업 중" : "대기 중"}`;
+  const seatName = duty && !isHqToken(duty) && !isAddressToken(duty) && !isHqLeadName(duty) ? duty : "";
+  const seatDuty = dept >= 0 ? parts[dept + 2] : undefined;
+  const namedRole = (roleName === "워커" || role === "coo" || role === "secretary") && seatName
+    ? seatDuty === "워커" ? `워커 ${seatName}` : /^(COO|비서\d+)$/i.test(seatDuty ?? "") ? seatName : ""
+    : "";
+  if (headName || namedRole) return `${headName ? `본부장 ${headName}` : namedRole} · s${sid}`;
+  return label ? roleName ? `${roleName}(${label})·s${sid}` : `${label} · s${sid}`
+    : `${roleName}${roleName ? "·" : ""}s${sid}`;
 }
 
 export function splitPaneHeading(heading: string): [string, string] {

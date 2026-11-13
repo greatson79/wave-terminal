@@ -36,8 +36,9 @@ public static class ScrollStub {
   string last=""; bool stream=false; int line=300; bool alt=false; int top=281;
   for(;;) {
    if(reader.IsCompleted) throw new Exception("input reader stopped",reader.Exception);
-   string control=Path.Combine(dir,"control.txt");
-   if(File.Exists(control)) {
+   string[] commands=Directory.GetFiles(dir,"control-*.txt"); Array.Sort(commands,StringComparer.Ordinal);
+   if(commands.Length>0) {
+    string control=commands[commands.Length-1];
     string value=File.ReadAllText(control).Trim();
     if(value!=last) {
      var parts=value.Split('|'); if(parts.Length!=3) throw new Exception("invalid control");

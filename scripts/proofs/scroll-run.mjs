@@ -26,24 +26,34 @@ async function observe(title,ref,dir,action) {
 try {
  assert.equal(process.env.CYS_NO_AUTOSTART,'1');
  assert.ok(!process.env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS,'no CDP retry route');
- save('initial-status.json',JSON.parse(cli(['status','--json'])));
+ const initialStatus=JSON.parse(cli(['status','--json']));save('initial-status.json',initialStatus);
+ let commandNumber=0;
  for(const mode of ['plain','sgr','legacy','alt-sgr','alt-legacy']) {
   const title=`WR-${mode}`;
   const dir=join(out,mode);mkdirSync(dir);
   const command=`powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "& ${quote(resolve('scripts/proofs/scroll-stub.ps1'))} -Directory ${quote(dir)}"`;
   const ref=cli(['new-surface','--cmd',command,'--cwd',process.env.RUNNER_TEMP,'--title',title,'--role',`scroll-${mode}`]);
   assert.match(ref,/^surface:\d+$/);created.push({ref,title});save('created.json',created);
+  // Bind the rendered proof pane before taking the startup-shell snapshot.
+  const layout=await observe(title,ref,join(out,`${mode}-layout`),'snapshot');
+  assert.ok(layout.readiness && layout.bounds,'rendered proof-pane layout not ready');
+  const live=JSON.parse(cli(['status','--json']));
+  assert.equal(live.daemon.build_id,initialStatus.daemon.build_id,'daemon changed during setup');
+  const others=live.surfaces.filter(s=>!s.exited && s.surface_ref!==ref);
+  assert.ok(others.every(s=>!s.agent && !s.role),'unexpected runner agent; do not close it');
+  for(const seat of others)cli(['close-surface',seat.surface_ref]);
+  save(`${mode}-startup-shells-closed.json`,others.map(s=>s.surface_ref));await wait(500);
   try {
    // Positive receipt control separates a dropped report from a dead input reader.
    const health=`health|${mode}|idle`;
-   writeFileSync(join(dir,'control.txt'),health);
+   writeFileSync(join(dir,'next.txt'),health);renameSync(join(dir,'next.txt'),join(dir,'control-0000.txt'));
    const healthDeadline=Date.now()+10000;
    while(!existsSync(join(dir,'ready.txt')) || readFileSync(join(dir,'ready.txt'),'utf8')!==health || !existsSync(join(dir,'reader-ready.txt'))) {
     assert.ok(Date.now()<healthDeadline,'stub/reader readiness not established');await wait(100);
    }
    await wait(400);
    const initial=await observe(title,ref,join(out,`${mode}-observer-first`),'snapshot');
-   assert.ok(!initial.error && !initial.helperError && initial.markers.length>=3,'visible-marker observer unavailable; zero native rows = not executed');
+   assert.ok(!initial.error && !initial.helperError && initial.bounds?.[2]>=500 && initial.markers.length>=3,'visible-marker observer unavailable; zero native rows = not executed');
    const healthInput=await observe(title,ref,join(out,`${mode}-reader-control`),'PageUp');
    assert.ok(!healthInput.helperError && !healthInput.error && healthInput.input,'native positive control injection unavailable');
    await wait(200);
@@ -55,7 +65,7 @@ try {
    for(const stream of (mode.startsWith('alt-')?['idle']:['idle','stream'])) for(const action of (mode.startsWith('alt-')?['wheel','ShiftPageUp']:['wheel','small','PageUp','ShiftPageUp'])) {
     const id=`${mode}-${stream}-${action}`;
     const control=`${id}|${mode}|${stream}`;
-    writeFileSync(join(dir,'next.txt'),control);renameSync(join(dir,'next.txt'),join(dir,'control.txt'));
+    writeFileSync(join(dir,'next.txt'),control);renameSync(join(dir,'next.txt'),join(dir,`control-${String(++commandNumber).padStart(4,'0')}.txt`));
     const deadline=Date.now()+10000;
     while(!existsSync(join(dir,'ready.txt')) || readFileSync(join(dir,'ready.txt'),'utf8')!==control) {
      assert.ok(Date.now()<deadline,'stub did not start/reset; launch not proven');await wait(100);

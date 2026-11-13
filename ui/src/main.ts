@@ -3953,7 +3953,7 @@ function binaryUpdateModal(version: string, seats: number | null): Promise<boole
     (ov.querySelector("h3") as HTMLElement).textContent = `새 본체 버전 ${version} — 패치 설치`;
     const reason = seats === null ? "열린 좌석: 모름. 좌석 정보를 확인하지 못했습니다." : `열린 좌석: ${seats}개.`;
     (ov.querySelector("p") as HTMLElement).textContent = reason +
-      " 업데이트하면 열린 좌석이 닫힙니다. 마지막 미저장분은 손실될 수 있습니다. 작업 파일은 그대로 남고, 업데이트 뒤 마스터에게 다시 열어 달라고 하면 됩니다.";
+      " 업데이트하면 열린 좌석이 닫힙니다. 마지막 미저장분은 손실될 수 있습니다. 작업 파일은 그대로 남습니다. 업데이트 뒤 좌석은 새로 열어야 합니다.";
     later.textContent = "나중에";
     update.textContent = "업데이트 선택";
     let armed = false;

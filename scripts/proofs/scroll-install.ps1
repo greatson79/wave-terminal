@@ -30,6 +30,6 @@ $wave=Join-Path $env:LOCALAPPDATA 'Wave Terminal/wave.exe'
 $ready=$false
 for($i=0;$i -lt 60;$i++){& $wave ping *> $null;if($LASTEXITCODE -eq 0){$ready=$true;break};Start-Sleep -Milliseconds 500}
 if(-not $ready){throw 'HQ daemon readiness failed'}
-if($env:SCROLL_CAPTURE_ONLY -eq '1'){exit 0}
+if($env:SCROLL_CAPTURE_ONLY -eq '1'){node scripts/proofs/scroll-claude-capture.mjs;if($LASTEXITCODE -ne 0){throw 'ConPTY capture incomplete'};exit 0}
 node scripts/proofs/scroll-run.mjs
 if($LASTEXITCODE -ne 0){throw 'native matrix incomplete; retain evidence'}

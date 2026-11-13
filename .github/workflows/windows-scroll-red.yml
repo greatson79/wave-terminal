@@ -16,6 +16,7 @@ jobs:
     env:
       SCROLL_VERSION: ${{ matrix.version }}
       SCROLL_CAPTURE_ONLY: '1'
+      CYS_NO_AUTOSTART: '1'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,16 +45,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'stub parser controls failed' }
           powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/proofs/scroll-ocr.test.ps1
           if ($LASTEXITCODE -ne 0) { throw 'OCR pixel controls failed' }
-      - name: Pinned installed app for ConPTY capture
-        shell: pwsh
-        run: ./scripts/proofs/scroll-install.ps1
-      - name: Claude startup in real ConPTY (no login)
+      - name: Prepare pinned Claude executable
         shell: pwsh
         run: |
           npm install --prefix "$env:RUNNER_TEMP/claude-f3" @anthropic-ai/claude-code@2.1.323 --no-audit --no-fund
           if($LASTEXITCODE -ne 0){throw 'pinned Claude install failed'}
-          node scripts/proofs/scroll-claude-capture.mjs
-          if($LASTEXITCODE -ne 0){throw 'ConPTY startup capture incomplete'}
+      - name: Pinned app and ConPTY capture in same process scope
+        shell: pwsh
+        run: ./scripts/proofs/scroll-install.ps1
       - name: Channel invariant
         if: always()
         shell: pwsh

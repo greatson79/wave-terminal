@@ -13,6 +13,10 @@ const claude=join(process.env.RUNNER_TEMP,'claude-f3','node_modules','@anthropic
 const cli=args=>execFileSync(wave,args,{encoding:'utf8',timeout:15000,windowsHide:true}).trim();
 const version=execFileSync(claude,['--version'],{encoding:'utf8',timeout:15000,windowsHide:true}).trim();
 assert.match(version,/2\.1\.323/);
+assert.equal(process.env.CYS_NO_AUTOSTART,'1','CLI autostart forbidden');
+const status=JSON.parse(cli(['status','--json']));save('daemon-before.json',status.daemon);
+const identity=JSON.parse(readFileSync(resolve('scroll-evidence','identity.json'),'utf8').replace(/^\uFEFF/,''));
+assert.equal(status.daemon.version,'0.3.5');assert.match(status.daemon.build_id,/^[0-9a-f]{12,40}$/i);assert.ok(identity.source.startsWith(status.daemon.build_id),'daemon source pin mismatch');
 const token=randomUUID();writeFileSync(join(out,'token.txt'),token);
 const quote=s=>`'${s.replaceAll("'","''")}'`;
 const command=`powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "& ${quote(resolve('scripts/proofs/scroll-claude-child.ps1'))} -Directory ${quote(out)} -Claude ${quote(claude)}"`;

@@ -60,7 +60,7 @@ public static class ScrollStub {
      if(parts[1]=="sgr" || parts[1]=="alt-sgr") Console.Write("\x1b[?1000h\x1b[?1006h");
      else if(parts[1]=="legacy" || parts[1]=="alt-legacy") Console.Write("\x1b[?1000h\x1b[?1006l");
      else if(parts[1]!="plain") throw new Exception("unknown mode");
-     Console.Out.Flush(); File.WriteAllText(Path.Combine(dir,"ready.txt"),last);
+     Console.Out.Flush(); File.WriteAllText(Path.Combine(dir,"geometry.json"),"{\"cols\":"+Console.WindowWidth+",\"rows\":"+Console.WindowHeight+"}"); File.WriteAllText(Path.Combine(dir,"ready.txt"),last);
     }
    }
    int delta=Interlocked.Exchange(ref pending,0);

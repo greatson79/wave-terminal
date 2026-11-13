@@ -3,6 +3,7 @@ import {execFileSync} from 'node:child_process';
 import {readFileSync,writeFileSync,mkdirSync,existsSync,renameSync,appendFileSync} from 'node:fs';
 import {resolve,join} from 'node:path';
 import {classifyViewport,hasNoOlderResponse} from './scroll-contract.mjs';
+import {checkAltReceipt,checkAltScreen,classifyFixRow} from './scroll-fix-contract.mjs';
 import {classifyOwnerStream,hasActiveOwnerProducer} from './scroll-owner-contract.mjs';
 assert.equal(process.platform,'win32','Windows runner only; no native Mac launch');
 const out=resolve(process.env.SCROLL_OUT || 'scroll-evidence');
@@ -13,13 +14,14 @@ const cli=args=>execFileSync(wave,args,{encoding:'utf8',timeout:15000,windowsHid
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
 const rows=[],created=[];
 let calibrationRows=0;
+const fixLive=process.env.SCROLL_FIX_LIVE==='1';
 const ownerCase=process.env.SCROLL_OWNER_CASE==='1';
 const save=(n,v)=>writeFileSync(join(out,n),JSON.stringify(v,null,2)+'\n');
 const ps=join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe');
 const quote=s=>`'${s.replaceAll("'","''")}'`;
-async function observe(title,ref,dir,action) {
+async function observe(title,ref,dir,action,geometryPath) {
  let error;
- try { execFileSync(ps,['-NoProfile','-NonInteractive','-Mta','-ExecutionPolicy','Bypass','-File',resolve('scripts/proofs/scroll-uia.ps1'),'-AppPid',String(app.pid),'-Title',title,'-Role',`scroll-${title.slice(3)}`,'-SurfaceId',ref.slice(8),'-Out',dir,'-Action',action],{timeout:35000,windowsHide:true,stdio:'pipe'}); }
+ try { execFileSync(ps,['-NoProfile','-NonInteractive','-Mta','-ExecutionPolicy','Bypass','-File',resolve('scripts/proofs/scroll-uia.ps1'),'-AppPid',String(app.pid),'-Title',title,'-Role',`scroll-${title.slice(3)}`,'-SurfaceId',ref.slice(8),'-Out',dir,'-Action',action,...(geometryPath?['-GeometryPath',geometryPath]:[])],{timeout:35000,windowsHide:true,stdio:'pipe'}); }
  catch(e) { error=String(e); }
  const observation=existsSync(join(dir,'observation.json'))?load(join(dir,'observation.json')):{source:'unavailable',markers:[]};
  if(error) observation.helperError=error;
@@ -30,7 +32,7 @@ try {
  assert.equal(process.env.CYS_NO_AUTOSTART,'1');
  assert.ok(!process.env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS,'no CDP retry route');
  const initialStatus=JSON.parse(cli(['status','--json']));save('initial-status.json',initialStatus);
- if(ownerCase){const identity=load(join(out,'identity.json'));assert.equal(initialStatus.daemon.version,process.env.SCROLL_VERSION);assert.match(initialStatus.daemon.build_id,/^[0-9a-f]{12,40}$/i);assert.ok(identity.source.startsWith(initialStatus.daemon.build_id),'daemon source pin mismatch');}
+ if(ownerCase || fixLive){const identity=load(join(out,'identity.json'));assert.equal(initialStatus.daemon.version,process.env.SCROLL_VERSION);assert.match(initialStatus.daemon.build_id,/^[0-9a-f]{12,40}$/i);assert.ok(identity.source.startsWith(initialStatus.daemon.build_id),'daemon source pin mismatch');}
  let commandNumber=0;
  async function publishControl(dir,value) {
   writeFileSync(join(dir,'next.txt'),value);renameSync(join(dir,'next.txt'),join(dir,`control-${String(++commandNumber).padStart(4,'0')}.txt`));
@@ -79,7 +81,7 @@ try {
     assert.ok(calibrationRows>=10,'idle gesture movement must exceed one5-line burst');
     save('owner-idle-calibration.json',calibration);
    }
-   for(const stream of (ownerCase?['burst']:mode.startsWith('alt-')?['idle']:['idle','stream'])) for(const action of (ownerCase?['stream-wheel','stream-ShiftPageUp']:mode.startsWith('alt-')?['wheel','ShiftPageUp']:['wheel','small','PageUp','ShiftPageUp'])) {
+   for(const stream of (ownerCase?['burst']:fixLive || mode.startsWith('alt-')?['idle']:['idle','stream'])) for(const action of (ownerCase?['stream-wheel','stream-ShiftPageUp']:fixLive?(mode.startsWith('alt-')?['wheel','PageUp','wheel-high']:['wheel','ShiftPageUp']):mode.startsWith('alt-')?['wheel','ShiftPageUp']:['wheel','small','PageUp','ShiftPageUp'])) {
     const id=`${mode}-${stream}-${action}`;
     // Native PageUp restores product follow before fresh output; prove its receipt.
     const resetOffset=readFileSync(bytePath).length;
@@ -115,19 +117,34 @@ try {
      continue;
     }
     if(stream==='stream') await publishControl(dir,`${id}-start|${mode}|stream-go`);
+    const gridBefore=fixLive && mode.startsWith('alt-')?cli(['read-screen','--surface',ref]):'';
     const bytesPath=join(dir,'bytes.tsv');
     const offset=existsSync(bytesPath)?readFileSync(bytesPath).length:0;
-    const immediate=await observe(title,ref,join(out,`${id}-input`),action);
+    const immediate=await observe(title,ref,join(out,`${id}-input`),action,action==='wheel-high'?join(dir,'geometry.json'):undefined);
     await wait(700);
     const after=await observe(title,ref,join(out,`${id}-after`),'snapshot');
     const received=existsSync(bytesPath)?readFileSync(bytesPath).subarray(offset).toString('utf8'):'';
     assert.ok(!existsSync(join(dir,'reader-fault.txt')),'input reader faulted');
     const row={id,mode,stream,action,ref,before,immediate,after,viewport:classifyViewport(before,after),receivedBytesTsv:received,inputDelivery:received?'APP_BYTES_OBSERVED':'NO_APP_BYTES_OBSERVED',injection:immediate.input&&!immediate.helperError&&!immediate.error?'NATIVE_SENDINPUT_ACCEPTED':'NOT_PROVEN',hardware:'NOT_TESTED',zeroResponse:hasNoOlderResponse({...immediate,markers:immediate.preInputMarkers},immediate,after),seatKind:mode.startsWith('alt-')?'CLAUDE_ALT_SURROGATE':'NORMAL_RAW_SHELL'};
+    if(fixLive) {
+     const bytes=Buffer.from(received.split('\n').map(line=>(line.split('\t')[1]??'').replaceAll('-','')).join(''),'hex');
+     const gridAfter=mode.startsWith('alt-')?cli(['read-screen','--surface',ref]):'';
+     row.receiptHex=bytes.toString('hex');row.receiptValid=mode.startsWith('alt-') && action.startsWith('wheel')?checkAltReceipt(bytes,mode,action==='wheel-high'):null;
+     row.altScreenValid=mode.startsWith('alt-')?checkAltScreen(gridBefore,gridAfter,before,after):null;row.gridBefore=gridBefore;row.gridAfter=gridAfter;
+     row.fixed=classifyFixRow(row);row.ownerCase='NOT PROVEN';row.touchpad='NOT PROVEN';row.build=process.env.SCROLL_BUILD;
+     row.sees=row.fixed==='PASS'?(mode.startsWith('alt-')?'app history moves via received input; no terminal-buffer displacement or literal report text':'older terminal history becomes visible'):row.fixed==='NOT EXECUTED'?'observer/input unavailable':'no required movement or invalid report delivery';
+    }
     rows.push(row);appendFileSync(join(out,'matrix.jsonl'),JSON.stringify(row)+'\n');
    }
   } finally { cli(['close-surface',ref]); }
  }
- if(ownerCase) {
+ if(fixLive) {
+  const complete=rows.length===12 && rows.every(row=>row.fixed!=='NOT EXECUTED');
+  save('result.json',{outcome:complete?'FIX_LIVE_MEASURED':'NOT_EXECUTED',build:process.env.SCROLL_BUILD,source:load(join(out,'identity.json')).source,allPass:rows.every(row=>row.fixed==='PASS'),rows:rows.length,ownerCase:'NOT PROVEN',touchpad:'NOT PROVEN',tinyDeltaDiagnostic:'NOT EXECUTED per Theo a36416'});
+  save('fix-verdicts.json',rows.map(({id,fixed,sees,receiptHex,receiptValid,altScreenValid})=>({id,fixed,sees,receiptHex,receiptValid,altScreenValid,ownerCase:'NOT PROVEN',touchpad:'NOT PROVEN'})));
+  assert.ok(complete,'fix live-run evidence incomplete; never count rejected rows as pass');
+  assert.ok(process.env.SCROLL_BUILD!=='candidate' || rows.every(row=>row.fixed==='PASS'),'candidate live-run FAIL; inspect per-row evidence');
+ } else if(ownerCase) {
   const complete=rows.length===2 && rows.every(row=>row.verdict!=='NOT EXECUTED');
   save('result.json',{outcome:complete?'OWNER_STREAM_MEASURED':'NOT_EXECUTED',rows:rows.length,version:process.env.SCROLL_VERSION,criteria:'owner stream delta v2 00ac7c1a',ownerAttribution:'NOT_PROVEN'});
   save('owner-verdicts.json',rows.map(({id,verdict,sees,retentionMs})=>({id,verdict,sees,retentionMs})));

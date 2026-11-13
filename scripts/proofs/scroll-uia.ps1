@@ -3,7 +3,8 @@ param([Parameter(Mandatory=$true)][int]$AppPid,
  [Parameter(Mandatory=$true)][string]$Role,
  [Parameter(Mandatory=$true)][int]$SurfaceId,
  [Parameter(Mandatory=$true)][string]$Out,
- [ValidateSet('snapshot','wheel','small','PageUp','ShiftPageUp','triplet','stream-wheel','stream-ShiftPageUp')][string]$Action='snapshot')
+ [string]$GeometryPath,
+ [ValidateSet('snapshot','wheel','small','PageUp','ShiftPageUp','triplet','stream-wheel','stream-ShiftPageUp','wheel-high')][string]$Action='snapshot')
 $ErrorActionPreference='Stop'
 $script:CaptureClock=$null
 if ($env:OS -ne 'Windows_NT') { throw 'Windows UIA only' }
@@ -36,6 +37,7 @@ public static class ScrollInput {
  [StructLayout(LayoutKind.Sequential)] public struct KEY { public ushort vk,scan; public uint flags,time; public UIntPtr extra; }
  [DllImport("user32.dll")] static extern uint SendInput(uint n, INPUT[] a,int size);
  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+ [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h,int cmd);
  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x,int y);
@@ -53,6 +55,7 @@ public static class ScrollInput {
   if($hwnd -ne [IntPtr]::Zero){break};Start-Sleep -Milliseconds 200
  }while($windowClock.ElapsedMilliseconds -lt 5000)
  if ($p.ProcessName -ne 'wave-app' -or $hwnd -eq [IntPtr]::Zero) { throw 'installed app window missing' }
+ if($env:SCROLL_FIX_LIVE -eq '1'){[ScrollInput]::ShowWindow($hwnd,3) | Out-Null;Start-Sleep -Milliseconds 300}
  $root=[System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
  $walker=[System.Windows.Automation.TreeWalker]::RawViewWalker
  function Read-ScrollTree {
@@ -128,10 +131,20 @@ public static class ScrollInput {
  Read-VisibleMarkers 'observer.png'
  Capture-Terminal 'pre-input.png'
  $r.preInputTime=$script:CapturedAt
- if ($Action -in @('wheel','small','triplet','stream-wheel')) {
-  [ScrollInput]::SetCursorPos([int]($bounds.X+$bounds.Width/2),[int]($bounds.Y+$bounds.Height/2)) | Out-Null
+ if ($Action -in @('wheel','small','triplet','stream-wheel','wheel-high')) {
+  if($Action -eq 'wheel-high') {
+   $geometry=Get-Content -LiteralPath $GeometryPath -Raw | ConvertFrom-Json
+   if($geometry.cols -lt 96 -or $geometry.rows -lt 11){throw 'column95/row10 not available in PTY geometry'}
+   $screens=@($scope.descendants | Where-Object {$script:nodes[$_].class -match '(^|\s)xterm-screen(\s|$)'})
+   if($screens.Count -ne 1){throw 'unique xterm screen inside same pane unavailable'}
+   $screen=$script:elements[$screens[0]].Current.BoundingRectangle
+   $x=[int]($screen.X+95.5*$screen.Width/$geometry.cols);$y=[int]($screen.Y+10.5*$screen.Height/$geometry.rows)
+   if(-not $bounds.Contains($x,$y)){throw 'column95 target outside same visible bound pane'}
+   $r.coordinate=@{columnZeroBased=95;rowZeroBased=10;cols=$geometry.cols;rows=$geometry.rows;screen=@($screen.X,$screen.Y,$screen.Width,$screen.Height);x=$x;y=$y}
+   [ScrollInput]::SetCursorPos($x,$y) | Out-Null
+  } else { [ScrollInput]::SetCursorPos([int]($bounds.X+$bounds.Width/2),[int]($bounds.Y+$bounds.Height/2)) | Out-Null }
   if ($Action -in @('triplet','stream-wheel')) {for($i=0;$i -lt 3;$i++){[ScrollInput]::Wheel(120);if($i -lt 2){Start-Sleep -Milliseconds 16}};$r.input=@{kind='native-wheel';delta=120;count=3;unit='native units, DOM deltaMode unobserved'}}
-  elseif ($Action -eq 'wheel') { [ScrollInput]::Wheel(120); $r.input=@{kind='native-wheel';delta=120;unit='WHEEL_DELTA units; DOM deltaMode unobserved'} }
+  elseif ($Action -in @('wheel','wheel-high')) { [ScrollInput]::Wheel(120); $r.input=@{kind='native-wheel';delta=120;unit='WHEEL_DELTA units; DOM deltaMode unobserved'} }
   else { for($i=0;$i -lt 40;$i++) { [ScrollInput]::Wheel(4); Start-Sleep -Milliseconds 16 }; $r.input=@{kind='native-small-wheel';delta=4;count=40;unit='native wheel units, NOT pixels'} }
  } elseif ($Action -in @('PageUp','ShiftPageUp','stream-ShiftPageUp')) {
   try { if ($Action -in @('ShiftPageUp','stream-ShiftPageUp')) { [ScrollInput]::Key(0x10,$false) }; [ScrollInput]::Key(0x21,$false) }

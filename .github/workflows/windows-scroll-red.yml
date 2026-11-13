@@ -5,6 +5,7 @@ on:
     paths: ['.github/workflows/windows-scroll-red.yml', 'scripts/proofs/scroll-*']
 permissions:
   contents: read
+  actions: read
 jobs:
   scroll:
     runs-on: windows-2022
@@ -12,11 +13,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ['0.3.5', '0.3.4']
+        build: ['0.3.5', 'candidate']
     env:
-      SCROLL_VERSION: ${{ matrix.version }}
+      SCROLL_VERSION: '0.3.5'
+      SCROLL_BUILD: ${{ matrix.build }}
+      SCROLL_FIX_LIVE: '1'
       SCROLL_CAPTURE_ONLY: '0'
-      SCROLL_OWNER_CASE: '1'
+      SCROLL_OWNER_CASE: '0'
       CYS_NO_AUTOSTART: '1'
     steps:
       - uses: actions/checkout@v4
@@ -33,7 +36,7 @@ jobs:
       - name: Harness controls and PowerShell parsing
         shell: pwsh
         run: |
-          node --test scripts/proofs/scroll-contract.test.mjs scripts/proofs/scroll-claude-modes.test.mjs scripts/proofs/scroll-owner-contract.test.mjs
+          node --test scripts/proofs/scroll-contract.test.mjs scripts/proofs/scroll-claude-modes.test.mjs scripts/proofs/scroll-owner-contract.test.mjs scripts/proofs/scroll-fix-contract.test.mjs
           if ($LASTEXITCODE -ne 0) { throw 'marker controls failed' }
           Get-ChildItem scripts/proofs/scroll-*.ps1 | ForEach-Object {
             $tokens=$null;$errors=$null
@@ -46,7 +49,22 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'stub parser controls failed' }
           powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/proofs/scroll-ocr.test.ps1
           if ($LASTEXITCODE -ne 0) { throw 'OCR pixel controls failed' }
-      - name: Pinned app owner-case burst/repaint stream gate
+      - name: Download exact candidate build artifact
+        if: matrix.build == 'candidate'
+        uses: actions/download-artifact@v4
+        with:
+          name: cys-windows-x64-nsis
+          run-id: 43418003914
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: candidate
+      - name: Native display geometry for column95 inside the same pane
+        shell: powershell
+        run: |
+          Set-DisplayResolution -Width 1920 -Height 1080 -Force -ErrorAction Stop
+          Add-Type -AssemblyName System.Windows.Forms
+          $screen=[System.Windows.Forms.SystemInformation]::VirtualScreen
+          if($screen.Width -lt 1800){throw 'wide native display unavailable; high-column input not executed'}
+      - name: Pinned release vs candidate scroll L1-L5 and C6
         shell: pwsh
         run: ./scripts/proofs/scroll-install.ps1
       - name: Channel invariant
@@ -63,6 +81,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: owner-stream-${{ matrix.version }}
+          name: scroll-fix-${{ matrix.build }}
           path: scroll-evidence/**
           if-no-files-found: warn

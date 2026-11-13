@@ -10,11 +10,20 @@ if(-not $pins.ContainsKey($version)){throw 'unapproved version'}
 $changes=@(git diff --name-only bcfa8bc6396035885fc66ed79e5507afedb2a2bd HEAD)
 foreach($f in $changes){if($f -notmatch '^(scripts/proofs/scroll-[^/]+|\.github/workflows/windows-scroll-red\.yml)$'){throw "product path changed: $f"}}
 Invoke-WebRequest https://github.com/greatson79/wave-terminal/releases/latest/download/latest.json -OutFile scroll-evidence/channel-before.json
-$url="https://github.com/greatson79/wave-terminal/releases/download/v$version/wave-terminal-$version-windows-x64-setup.exe"
-Invoke-WebRequest $url -OutFile scroll-evidence/setup.exe
+if($env:SCROLL_BUILD -eq 'candidate') {
+ if($version -ne '0.3.5'){throw 'candidate metadata version mismatch'}
+ $pins[$version]=@{sha='48c504630147be6a0678bb3d2375970027970eb45947559af484596764f5abc3';source='c80e2dfb838f9823d5bb413f8cfb8db6dcaa5b53'}
+ $url='https://github.com/greatson79/wave-terminal/actions/runs/43418003914/artifacts/14034185775'
+ $setup=@(Get-ChildItem candidate -Recurse -Filter '*setup.exe')
+ if($setup.Count -ne 1){throw 'exactly one candidate installer required'}
+ Copy-Item -LiteralPath $setup[0].FullName -Destination scroll-evidence/setup.exe
+} else {
+ $url="https://github.com/greatson79/wave-terminal/releases/download/v$version/wave-terminal-$version-windows-x64-setup.exe"
+ Invoke-WebRequest $url -OutFile scroll-evidence/setup.exe
+}
 $sha=(Get-FileHash scroll-evidence/setup.exe -Algorithm SHA256).Hash
 if($sha -ne $pins[$version].sha){throw 'installer hash mismatch'}
-@{version=$version;sha256=$sha;source=$pins[$version].source;url=$url} | ConvertTo-Json | Set-Content scroll-evidence/identity.json
+@{build=$env:SCROLL_BUILD;version=$version;sha256=$sha;source=$pins[$version].source;url=$url} | ConvertTo-Json | Set-Content scroll-evidence/identity.json
 $install=Start-Process (Resolve-Path scroll-evidence/setup.exe) -ArgumentList '/S' -PassThru
 if(-not $install.WaitForExit(180000) -or $install.ExitCode -ne 0){throw 'installer failed or timed out'}
 $app=Join-Path $env:LOCALAPPDATA 'Wave Terminal/wave-app.exe'

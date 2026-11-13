@@ -1,0 +1,166 @@
+name: agy usage installed-candidate live proof
+on:
+  push:
+    branches: [proof/scroll-red-1113]
+    paths:
+      - '.github/workflows/agy-usage-live.yml'
+      - '.github/agy-live-inputs.json'
+      - 'scripts/proofs/agy-*'
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: agy-live-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  live:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PROOF_OS: ${{ matrix.os }}
+      CANDIDATE_SHA: c80e2dfb838f9823d5bb413f8cfb8db6dcaa5b53
+    steps:
+      - name: Enforce the explicit 23:30 KST allow deadline
+        shell: bash
+        run: |
+          python - <<'PY'
+          from datetime import datetime, timedelta, timezone
+          deadline = datetime(2026, 11, 13, 14, 30, tzinfo=timezone.utc)
+          if datetime.now(timezone.utc) + timedelta(minutes=31) >= deadline:
+              raise SystemExit('Allow ends at 23:30 KST; insufficient time for the bounded 30-minute job')
+          PY
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Download only the successful pinned candidate build artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, json, os, pathlib, re, subprocess, tempfile
+          evidence = pathlib.Path('agy-live-evidence'); evidence.mkdir()
+          live = pathlib.Path(tempfile.mkdtemp(prefix='agy-live-', dir=os.environ['RUNNER_TEMP'] if os.name == 'nt' else '/tmp'))
+          with open(os.environ['GITHUB_ENV'], 'a') as stream:
+              stream.write('AGY_LIVE_OUT=' + str(live.resolve()) + '\n')
+          inputs = json.loads(pathlib.Path('.github/agy-live-inputs.json').read_text())
+          expected = os.environ['CANDIDATE_SHA']
+          assert inputs['candidate_sha'] == expected
+          windows = os.environ['PROOF_OS'] == 'windows-latest'
+          run_id = str(inputs['windows_run_id' if windows else 'macos_run_id'])
+          assert re.fullmatch(r'[0-9]+', run_id), 'invalid run id'
+          workflow = '.github/workflows/' + ('windows-build.yml' if windows else 'macos-runtime-build.yml')
+          artifact_name = 'cys-windows-x64-nsis' if windows else 'w3-macos-arm64-' + expected
+          repo = 'greatson79/wave-terminal'
+          def api(endpoint):
+              return json.loads(subprocess.check_output(['gh', 'api', endpoint], text=True))
+          run = api(f'repos/{repo}/actions/runs/{run_id}')
+          assert run['head_sha'] == expected and run['conclusion'] == 'success', 'build identity/result mismatch'
+          assert run['path'] == workflow, 'wrong workflow'
+          artifacts = api(f'repos/{repo}/actions/runs/{run_id}/artifacts')['artifacts']
+          selected = [a for a in artifacts if a['name'] == artifact_name and not a['expired']]
+          assert len(selected) == 1, 'missing/ambiguous artifact'
+          subprocess.run(['gh', 'run', 'download', run_id, '-R', repo, '-n', artifact_name, '-D', 'candidate-download'], check=True)
+          files = {}
+          for path in pathlib.Path('candidate-download').rglob('*'):
+              if path.is_file():
+                  with path.open('rb') as stream:
+                      files[str(path)] = hashlib.file_digest(stream, 'sha256').hexdigest()
+          (evidence / 'build-artifact-identity.json').write_text(json.dumps({'run': run, 'artifact': selected[0], 'file_sha256': files}, indent=2))
+          print(json.dumps({'run_id': run_id, 'head_sha': expected, 'artifact': artifact_name}))
+          PY
+      - name: Install the Windows candidate from its NSIS artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setups = @(Get-ChildItem candidate-download -Recurse -File -Filter '*setup.exe')
+          if ($setups.Count -ne 1) { throw 'Expected one pinned NSIS installer' }
+          $install = Join-Path $env:RUNNER_TEMP 'agy-candidate-installed'
+          $process = Start-Process -FilePath $setups[0].FullName -ArgumentList @('/S', "/D=$install") -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Installer exit $($process.ExitCode)" }
+          $daemon = Join-Path $install 'waved.exe'
+          if (-not (Test-Path -LiteralPath $daemon)) { throw 'Installed waved.exe missing' }
+          # The fresh runner owns this installation; never stop a process outside that exact directory.
+          $auto = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($install + '\', [StringComparison]::OrdinalIgnoreCase) })
+          $auto | Select-Object ProcessId, ParentProcessId, ExecutablePath, CommandLine | ConvertTo-Json -Depth 4 | Set-Content agy-live-evidence/installer-owned-processes.json
+          foreach ($child in $auto) { Stop-Process -Id $child.ProcessId -ErrorAction SilentlyContinue }
+          "AGY_INSTALLED_DAEMON=$daemon" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          @{installer=$setups[0].FullName;install=$install;daemon=$daemon;daemon_sha256=(Get-FileHash $daemon -Algorithm SHA256).Hash} | ConvertTo-Json | Set-Content agy-live-evidence/install.json
+      - name: Install the macOS candidate from its read-only DMG
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          images = list(pathlib.Path('candidate-download').rglob('*.dmg'))
+          assert len(images) == 1, 'Expected one pinned DMG'
+          mount = pathlib.Path(os.environ['RUNNER_TEMP']) / 'agy-dmg-mount'; mount.mkdir()
+          install = pathlib.Path(os.environ['RUNNER_TEMP']) / 'agy-candidate-installed'; install.mkdir()
+          subprocess.run(['hdiutil', 'attach', '-readonly', '-nobrowse', '-mountpoint', str(mount), str(images[0])], check=True)
+          try:
+              apps = list(mount.glob('*.app')); assert len(apps) == 1
+              app = install / apps[0].name
+              subprocess.run(['ditto', str(apps[0]), str(app)], check=True)
+          finally:
+              subprocess.run(['hdiutil', 'detach', str(mount)], check=True)
+          daemon = app / 'Contents/MacOS/waved'; assert daemon.is_file()
+          with daemon.open('rb') as stream:
+              digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+          pathlib.Path('agy-live-evidence/install.json').write_text(json.dumps({'dmg': str(images[0]), 'app': str(app), 'daemon': str(daemon), 'daemon_sha256': digest}, indent=2))
+          with open(os.environ['GITHUB_ENV'], 'a') as stream:
+              stream.write('AGY_INSTALLED_DAEMON=' + str(daemon.resolve()) + '\n')
+          PY
+      - name: Compile only the fake agy executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/agy-proof-fake"
+          suffix=''; if [ "$RUNNER_OS" = 'Windows' ]; then suffix='.exe'; fi
+          rustc scripts/proofs/agy-fake.rs -O -o "$RUNNER_TEMP/agy-proof-fake/agy$suffix"
+          python - <<'PY'
+          import os, pathlib
+          fake = pathlib.Path(os.environ['RUNNER_TEMP']) / 'agy-proof-fake' / ('agy.exe' if os.name == 'nt' else 'agy')
+          with open(os.environ['GITHUB_ENV'], 'a') as stream:
+              stream.write('AGY_PROOF_FAKE=' + str(fake.resolve()) + '\n')
+          PY
+      - name: Validate fake and evidence-classifier helpers only
+        shell: bash
+        run: |
+          set -euo pipefail
+          AGY_TEST_FAKE="$AGY_PROOF_FAKE" python scripts/proofs/agy-live-probe.test.py -v
+      - name: Observe L1-L3 for at least eleven real minutes
+        shell: bash
+        timeout-minutes: 22
+        run: |
+          set -euo pipefail
+          duration=660
+          # Windows Known Folder ignores HOME/USERPROFILE, so configured cases use live metadata seats.
+          # They become eligible after startup and need the 300/600/900-second ticks.
+          if [ "$RUNNER_OS" = 'Windows' ]; then duration=960; fi
+          python scripts/proofs/agy-live-probe.py --daemon "$AGY_INSTALLED_DAEMON" --fake "$AGY_PROOF_FAKE" --out "$AGY_LIVE_OUT" --duration-secs "$duration"
+      - name: Retain short-path live evidence even on failure
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, pathlib, shutil
+          live = os.environ.get('AGY_LIVE_OUT')
+          if live and pathlib.Path(live).is_dir():
+              shutil.copytree(live, 'agy-live-evidence/live', dirs_exist_ok=True)
+          PY
+      - name: Upload evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agy-live-${{ runner.os }}-${{ github.run_id }}
+          path: agy-live-evidence/**
+          if-no-files-found: error
+          retention-days: 7

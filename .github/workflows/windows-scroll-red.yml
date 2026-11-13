@@ -1,0 +1,63 @@
+name: windows-scroll-red
+on:
+  push:
+    branches: [proof/scroll-red-1113]
+    paths: ['.github/workflows/windows-scroll-red.yml', 'scripts/proofs/scroll-*']
+permissions:
+  contents: read
+jobs:
+  scroll:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ['0.3.5', '0.3.4']
+    env:
+      SCROLL_VERSION: ${{ matrix.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Observer dependency (runner only)
+        shell: pwsh
+        run: |
+          choco install tesseract --no-progress -y
+          if ($LASTEXITCODE -ne 0) { throw 'OCR install failed' }
+      - name: Harness controls and PowerShell parsing
+        shell: pwsh
+        run: |
+          node --test scripts/proofs/scroll-contract.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'marker controls failed' }
+          Get-ChildItem scripts/proofs/scroll-*.ps1 | ForEach-Object {
+            $tokens=$null;$errors=$null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName,[ref]$tokens,[ref]$errors) | Out-Null
+            if ($errors.Count) { throw ($errors | Out-String) }
+          }
+          powershell.exe -NoProfile -NonInteractive -Mta -ExecutionPolicy Bypass -File scripts/proofs/scroll-readiness.test.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'readiness controls failed' }
+          powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/proofs/scroll-stub.test.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'stub parser controls failed' }
+      - name: Pinned installed app observer FIRST and native matrix
+        shell: pwsh
+        run: ./scripts/proofs/scroll-install.ps1
+      - name: Channel invariant
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path scroll-evidence/channel-before.json) {
+            Invoke-WebRequest https://github.com/greatson79/wave-terminal/releases/latest/download/latest.json -OutFile scroll-evidence/channel-after.json
+            $a=(Get-FileHash scroll-evidence/channel-before.json -Algorithm SHA256).Hash
+            $b=(Get-FileHash scroll-evidence/channel-after.json -Algorithm SHA256).Hash
+            @{before=$a;after=$b;unchanged=($a -eq $b)} | ConvertTo-Json | Set-Content scroll-evidence/channel-check.json
+            if($a -ne $b){throw 'channel changed'}
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scroll-red-${{ matrix.version }}
+          path: scroll-evidence/**
+          if-no-files-found: warn

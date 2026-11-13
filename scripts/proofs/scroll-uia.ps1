@@ -110,7 +110,7 @@ public static class ScrollInput {
  }
  function Read-VisibleMarkers([string]$name) {
   $candidates=@()
-  foreach($cutoff in @(155,135,125,120)) {
+  foreach($cutoff in @(155,135,125,120,110,170)) {
    $candidateName=$name+".cut$cutoff.png"
    $candidate=[Drawing.Bitmap]::new((Join-Path $Out ($name+'.raw.png')))
    try { [ScrollInput]::PrepareOcr($candidate,$cutoff);$candidate.Save((Join-Path $Out $candidateName),[Drawing.Imaging.ImageFormat]::Png) } finally {$candidate.Dispose()}

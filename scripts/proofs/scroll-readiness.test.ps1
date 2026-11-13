@@ -54,7 +54,7 @@ try { Find-ScrollPane -Nodes $cross -HeaderIndex 3 | Out-Null } catch { $rejecte
 if(-not $rejected){throw 'cross-seat input binding accepted'}
 'PASS rejects other-seat input under shared layout'
 $rejected=$false
-try { Wait-ScrollPage -ReadTree { Start-Sleep -Milliseconds 30; $ready } -Role scroll-plain -SurfaceId 2 -TimeoutMs 20 -PollMs 1 | Out-Null } catch { if($_ -notmatch 'SCROLL_READINESS_TIMEOUT'){throw};$rejected=$true }
+try { Wait-ScrollPage -ReadTree {  $late=[Diagnostics.Stopwatch]::StartNew(); while($late.ElapsedMilliseconds -lt 100){[Threading.Thread]::Sleep(5)}; $ready } -Role scroll-plain -SurfaceId 2 -TimeoutMs 20 -PollMs 1 | Out-Null } catch { if($_ -notmatch 'SCROLL_READINESS_TIMEOUT'){throw};$rejected=$true }
 if(-not $rejected){throw 'late readiness accepted after deadline'}
 'PASS rejects readiness arriving after deadline'
 

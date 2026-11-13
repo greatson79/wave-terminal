@@ -78,7 +78,12 @@ public static class ScrollInput {
  if (-not [System.Windows.Automation.Automation]::Compare($focus,$edit[0])) { throw 'proof terminal not focused' }
  $bounds=$pane.Current.BoundingRectangle
  $appBounds=$root.Current.BoundingRectangle
- if($pane.Current.IsOffscreen -or $bounds.IsEmpty -or $bounds.Width -le 0 -or $bounds.Height -le 0 -or -not $appBounds.Contains($bounds)){throw 'terminal bounds not visibly contained in proof app'}
+ $r.originalPaneBounds=@($bounds.X,$bounds.Y,$bounds.Width,$bounds.Height)
+ # A horizontally overflowing pane is cropped to its own visible app/screen intersection.
+ $bounds=[Windows.Rect]::Intersect($bounds,$appBounds)
+ $desktop=[System.Windows.Forms.SystemInformation]::VirtualScreen
+ $bounds=[Windows.Rect]::Intersect($bounds,[Windows.Rect]::new($desktop.X,$desktop.Y,$desktop.Width,$desktop.Height))
+ if($pane.Current.IsOffscreen -or $bounds.IsEmpty -or $bounds.Width -lt 100 -or $bounds.Height -lt 100){throw 'bound terminal has no usable visible app/screen intersection'}
  $r.bounds=@($bounds.X,$bounds.Y,$bounds.Width,$bounds.Height)
  function Capture-Terminal([string]$name) {
   # UIA identifies the pane; OCR observes only its rendered pixels.
@@ -91,7 +96,7 @@ public static class ScrollInput {
   } finally { $bitmap.Dispose() }
  }
  function Read-VisibleMarkers([string]$name) {
-  $text=& 'C:/Program Files/Tesseract-OCR/tesseract.exe' (Join-Path $Out $name) stdout --psm 6 2> (Join-Path $Out ($name+'.stderr.txt'))
+  $text=& 'C:/Program Files/Tesseract-OCR/tesseract.exe' (Join-Path $Out $name) stdout --psm 6 -c tessedit_char_whitelist=WR0123456789 2> (Join-Path $Out ($name+'.stderr.txt'))
   if($LASTEXITCODE -ne 0){throw 'terminal OCR failed'}
   $text | Set-Content (Join-Path $Out ($name+'.txt')) -Encoding UTF8
   $r.markers=@([regex]::Matches(($text -join "`n"),'(?m)^WR(\d{4})\s*$') | ForEach-Object { [int]$_.Groups[1].Value })

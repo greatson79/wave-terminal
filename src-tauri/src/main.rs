@@ -13,6 +13,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_updater::UpdaterExt;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
+#[cfg(all(test, unix))]
+mod update_fleet_tests;
+
 mod user_settings;
 mod rename_migration;
 mod dept_teardown;
@@ -522,6 +525,41 @@ async fn rpc_oneshot(socket: &std::path::Path, method: &str, params: Value) -> R
             .unwrap_or("unknown error")
             .to_string())
     }
+}
+
+/// Update decisions require complete inventory; keep the permissive display reader separate.
+#[tauri::command]
+async fn org_fleet_for_update() -> Result<Value, String> {
+    read_update_fleet(&cys::depts_json_path(), default_socket()).await
+}
+
+async fn read_update_fleet(registry_path: &std::path::Path, primary: std::path::PathBuf) -> Result<Value, String> {
+    let bytes = std::fs::read(registry_path).map_err(|e| e.to_string())?;
+    let registry: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let depts = registry.get("depts").and_then(Value::as_object).ok_or("missing department inventory")?;
+    let mut targets = vec![("_hq".to_string(), primary)];
+    for (name, meta) in depts {
+        let socket = meta.get("socket").and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty()).ok_or("missing department endpoint")?;
+        targets.push((name.clone(), std::path::PathBuf::from(socket)));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut departments = Vec::new();
+    for (name, socket) in targets {
+        if !seen.insert(socket.clone()) { continue; }
+        let status = tokio::time::timeout(std::time::Duration::from_secs(2),
+            rpc_oneshot(&socket, "org.status", json!({})))
+            .await.map_err(|_| "fleet read timeout".to_string())??;
+        let surfaces = status.get("surfaces").and_then(Value::as_array).ok_or("missing surface inventory")?;
+        for seat in surfaces {
+            if seat.get("surface_id").and_then(Value::as_u64).filter(|id| *id > 0).is_none()
+                || seat.get("exited").and_then(Value::as_bool).is_none() {
+                return Err("invalid surface identity or exited state".into());
+            }
+        }
+        departments.push(json!({"name": name, "surfaces": surfaces}));
+    }
+    Ok(json!({"departments": departments}))
 }
 
 /// Tasks Control Center — 모든 부서의 모든 노드를 한 콜로 집계한다("부서 다중소켓 보드").
@@ -2771,6 +2809,7 @@ fn main() {
             prepare_help,
             send_help,
             org_fleet,
+            org_fleet_for_update,
             ensure_dept_forwarders,
             control_analytics,
             control_skills,

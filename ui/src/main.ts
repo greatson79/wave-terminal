@@ -3882,7 +3882,7 @@ async function checkForUpdate(silent: boolean) {
       // silent 경로에만 해당·비silent도 모달 1개 상한), 본체는 토스트로 병행 안내(T5 경로 유지).
       if (!silent) {
         promptPackInstall();
-        toast("feed", "🔄 새 본체도 있음", `새 본체 ${updateAvailable!.version} — 상단 Update 버튼으로 패치 설치(재시작·자동 복원)`);
+        toast("feed", "🔄 새 본체도 있음", `새 본체 ${updateAvailable!.version} — 상단 Update 버튼으로 패치 설치(좌석 종료·앱 재시작)`);
       } else toast("feed", "↻ 무중단 팩 + 새 본체", plan.toastMsg);
       break;
     case "binary":
@@ -3909,40 +3909,74 @@ async function checkForUpdate(silent: boolean) {
   }
 }
 
-/// 본체(바이너리) 패치 설치 — 오너 지시(2026-07-15)로 인앱 install_update 재배선(구 T5 홈페이지
-/// 전용 정책의 실험적 개정). install_update = drain 저장 신호 → 다운로드·서명검증 → .app 교체 →
-/// 데몬 핸드오프 → 앱 재시작(부서·노드는 피닉스·resume으로 자동 복원). 진행 표시는
-/// update-progress 리스너("upd-bin" sticky)가 전담한다.
+/// Binary updates close seats; only an explicit dialog choice may start installation.
 async function promptBinaryPatch() {
   if (!updateAvailable) {
     await checkForUpdate(false);
     return;
   }
   const v = updateAvailable.version;
+  let seats: number | null = null;
   try {
-    const fleet = await invoke("org_fleet") as { departments: { surfaces: { exited: boolean }[]; error?: string }[] };
-    const hasLiveSeats = fleet.departments.some((dept) => dept.surfaces.some((seat) => seat.exited === false));
-    if (!hasLiveSeats && fleet.departments.some((dept) => dept.error)) {
-      throw new Error("열린 좌석을 확인하지 못했습니다. 잠시 뒤 다시 시도해 주세요.");
+    const fleet = await invoke("org_fleet_for_update") as { departments: { surfaces: { surface_id: number; exited: boolean }[]; error?: string }[] };
+    if (Array.isArray(fleet?.departments) && fleet.departments.length > 0 && fleet.departments.every((dept) =>
+      dept && !dept.error && Array.isArray(dept.surfaces) && dept.surfaces.every((seat) =>
+        seat && Number.isSafeInteger(seat.surface_id) && seat.surface_id > 0 && typeof seat.exited === "boolean"))) {
+      seats = fleet.departments.reduce((n, dept) => n + dept.surfaces.filter((seat) => !seat.exited).length, 0);
     }
-    const ok = hasLiveSeats ? await confirmModal(
+  } catch {
+    // Unknown inventory still offers the explicit close-and-update choice.
+  }
+  try {
+    const ok = seats === 0 ? await confirmModal(
       `새 본체 버전 ${v} — 패치 설치`,
-      "업데이트하면 열린 좌석이 닫힙니다. 작업 파일은 그대로 남고, 업데이트 뒤 마스터에게 다시 열어 달라고 하면 됩니다.",
-      "지금 업데이트", "나중에",
-    ) : await confirmModal(
-      `새 본체 버전 ${v} — 패치 설치`,
-      `새 본체(앱) ${v}을 패치 방식으로 설치합니다: 저장(drain) 신호 후 다운로드·서명 검증·교체하고 앱을 ` +
-        `재시작합니다. 부서·노드는 재시작 후 자동 복원됩니다(대화 기억 포함). 마지막 미저장분은 손실될 수 ` +
-        `있습니다.\n\n지금 설치하시겠습니까? (수동 설치는 다운로드 페이지 https://waveainetworks.com/get)`,
+      `새 본체(앱) ${v}을 설치하고 앱을 재시작합니다. 좌석은 새로 열립니다. 마지막 미저장분은 손실될 수 있습니다.` +
+        `\n\n지금 설치하시겠습니까? (수동 설치는 다운로드 페이지 https://waveainetworks.com/get)`,
       "설치",
-    );
+    ) : await binaryUpdateModal(v, seats);
     if (!ok) return;
     await invoke("install_update", { force: true });
-    // 성공 시 백엔드가 app.restart()까지 수행 — 후속 UI 처리 없음(진행은 update-progress 리스너).
   } catch (e) {
     dismissToast("upd-bin");
     toast("health", "패치 설치 실패", String(e));
   }
+}
+
+function binaryUpdateModal(version: string, seats: number | null): Promise<boolean> {
+  return new Promise((resolve) => {
+    const ov = document.createElement("div");
+    ov.className = "modal-overlay";
+    ov.innerHTML = `<div class="modal" role="dialog" aria-modal="true" aria-label="본체 업데이트"><h3></h3><p></p>` +
+      `<div class="modal-btns"><button class="modal-no">나중에</button><button class="modal-yes"></button></div></div>`;
+    const later = ov.querySelector(".modal-no") as HTMLButtonElement;
+    const update = ov.querySelector(".modal-yes") as HTMLButtonElement;
+    (ov.querySelector("h3") as HTMLElement).textContent = `새 본체 버전 ${version} — 패치 설치`;
+    const reason = seats === null ? "열린 좌석: 모름. 좌석 정보를 확인하지 못했습니다." : `열린 좌석: ${seats}개.`;
+    (ov.querySelector("p") as HTMLElement).textContent = reason +
+      " 업데이트하면 열린 좌석이 닫힙니다. 마지막 미저장분은 손실될 수 있습니다. 작업 파일은 그대로 남고, 업데이트 뒤 마스터에게 다시 열어 달라고 하면 됩니다.";
+    later.textContent = "나중에";
+    update.textContent = "업데이트 선택";
+    let armed = false;
+    const done = (ok: boolean) => { ov.remove(); resolve(ok); };
+    update.addEventListener("click", () => {
+      if (armed) { done(true); return; }
+      armed = true;
+      update.textContent = seats === null ? "열린 좌석을 닫고 지금 업데이트" : `좌석 ${seats}개를 닫고 지금 업데이트`;
+      later.focus();
+    });
+    later.addEventListener("click", () => done(false));
+    ov.addEventListener("click", (e) => { if (e.target === ov) done(false); });
+    ov.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { e.preventDefault(); done(false); }
+      if (e.key === "Tab") {
+        e.preventDefault();
+        (document.activeElement === later ? update : later).focus();
+      }
+      e.stopPropagation();
+    });
+    document.body.appendChild(ov);
+    later.focus();
+  });
 }
 
 // ── 버전 스큐 세대교체(무중단 rename-swap의 짝) — 메인 + 부서 데몬 ──
@@ -4230,7 +4264,7 @@ async function promptPackInstall() {
 }
 
 /// Update 버튼 디스패처 — 가용 업데이트 종류에 따라 경로를 고른다.
-/// 본체(바이너리)=패치 설치(오너 2026-07-15 재배선·재시작+자동복원) → 무중단 팩 → 미확인 시 수동 재확인.
+/// 본체(바이너리)=패치 설치(좌석 종료·앱 재시작) → 무중단 팩 → 미확인 시 수동 재확인.
 async function onUpdateButton() {
   if (updateAvailable) return promptBinaryPatch();
   if (packUpdateAvailable && !packUpdateAvailable.binary_too_old) return promptPackInstall();

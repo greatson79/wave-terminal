@@ -33,7 +33,7 @@ public static class ScrollStub {
    string data=Encoding.GetEncoding(28591).GetString(b,0,n);
    Interlocked.Add(ref pending,Parse(ref tail,data));
   }} catch(Exception e) { File.WriteAllText(Path.Combine(dir,"reader-fault.txt"),e.ToString()); throw; }});
-  string last=""; bool stream=false; int line=300; bool alt=false; int top=281;
+  string last="",activeMode=""; bool stream=false; int line=300; bool alt=false; int top=281;
   for(;;) {
    if(reader.IsCompleted) throw new Exception("input reader stopped",reader.Exception);
    string[] commands=Directory.GetFiles(dir,"control-*.txt"); Array.Sort(commands,StringComparer.Ordinal);
@@ -42,7 +42,11 @@ public static class ScrollStub {
     string value=File.ReadAllText(control).Trim();
     if(value!=last) {
      var parts=value.Split('|'); if(parts.Length!=3) throw new Exception("invalid control");
-     last=value; stream=parts[2]=="stream"; line=300; alt=parts[1].StartsWith("alt-"); top=281; Interlocked.Exchange(ref pending,0);
+     if(parts[2]=="stream-go") {
+      if(parts[1]!=activeMode || alt)throw new Exception("invalid streaming activation");
+      last=value;stream=true;File.WriteAllText(Path.Combine(dir,"ready.txt"),last);continue;
+     }
+     activeMode=parts[1];last=value; stream=parts[2]=="stream"; line=300; alt=parts[1].StartsWith("alt-"); top=281; Interlocked.Exchange(ref pending,0);
      Console.Write("\x1b[?1049l\x1b[?1000l\x1b[?1006l\x1b[3J\x1b[2J\x1b[H");
      if(alt) { Console.Write("\x1b[?1049h"); Draw(top); }
      else for(int i=1;i<=300;i++) Console.Write("WR"+(i+1000).ToString("D4")+"\r\n");

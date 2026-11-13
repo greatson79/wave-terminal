@@ -28,6 +28,11 @@ try {
  assert.ok(!process.env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS,'no CDP retry route');
  const initialStatus=JSON.parse(cli(['status','--json']));save('initial-status.json',initialStatus);
  let commandNumber=0;
+ async function publishControl(dir,value) {
+  writeFileSync(join(dir,'next.txt'),value);renameSync(join(dir,'next.txt'),join(dir,`control-${String(++commandNumber).padStart(4,'0')}.txt`));
+  const deadline=Date.now()+10000;
+  while(!existsSync(join(dir,'ready.txt')) || readFileSync(join(dir,'ready.txt'),'utf8')!==value){assert.ok(Date.now()<deadline,'stub control acknowledgement timeout');await wait(100);}
+ }
  for(const mode of ['plain','sgr','legacy','alt-sgr','alt-legacy']) {
   const title=`WR-${mode}`;
   const dir=join(out,mode);mkdirSync(dir);
@@ -46,7 +51,7 @@ try {
   try {
    // Positive receipt control separates a dropped report from a dead input reader.
    const health=`health|${mode}|idle`;
-   writeFileSync(join(dir,'next.txt'),health);renameSync(join(dir,'next.txt'),join(dir,'control-0000.txt'));
+   await publishControl(dir,health);
    const healthDeadline=Date.now()+10000;
    while(!existsSync(join(dir,'ready.txt')) || readFileSync(join(dir,'ready.txt'),'utf8')!==health || !existsSync(join(dir,'reader-ready.txt'))) {
     assert.ok(Date.now()<healthDeadline,'stub/reader readiness not established');await wait(100);
@@ -64,18 +69,23 @@ try {
    save(`${mode}-reader-control.json`,{expectedHex:'1B5B357E',receivedHex:hex,readerReady:true});
    for(const stream of (mode.startsWith('alt-')?['idle']:['idle','stream'])) for(const action of (mode.startsWith('alt-')?['wheel','ShiftPageUp']:['wheel','small','PageUp','ShiftPageUp'])) {
     const id=`${mode}-${stream}-${action}`;
-    const control=`${id}|${mode}|${stream}`;
-    writeFileSync(join(dir,'next.txt'),control);renameSync(join(dir,'next.txt'),join(dir,`control-${String(++commandNumber).padStart(4,'0')}.txt`));
-    const deadline=Date.now()+10000;
-    while(!existsSync(join(dir,'ready.txt')) || readFileSync(join(dir,'ready.txt'),'utf8')!==control) {
-     assert.ok(Date.now()<deadline,'stub did not start/reset; launch not proven');await wait(100);
-    }
+    // Native PageUp restores product follow before fresh output; prove its receipt.
+    const resetOffset=readFileSync(bytePath).length;
+    const resetInput=await observe(title,ref,join(out,`${id}-reset-input`),'PageUp');
+    assert.ok(!resetInput.error && !resetInput.helperError && resetInput.input,'reset PageUp not injected');
+    await wait(100);
+    const resetBytes=readFileSync(bytePath).subarray(resetOffset).toString('utf8');
+    assert.ok(resetBytes.split('\n').map(line=>(line.split('\t')[1]??'').replaceAll('-','')).join('').includes('1B5B357E'),'fresh reset PageUp receipt absent');
+    save(`${id}-reset-control.json`,{receivedBytesTsv:resetBytes,input:resetInput.input});
+    await publishControl(dir,`${id}|${mode}|idle`);
     await wait(400);
     // CLI read-screen is retained as PTY/output readiness only, never viewport evidence.
     const screen=cli(['read-screen','--surface',ref,'--lines','40']);
     writeFileSync(join(out,`${id}-pty.txt`),screen);
     assert.match(screen,/WR\d{4}/,'numbered PTY output missing');
     const before=await observe(title,ref,join(out,`${id}-before`),'snapshot');
+    assert.equal(classifyViewport(initial,before),'STATIONARY','fresh history baseline differs from initial bottom; no trial');
+    if(stream==='stream') await publishControl(dir,`${id}-start|${mode}|stream-go`);
     const bytesPath=join(dir,'bytes.tsv');
     const offset=existsSync(bytesPath)?readFileSync(bytesPath).length:0;
     const immediate=await observe(title,ref,join(out,`${id}-input`),action);

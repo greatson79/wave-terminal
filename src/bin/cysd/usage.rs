@@ -1078,23 +1078,53 @@ fn parse_agy_cli_usage(v: &Value) -> Option<Vec<RateWindow>> {
     (!rate.is_empty()).then_some(rate)
 }
 
-async fn collect_agy_cli(daemon: &Arc<Daemon>) {
+fn agy_configured(daemon: &Arc<Daemon>) -> bool {
+    let live_seat = daemon.surfaces.lock().unwrap().values().any(|s| {
+        !s.exited.load(Ordering::Relaxed)
+            && s.agent_meta.lock().unwrap().as_ref().is_some_and(|(agent, _)| {
+                matches!(agent.as_str(), "agy" | "gemini" | "antigravity")
+            })
+    });
+    live_seat || dirs::home_dir()
+        .and_then(|home| std::fs::read(home.join(".cys/accounts.json")).ok())
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|v| v.get("accounts").and_then(Value::as_array).map(|accounts| {
+            accounts.iter().any(|a| matches!(a["provider"].as_str(), Some("agy" | "gemini" | "antigravity")))
+        }))
+        .unwrap_or(false)
+}
+
+// Return true only for an auth failure: the daemon must never retry that probe.
+async fn collect_agy_cli(daemon: &Arc<Daemon>) -> bool {
     use crate::state::HideConsole;
+    if !agy_configured(daemon) { return false; }
     let mut cmd = tokio::process::Command::new("agy");
     cmd.env("PYTHONDONTWRITEBYTECODE", "1");
     let fut = cmd.args(["-p", "/usage", "--output-format", "json", "--print-timeout", "10s"])
         .kill_on_drop(true).hide_console().output();
-    let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(15), fut).await else { return };
-    if !out.status.success() || out.stdout.len() > 64 * 1024 { return; }
-    let Some(rate) = serde_json::from_slice::<Value>(&out.stdout).ok().and_then(|v| parse_agy_cli_usage(&v)) else { return };
-    crate::accounts::note_rate(daemon, "agy", "", &rate, "agy-cli", now_epoch());
+    let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(15), fut).await else { return false };
+    if out.status.success() && out.stdout.len() <= 64 * 1024 {
+        if let Some(rate) = serde_json::from_slice::<Value>(&out.stdout).ok().and_then(|v| parse_agy_cli_usage(&v)) {
+            crate::accounts::note_rate(daemon, "agy", "", &rate, "agy-cli", now_epoch());
+            return false;
+        }
+    }
+    // shortcut: match CLI auth messages; use structured codes when agy defines them.
+    [&out.stdout, &out.stderr].iter().any(|bytes| {
+        let text = String::from_utf8_lossy(&bytes[..bytes.len().min(64 * 1024)]).to_ascii_lowercase();
+        ["not logged in", "not authenticated", "unauthenticated", "unauthorized",
+         "authentication failed", "authentication required", "authentication error",
+         "invalid_grant", "invalid_token", "token expired", "token has expired",
+         "login required", "please log in", "please login", "sign in to"]
+            .iter().any(|message| text.contains(message))
+    })
 }
 
-/// 명령 실행은 최초 1회, 이후 5분마다. 실패하면 기존 스냅샷 시각을 그대로 둔다.
+/// Probe configured accounts/live seats every five minutes; stop after an auth failure.
 pub fn spawn_agy_collector(daemon: Arc<Daemon>) {
     tokio::spawn(async move {
         loop {
-            collect_agy_cli(&daemon).await;
+            if collect_agy_cli(&daemon).await { break; }
             tokio::time::sleep(Duration::from_secs(300)).await;
         }
     });

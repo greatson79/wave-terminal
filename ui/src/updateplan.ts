@@ -33,7 +33,7 @@ export function updatePlan(i: UpdateInputs): UpdatePlan {
       title: `팩 ${i.packVersion} 무중단 적용 가능 (새 본체 ${i.binVersion}은 패치 설치)`,
       toastMsg:
         `팩 ${i.packVersion}은 상단 Update로 무중단 적용(재시작 없음) · ` +
-        `새 본체 ${i.binVersion}은 Update 버튼으로 패치 설치(재시작·자동 복원)`,
+        `새 본체 ${i.binVersion}은 Update 버튼으로 패치 설치(좌석 종료·앱 재시작)`,
     };
   }
   if (i.binVersion) {
@@ -43,7 +43,7 @@ export function updatePlan(i: UpdateInputs): UpdatePlan {
       badge: "!",
       ok: false,
       title: `새 본체 버전 ${i.binVersion} (Update 버튼으로 패치 설치)`,
-      toastMsg: `새 본체 ${i.binVersion} — 상단 Update 버튼으로 패치 설치(재시작·자동 복원)`,
+      toastMsg: `새 본체 ${i.binVersion} — 상단 Update 버튼으로 패치 설치(좌석 종료·앱 재시작)`,
     };
   }
   if (i.packVersion && !i.binaryTooOld) {

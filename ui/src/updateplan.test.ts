@@ -24,7 +24,7 @@ describe("updatePlan — 옵션 2 분기 판정(문자열 핀 = 회귀 0 증명)
     expect(p.kind).toBe("binary");
     expect(p.badge).toBe("!");
     expect(p.title).toBe("새 본체 버전 0.12.57 (Update 버튼으로 패치 설치)");
-    expect(p.toastMsg).toBe("새 본체 0.12.57 — 상단 Update 버튼으로 패치 설치(재시작·자동 복원)");
+    expect(p.toastMsg).toBe("새 본체 0.12.57 — 상단 Update 버튼으로 패치 설치(좌석 종료·앱 재시작)");
   });
 
   test("팩만 + 호환 → 종전 무중단 문구 그대로(회귀 0)", () => {

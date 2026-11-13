@@ -85,12 +85,15 @@ public static class ScrollInput {
  $bounds=[Windows.Rect]::Intersect($bounds,[Windows.Rect]::new($desktop.X,$desktop.Y,$desktop.Width,$desktop.Height))
  if($pane.Current.IsOffscreen -or $bounds.IsEmpty -or $bounds.Width -lt 100 -or $bounds.Height -lt 100){throw 'bound terminal has no usable visible app/screen intersection'}
  $r.bounds=@($bounds.X,$bounds.Y,$bounds.Width,$bounds.Height)
+ # Read the marker stripe above lower-right notifications, within the same bound pane.
+ $ocrBounds=[Windows.Rect]::new($bounds.X,$bounds.Y+35,[Math]::Min(120,$bounds.Width),[Math]::Min(350,$bounds.Height-35))
+ $r.ocrBounds=@($ocrBounds.X,$ocrBounds.Y,$ocrBounds.Width,$ocrBounds.Height)
  function Capture-Terminal([string]$name) {
   # UIA identifies the pane; OCR observes only its rendered pixels.
-  $bitmap=New-Object Drawing.Bitmap([int]$bounds.Width,[int]$bounds.Height)
+  $bitmap=New-Object Drawing.Bitmap([int]$ocrBounds.Width,[int]$ocrBounds.Height)
   try {
    $g=[Drawing.Graphics]::FromImage($bitmap)
-   try { $g.CopyFromScreen([int]$bounds.X,[int]$bounds.Y,0,0,$bitmap.Size) } finally { $g.Dispose() }
+   try { $g.CopyFromScreen([int]$ocrBounds.X,[int]$ocrBounds.Y,0,0,$bitmap.Size) } finally { $g.Dispose() }
    $large=New-Object Drawing.Bitmap($bitmap,([Drawing.Size]::new($bitmap.Width*3,$bitmap.Height*3)))
    try { $large.Save((Join-Path $Out $name),[Drawing.Imaging.ImageFormat]::Png) } finally { $large.Dispose() }
   } finally { $bitmap.Dispose() }

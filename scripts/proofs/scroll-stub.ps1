@@ -18,7 +18,7 @@ public static class ScrollStub {
   tail=tail.Substring(consumed); if(tail.Length>128)tail=tail.Substring(tail.Length-128);
   return delta;
  }
- static void Draw(int top) { Console.Write("\x1b[2J\x1b[H"); for(int i=top;i<top+20;i++) Console.Write("WR"+i.ToString("D4")+"\r\n"); Console.Out.Flush(); }
+ static void Draw(int top) { Console.Write("\x1b[2J\x1b[H"); for(int i=top;i<top+20;i++) Console.Write("WR"+(i+1000).ToString("D4")+"\r\n"); Console.Out.Flush(); }
  [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int n);
  [DllImport("kernel32.dll")] static extern bool SetConsoleMode(IntPtr h, uint m);
  public static void Run(string dir) {
@@ -44,7 +44,7 @@ public static class ScrollStub {
      last=value; stream=parts[2]=="stream"; line=300; alt=parts[1].StartsWith("alt-"); top=281; Interlocked.Exchange(ref pending,0);
      Console.Write("\x1b[?1049l\x1b[?1000l\x1b[?1006l\x1b[3J\x1b[2J\x1b[H");
      if(alt) { Console.Write("\x1b[?1049h"); Draw(top); }
-     else for(int i=1;i<=300;i++) Console.Write("WR"+i.ToString("D4")+"\r\n");
+     else for(int i=1;i<=300;i++) Console.Write("WR"+(i+1000).ToString("D4")+"\r\n");
      if(parts[1]=="sgr" || parts[1]=="alt-sgr") Console.Write("\x1b[?1000h\x1b[?1006h");
      else if(parts[1]=="legacy" || parts[1]=="alt-legacy") Console.Write("\x1b[?1000h\x1b[?1006l");
      else if(parts[1]!="plain") throw new Exception("unknown mode");
@@ -54,7 +54,7 @@ public static class ScrollStub {
    int delta=Interlocked.Exchange(ref pending,0);
    if(alt && delta!=0){top=Math.Max(1,Math.Min(281,top+delta));Draw(top);}
    Thread.Sleep(75);
-   if(stream) { Console.Write("WR"+(++line).ToString("D4")+"\r\n"); Console.Out.Flush(); }
+   if(stream) { Console.Write("WR"+(++line+1000).ToString("D4")+"\r\n"); Console.Out.Flush(); }
   }
  }
 }

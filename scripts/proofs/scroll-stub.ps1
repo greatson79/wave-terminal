@@ -10,11 +10,18 @@ using System.Threading.Tasks;
 using System.Text.RegularExpressions;
 using System.Runtime.InteropServices;
 public static class ScrollStub {
+ public static string Marker(int number) {
+  if(Environment.GetEnvironmentVariable("SCROLL_FIX_LIVE")!="1")return "WR"+number.ToString("D4");
+  if(number<1 || number>=2401)throw new Exception("encoded marker outside four-digit base7 range");
+  const string alphabet="1234579";var payload=new char[5];int sum=0;
+  for(int i=3;i>=0;i--){int digit=number%7;number/=7;payload[i]=alphabet[digit];sum+=(i+1)*digit;}
+  payload[4]=alphabet[sum%7];return "WR"+new string(payload);
+ }
  public static string Burst(ref int line) {
   var output=new StringBuilder();
-  for(int i=0;i<5;i++)output.Append("WR"+(++line+1000).ToString("D4")+"\r\n");
+  for(int i=0;i<5;i++)output.Append(Marker(++line+1000)+"\r\n");
   output.Append("\x1b[3A\r");
-  for(int i=line-2;i<=line;i++)output.Append("\x1b[2KWR"+(i+1000).ToString("D4")+"\r\n");
+  for(int i=line-2;i<=line;i++)output.Append("\x1b[2K"+Marker(i+1000)+"\r\n");
   return output.ToString();
  }
  public static int Parse(ref string tail,string chunk) {
@@ -25,7 +32,7 @@ public static class ScrollStub {
   tail=tail.Substring(consumed); if(tail.Length>128)tail=tail.Substring(tail.Length-128);
   return delta;
  }
- static void Draw(int top) { Console.Write("\x1b[2J\x1b[H"); for(int i=top;i<top+20;i++) Console.Write("WR"+(i+1000).ToString("D4")+"\r\n"); Console.Out.Flush(); }
+ static void Draw(int top) { Console.Write("\x1b[2J\x1b[H"); for(int i=top;i<top+20;i++) Console.Write(Marker(i+1000)+"\r\n"); Console.Out.Flush(); }
  [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int n);
  [DllImport("kernel32.dll")] static extern bool SetConsoleMode(IntPtr h, uint m);
  public static void Run(string dir) {
@@ -56,7 +63,7 @@ public static class ScrollStub {
      burst=false;burstCount=0;activeMode=parts[1];last=value; stream=parts[2]=="stream"; line=300; alt=parts[1].StartsWith("alt-"); top=281; Interlocked.Exchange(ref pending,0);
      Console.Write("\x1b[?1049l\x1b[?1000l\x1b[?1006l\x1b[3J\x1b[2J\x1b[H");
      if(alt) { Console.Write("\x1b[?1049h"); Draw(top); }
-     else for(int i=1;i<=300;i++) Console.Write("WR"+(i+1000).ToString("D4")+"\r\n");
+     else for(int i=1;i<=300;i++) Console.Write(Marker(i+1000)+"\r\n");
      if(parts[1]=="sgr" || parts[1]=="alt-sgr") Console.Write("\x1b[?1000h\x1b[?1006h");
      else if(parts[1]=="legacy" || parts[1]=="alt-legacy") Console.Write("\x1b[?1000h\x1b[?1006l");
      else if(parts[1]!="plain") throw new Exception("unknown mode");
@@ -71,7 +78,7 @@ public static class ScrollStub {
     File.AppendAllText(Path.Combine(dir,"producer.raw"),output);
     File.AppendAllText(Path.Combine(dir,"producer.tsv"),DateTime.UtcNow.ToString("o")+"\t"+(++burstCount)+"\t"+line+"\n");
    }
-   else if(stream) { Console.Write("WR"+(++line+1000).ToString("D4")+"\r\n"); Console.Out.Flush(); }
+   else if(stream) { Console.Write(Marker(++line+1000)+"\r\n"); Console.Out.Flush(); }
   }
  }
 }

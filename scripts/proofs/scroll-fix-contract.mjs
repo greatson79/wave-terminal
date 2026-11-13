@@ -1,4 +1,11 @@
 import {classifyViewport} from './scroll-contract.mjs';
+export function decodeFixMarker(line) {
+ const match=/^WR([1234579]{5})$/.exec(line);
+ if(!match)return null;
+ const digits=[...match[1]].map(c=>'1234579'.indexOf(c));
+ const number=digits.slice(0,4).reduce((n,d)=>n*7+d,0);
+ return number>0 && digits[4]===digits.slice(0,4).reduce((sum,d,i)=>sum+(i+1)*d,0)%7?number:null;
+}
 export function checkAltReceipt(bytes,mode,highColumn=false) {
  const raw=Buffer.from(bytes);
  if(mode==='alt-legacy')return raw.length===6 && raw.subarray(0,4).equals(Buffer.from([27,91,77,96])) && raw[4]>=33 && raw[5]>=33 && (!highColumn || raw.equals(Buffer.from('1b5b4d60802b','hex')));
@@ -8,8 +15,8 @@ export function checkAltReceipt(bytes,mode,highColumn=false) {
 export function checkAltScreen(beforeGrid,afterGrid,before,after) {
  const lines=text=>text.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
  const a=lines(beforeGrid),b=lines(afterGrid);
- if(!a.length || !b.length || ![...a,...b].every(line=>/^WR\d{4}$/.test(line)))return false;
- const start=text=>Number(text[0].slice(2));
+ if(!a.length || !b.length || [...a,...b].some(line=>decodeFixMarker(line)===null))return false;
+ const start=text=>decodeFixMarker(text[0]);
  return classifyViewport(before,after)==='MOVED_UP' && start(b)<start(a) && before.markers[0]-start(a)===after.markers[0]-start(b);
 }
 export function classifyFixRow(row) {

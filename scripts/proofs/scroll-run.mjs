@@ -94,7 +94,7 @@ try {
     await publishControl(dir,`${id}|${mode}|idle`);
     await wait(400);
     // CLI read-screen is retained as PTY/output readiness only, never viewport evidence.
-    const screen=cli(['read-screen','--surface',ref,'--lines','40']);
+    const screen=cli(['read-screen','--surface',ref,...(mode.startsWith('alt-')?[]:['--lines','40'])]);
     writeFileSync(join(out,`${id}-pty.txt`),screen);
     assert.match(screen,/WR\d{4}/,'numbered PTY output missing');
     const before=await observe(title,ref,join(out,`${id}-before`),'snapshot');

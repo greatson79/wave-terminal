@@ -14,3 +14,19 @@ function Resolve-ScrollOcr {
  $count=($valid | ForEach-Object {$_.markers.Count} | Measure-Object -Minimum).Minimum
  return @($valid[0].markers[0..([int]$count-1)])
 }
+
+function Read-ScrollMarkers {
+ param([string]$Text,[bool]$Encoded=$false)
+ if(-not $Encoded){return @([regex]::Matches($Text,'(?m)^WR(\d{4})\s*$') | ForEach-Object {[int]$_.Groups[1].Value})}
+ $alphabet='1234579';$markers=@()
+ foreach($line in ($Text -split "`r?`n")) {
+  $line=$line.Trim();if(-not $line){continue}
+  if($line -cnotmatch '^WR[1234579]{5}$'){return @()}
+  $payload=$line.Substring(2)
+  $number=0;$sum=0
+  for($i=0;$i -lt 4;$i++){$digit=$alphabet.IndexOf($payload[$i]);$number=$number*7+$digit;$sum+=($i+1)*$digit}
+  if($alphabet.IndexOf($payload[4]) -ne ($sum%7) -or $number -le 0){return @()}
+  $markers+=,$number
+ }
+ return $markers
+}

@@ -120,7 +120,7 @@ public static class ScrollInput {
    $text=& 'C:/Program Files/Tesseract-OCR/tesseract.exe' (Join-Path $Out $candidateName) stdout --psm 6 -c tessedit_char_whitelist=WR0123456789 2> (Join-Path $Out ($candidateName+'.stderr.txt'))
    if($LASTEXITCODE -ne 0){throw 'terminal OCR failed'}
    $text | Set-Content (Join-Path $Out ($candidateName+'.txt')) -Encoding UTF8
-   $markers=@([regex]::Matches(($text -join "`n"),'(?m)^WR(\d{4})\s*$') | ForEach-Object { [int]$_.Groups[1].Value })
+   $markers=@(Read-ScrollMarkers -Text ($text -join "`n") -Encoded ($env:SCROLL_FIX_LIVE -eq '1'))
    $candidates+=,@{cutoff=$cutoff;markers=$markers}
   }
   $r.ocrCandidates=$candidates

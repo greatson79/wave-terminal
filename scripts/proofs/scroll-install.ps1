@@ -8,7 +8,8 @@ $pins=@{
 }
 if(-not $pins.ContainsKey($version)){throw 'unapproved version'}
 $changes=@(git diff --name-only bcfa8bc6396035885fc66ed79e5507afedb2a2bd HEAD)
-foreach($f in $changes){if($f -notmatch '^(scripts/proofs/scroll-[^/]+|\.github/workflows/windows-scroll-red\.yml)$'){throw "product path changed: $f"}}
+$otherProof=@('.github/agy-live-inputs.json','.github/workflows/agy-usage-live.yml','scripts/proofs/agy-fake.rs','scripts/proofs/agy-live-probe.py','scripts/proofs/agy-live-probe.test.py')
+foreach($f in $changes){if($f -notin $otherProof -and $f -notmatch '^(scripts/proofs/scroll-[^/]+|\.github/workflows/windows-scroll-red\.yml)$'){throw "product path changed: $f"}}
 Invoke-WebRequest https://github.com/greatson79/wave-terminal/releases/latest/download/latest.json -OutFile scroll-evidence/channel-before.json
 if($env:SCROLL_BUILD -eq 'candidate') {
  if($version -ne '0.3.5'){throw 'candidate metadata version mismatch'}

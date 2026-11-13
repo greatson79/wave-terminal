@@ -9,6 +9,7 @@ if ($env:OS -ne 'Windows_NT') { throw 'Windows UIA only' }
 if (Test-Path -LiteralPath $Out) { throw 'fresh output directory required' }
 New-Item -ItemType Directory -Path $Out | Out-Null
 . (Join-Path $PSScriptRoot 'scroll-readiness.ps1')
+. (Join-Path $PSScriptRoot 'scroll-ocr-consensus.ps1')
 $r=@{role=$Role;surfaceId=$SurfaceId;outcome='NOT_PROVEN';source='terminal-visible-markers';markers=@();action=$Action;time=[DateTime]::UtcNow.ToString('o');appPid=$AppPid;title=$Title}
 function Save-ScrollScreen {
  $s=[System.Windows.Forms.SystemInformation]::VirtualScreen; $b=New-Object Drawing.Bitmap($s.Width,$s.Height)
@@ -20,10 +21,10 @@ try {
 using System;
 using System.Runtime.InteropServices;
 public static class ScrollInput {
- public static void PrepareOcr(System.Drawing.Bitmap bitmap) {
+ public static void PrepareOcr(System.Drawing.Bitmap bitmap,int cutoff) {
   var data=bitmap.LockBits(new System.Drawing.Rectangle(0,0,bitmap.Width,bitmap.Height),System.Drawing.Imaging.ImageLockMode.ReadWrite,System.Drawing.Imaging.PixelFormat.Format32bppArgb);
   try { var bytes=new byte[Math.Abs(data.Stride)*data.Height]; Marshal.Copy(data.Scan0,bytes,0,bytes.Length);
-   for(int i=0;i<bytes.Length;i+=4){int gray=(299*bytes[i+2]+587*bytes[i+1]+114*bytes[i]+500)/1000;byte color=(byte)(gray<155?255:0);bytes[i]=bytes[i+1]=bytes[i+2]=color;bytes[i+3]=255;}
+   for(int i=0;i<bytes.Length;i+=4){int gray=(299*bytes[i+2]+587*bytes[i+1]+114*bytes[i]+500)/1000;byte color=(byte)(gray<cutoff?255:0);bytes[i]=bytes[i+1]=bytes[i+2]=color;bytes[i+3]=255;}
    Marshal.Copy(bytes,0,data.Scan0,bytes.Length);
   } finally { bitmap.UnlockBits(data); }
  }
@@ -103,16 +104,23 @@ public static class ScrollInput {
    $g=[Drawing.Graphics]::FromImage($bitmap)
    try { $g.CopyFromScreen([int]$ocrBounds.X,[int]$ocrBounds.Y,0,0,$bitmap.Size) } finally { $g.Dispose() }
    $large=New-Object Drawing.Bitmap($bitmap,([Drawing.Size]::new($bitmap.Width*3,$bitmap.Height*3)))
-   try { $large.Save((Join-Path $Out ($name+'.raw.png')),[Drawing.Imaging.ImageFormat]::Png); [ScrollInput]::PrepareOcr($large); $large.Save((Join-Path $Out $name),[Drawing.Imaging.ImageFormat]::Png) } finally { $large.Dispose() }
+   try { $large.Save((Join-Path $Out ($name+'.raw.png')),[Drawing.Imaging.ImageFormat]::Png); [ScrollInput]::PrepareOcr($large,155); $large.Save((Join-Path $Out $name),[Drawing.Imaging.ImageFormat]::Png) } finally { $large.Dispose() }
   } finally { $bitmap.Dispose() }
  }
  function Read-VisibleMarkers([string]$name) {
-  $text=& 'C:/Program Files/Tesseract-OCR/tesseract.exe' (Join-Path $Out $name) stdout --psm 6 -c tessedit_char_whitelist=WR0123456789 2> (Join-Path $Out ($name+'.stderr.txt'))
-  if($LASTEXITCODE -ne 0){throw 'terminal OCR failed'}
-  $text | Set-Content (Join-Path $Out ($name+'.txt')) -Encoding UTF8
-  $r.markers=@([regex]::Matches(($text -join "`n"),'(?m)^WR(\d{4})\s*$') | ForEach-Object { [int]$_.Groups[1].Value })
-  if($r.markers.Count -lt 3){throw 'terminal OCR has fewer than three exact markers'}
-  for($j=1;$j -lt $r.markers.Count;$j++){if($r.markers[$j] -ne $r.markers[$j-1]+1){throw 'terminal OCR markers not contiguous'}}
+  $candidates=@()
+  foreach($cutoff in @(155,135,125)) {
+   $candidateName=$name+".cut$cutoff.png"
+   $candidate=[Drawing.Bitmap]::new((Join-Path $Out ($name+'.raw.png')))
+   try { [ScrollInput]::PrepareOcr($candidate,$cutoff);$candidate.Save((Join-Path $Out $candidateName),[Drawing.Imaging.ImageFormat]::Png) } finally {$candidate.Dispose()}
+   $text=& 'C:/Program Files/Tesseract-OCR/tesseract.exe' (Join-Path $Out $candidateName) stdout --psm 6 -c tessedit_char_whitelist=WR0123456789 2> (Join-Path $Out ($candidateName+'.stderr.txt'))
+   if($LASTEXITCODE -ne 0){throw 'terminal OCR failed'}
+   $text | Set-Content (Join-Path $Out ($candidateName+'.txt')) -Encoding UTF8
+   $markers=@([regex]::Matches(($text -join "`n"),'(?m)^WR(\d{4})\s*$') | ForEach-Object { [int]$_.Groups[1].Value })
+   $candidates+=,@{cutoff=$cutoff;markers=$markers}
+  }
+  $r.ocrCandidates=$candidates
+  $r.markers=@(Resolve-ScrollOcr -Candidates $candidates)
   $r.observer='pane-crop-tesseract';$r.outcome='VISIBLE_MARKERS'
  }
  Capture-Terminal 'observer.png'

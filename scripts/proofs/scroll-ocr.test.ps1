@@ -8,7 +8,22 @@ try {
  $image.SetPixel(0,0,[Drawing.Color]::FromArgb(10,10,10))
  $image.SetPixel(1,0,[Drawing.Color]::FromArgb(154,154,154))
  $image.SetPixel(2,0,[Drawing.Color]::FromArgb(155,155,155))
- [ScrollInput]::PrepareOcr($image)
+ [ScrollInput]::PrepareOcr($image,155)
  if($image.GetPixel(0,0).R -ne 255 -or $image.GetPixel(1,0).R -ne 255 -or $image.GetPixel(2,0).R -ne 0){throw 'OCR inversion threshold boundary failed'}
 } finally {$image.Dispose()}
 'OCR_PIXEL_THRESHOLD_CONTROL_PASS'
+
+. (Join-Path $PSScriptRoot 'scroll-ocr-consensus.ps1')
+$good=@{markers=@(1258,1259,1260)}
+$result=@(Resolve-ScrollOcr -Candidates @($good,$good,@{markers=@(1258,1259,1266)}))
+if(($result -join ',') -ne '1258,1259,1260'){throw 'valid consensus not returned'}
+foreach($bad in @(
+ @{candidates=@($good,@{markers=@(1260,1261,1262)})},
+ @{candidates=@($good,@{markers=@(1258,1259,1266)})},
+ @{candidates=@(@{markers=@(1258,1258,1259)},@{markers=@(1258,1258,1259)})}
+)) {
+ $rejected=$false
+ try {Resolve-ScrollOcr -Candidates $bad.candidates | Out-Null} catch {$rejected=$true}
+ if(-not $rejected){throw 'ambiguous/invalid OCR consensus accepted'}
+}
+'OCR_CONSENSUS_CONTROLS_PASS'

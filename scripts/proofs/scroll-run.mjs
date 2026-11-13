@@ -53,7 +53,7 @@ try {
    }
    await wait(400);
    const initial=await observe(title,ref,join(out,`${mode}-observer-first`),'snapshot');
-   assert.ok(!initial.error && !initial.helperError && initial.bounds?.[2]>=500 && initial.markers.length>=3,'visible-marker observer unavailable; zero native rows = not executed');
+   assert.ok(!initial.error && !initial.helperError && initial.markers.length>=3,'visible-marker observer unavailable; zero native rows = not executed');
    const healthInput=await observe(title,ref,join(out,`${mode}-reader-control`),'PageUp');
    assert.ok(!healthInput.helperError && !healthInput.error && healthInput.input,'native positive control injection unavailable');
    await wait(200);

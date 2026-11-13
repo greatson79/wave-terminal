@@ -3,7 +3,7 @@ import {execFileSync} from 'node:child_process';
 import {readFileSync,writeFileSync,mkdirSync,existsSync,renameSync,appendFileSync} from 'node:fs';
 import {resolve,join} from 'node:path';
 import {classifyViewport,hasNoOlderResponse} from './scroll-contract.mjs';
-import {checkAltReceipt,checkAltScreen,classifyFixRow} from './scroll-fix-contract.mjs';
+import {checkAltReceipt,checkAltScreen,classifyFixRow,hasFixMarkerOutput} from './scroll-fix-contract.mjs';
 import {classifyOwnerStream,hasActiveOwnerProducer} from './scroll-owner-contract.mjs';
 assert.equal(process.platform,'win32','Windows runner only; no native Mac launch');
 const out=resolve(process.env.SCROLL_OUT || 'scroll-evidence');
@@ -96,7 +96,7 @@ try {
     // CLI read-screen is retained as PTY/output readiness only, never viewport evidence.
     const screen=cli(['read-screen','--surface',ref,...(mode.startsWith('alt-')?[]:['--lines','40'])]);
     writeFileSync(join(out,`${id}-pty.txt`),screen);
-    assert.match(screen,/WR\d{4}/,'numbered PTY output missing');
+    assert.ok(fixLive?hasFixMarkerOutput(screen):/WR\d{4}/.test(screen),'numbered PTY output missing');
     const before=await observe(title,ref,join(out,`${id}-before`),'snapshot');
     assert.equal(classifyViewport(initial,before),'STATIONARY','fresh history baseline differs from initial bottom; no trial');
     if(ownerCase) {

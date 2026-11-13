@@ -15,7 +15,7 @@ public static class ScrollStub {
   if(number<1 || number>=2401)throw new Exception("encoded marker outside four-digit base7 range");
   const string alphabet="1234579";var payload=new char[5];int sum=0;
   for(int i=3;i>=0;i--){int digit=number%7;number/=7;payload[i]=alphabet[digit];sum+=(i+1)*digit;}
-  payload[4]=alphabet[sum%7];return "WR"+new string(payload);
+  payload[4]=alphabet[sum%7];return "WR-"+string.Join("-",payload);
  }
  public static string Burst(ref int line) {
   var output=new StringBuilder();

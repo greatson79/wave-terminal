@@ -117,7 +117,7 @@ public static class ScrollInput {
    $candidateName=$name+".cut$cutoff.png"
    $candidate=[Drawing.Bitmap]::new((Join-Path $Out ($name+'.raw.png')))
    try { [ScrollInput]::PrepareOcr($candidate,$cutoff);$candidate.Save((Join-Path $Out $candidateName),[Drawing.Imaging.ImageFormat]::Png) } finally {$candidate.Dispose()}
-   $text=& 'C:/Program Files/Tesseract-OCR/tesseract.exe' (Join-Path $Out $candidateName) stdout --psm 6 -c tessedit_char_whitelist=WR0123456789 2> (Join-Path $Out ($candidateName+'.stderr.txt'))
+   $text=& 'C:/Program Files/Tesseract-OCR/tesseract.exe' (Join-Path $Out $candidateName) stdout --psm 6 -c tessedit_char_whitelist=WR0123456789- 2> (Join-Path $Out ($candidateName+'.stderr.txt'))
    if($LASTEXITCODE -ne 0){throw 'terminal OCR failed'}
    $text | Set-Content (Join-Path $Out ($candidateName+'.txt')) -Encoding UTF8
    $markers=@(Read-ScrollMarkers -Text ($text -join "`n") -Encoded ($env:SCROLL_FIX_LIVE -eq '1'))

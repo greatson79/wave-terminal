@@ -1,11 +1,12 @@
 import {classifyViewport} from './scroll-contract.mjs';
 export function decodeFixMarker(line) {
- const match=/^WR([1234579]{5})$/.exec(line);
+ const match=/^WR-+([1234579](?:-+[1234579]){4})$/.exec(line);
  if(!match)return null;
- const digits=[...match[1]].map(c=>'1234579'.indexOf(c));
+ const digits=match[1].split(/-+/).map(c=>'1234579'.indexOf(c));
  const number=digits.slice(0,4).reduce((n,d)=>n*7+d,0);
  return number>0 && digits[4]===digits.slice(0,4).reduce((sum,d,i)=>sum+(i+1)*d,0)%7?number:null;
 }
+export const hasFixMarkerOutput=text=>text.split(/\r?\n/).some(line=>decodeFixMarker(line.trim())!==null);
 export function checkAltReceipt(bytes,mode,highColumn=false) {
  const raw=Buffer.from(bytes);
  if(mode==='alt-legacy')return raw.length===6 && raw.subarray(0,4).equals(Buffer.from([27,91,77,96])) && raw[4]>=33 && raw[5]>=33 && (!highColumn || raw.equals(Buffer.from('1b5b4d60802b','hex')));

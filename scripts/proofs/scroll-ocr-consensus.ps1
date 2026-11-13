@@ -21,8 +21,8 @@ function Read-ScrollMarkers {
  $alphabet='1234579';$markers=@()
  foreach($line in ($Text -split "`r?`n")) {
   $line=$line.Trim();if(-not $line){continue}
-  if($line -cnotmatch '^WR[1234579]{5}$'){return @()}
-  $payload=$line.Substring(2)
+  if($line -cnotmatch '^WR-+[1234579](?:-+[1234579]){4}$'){return @()}
+  $payload=$line.Substring(2).Replace('-','')
   $number=0;$sum=0
   for($i=0;$i -lt 4;$i++){$digit=$alphabet.IndexOf($payload[$i]);$number=$number*7+$digit;$sum+=($i+1)*$digit}
   if($alphabet.IndexOf($payload[4]) -ne ($sum%7) -or $number -le 0){return @()}

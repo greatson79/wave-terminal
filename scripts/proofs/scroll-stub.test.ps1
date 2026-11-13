@@ -23,8 +23,8 @@ try {
  $env:SCROLL_FIX_LIVE='1'
  foreach($n in @(1000,1001,1178,1190,1200,1281,1282,1300)) {
   $marker=[ScrollStub]::Marker($n)
-  if($marker -cnotmatch '^WR[1234579]{5}$' -or (@(Read-ScrollMarkers -Text $marker -Encoded $true) -join ',') -ne "$n"){throw 'producer/observer encoded marker roundtrip failed'}
+  if($marker -cnotmatch '^WR(?:-[1234579]){5}$' -or (@(Read-ScrollMarkers -Text $marker -Encoded $true) -join ',') -ne "$n"){throw 'producer/observer encoded marker roundtrip failed'}
  }
- if([ScrollStub]::Marker(1300) -cne 'WR47471'){throw 'producer checksum vector mismatch'}
+ if([ScrollStub]::Marker(1300) -cne 'WR-4-7-4-7-1'){throw 'producer checksum vector mismatch'}
 } finally {$env:SCROLL_FIX_LIVE=$old}
 'PRODUCER_OBSERVER_MARKER_ROUNDTRIP_PASS'

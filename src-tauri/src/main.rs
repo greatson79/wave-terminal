@@ -756,13 +756,13 @@ fn ime_debug_enabled() -> bool {
 }
 
 #[tauri::command]
-async fn send_input(socket: Option<String>, surface_id: u64, data: String, human: Option<bool>) -> Result<(), String> {
+async fn send_input(socket: Option<String>, surface_id: u64, data: String, human: Option<bool>, binary: Option<bool>) -> Result<(), String> {
     // human=true: T3-13 타이핑 가드의 신호 — UI 키 입력을 '사람'으로 표시해
     // 원격 주입이 사람의 미완성 입력을 오염시키지 못하게 한다
     rpc_on(
         &resolve_socket(&socket),
         "surface.send_text",
-        json!({"surface_id": surface_id, "text": data, "quiet": true, "human": human.unwrap_or(true)}),
+        json!({"surface_id": surface_id, "text": data, "quiet": true, "human": human.unwrap_or(true), "binary": binary.unwrap_or(false)}),
     )
     .await
     .map(|_| ())
@@ -2970,6 +2970,37 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn send_input_binary_flag_reaches_rpc_and_defaults_to_text() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let path = std::env::temp_dir().join(format!("wave-input-{}.sock", std::process::id()));
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let reader = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = tokio::io::BufReader::new(stream);
+            let mut requests = Vec::new();
+            for _ in 0..2 {
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                requests.push(serde_json::from_str::<serde_json::Value>(&line).unwrap());
+                stream.get_mut().write_all(b"{\"id\":1,\"ok\":true,\"result\":{}}\n").await.unwrap();
+            }
+            requests
+        });
+        let socket = Some(path.to_string_lossy().into_owned());
+        super::send_input(socket.clone(), 7, "\u{1b}[M`\u{80}+".into(), Some(true), Some(true)).await.unwrap();
+        super::send_input(socket, 7, "한".into(), None, None).await.unwrap();
+        let requests = reader.await.unwrap();
+        assert_eq!(requests[0]["method"], "surface.send_text");
+        assert_eq!(requests[0]["params"]["text"], "\u{1b}[M`\u{80}+");
+        assert_eq!(requests[0]["params"]["binary"], true);
+        assert_eq!(requests[1]["params"]["text"], "한");
+        assert_eq!(requests[1]["params"]["binary"], false);
+        assert_eq!(requests[1]["params"]["human"], true);
+        std::fs::remove_file(path).unwrap();
+    }
+
     /// 0.3.2: GUI-initiated CLI calls go to the canonical `wave` sidecar, never through the `cys` forwarder.
     #[test]
     fn gui_never_resolves_the_cys_forwarder_sidecar() {

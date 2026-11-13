@@ -1971,10 +1971,10 @@ async function makePane(sid: number, title: string, socket?: string): Promise<Pa
   // 전송 직렬화 체인: 빠른 타자에서 비동기 IPC 호출이 경주하면 도착 순서가 뒤집힌다 —
   // promise 체인으로 같은 pane의 모든 입력을 발사 순서대로 보장한다.
   let sendChain: Promise<unknown> = Promise.resolve();
-  const sendRaw = (data: string, human = true) => {
+  const sendRaw = (data: string, human = true, binary = false) => {
     follow = true; // 입력 = 프롬프트 사용 의사 — 바닥 고정 재개(xterm scrollOnUserInput과 정합)
     sendChain = sendChain
-      .then(() => invoke("send_input", { socket, surfaceId: sid, data, human }))
+      .then(() => invoke("send_input", { socket, surfaceId: sid, data, human, binary }))
       .catch(() => {});
     return sendChain;
   };
@@ -2056,13 +2056,19 @@ async function makePane(sid: number, title: string, socket?: string): Promise<Pa
     invoke("log_ime", { line: `[s${sid}] ${message}` }).catch(() => {});
   });
   term.onData((data) => {
-    const route = routeOnData(data, /Windows/i.test(navigator.userAgent));
+    const route = routeOnData(data, /Windows/i.test(navigator.userAgent), term.buffer.active.type === "alternate");
     if (route.action === "scroll") { term.scrollLines(route.lines); return; }
     if (route.action === "discard") return;
     // 완성 음절은 그대로 PTY로 — 잔여 pending이 있으면 리듀서가 순서 보존 후 함께 전송(안전장치).
     // Windows 등 비-WKWebView에선 input 핸들러·insertLeak 감지 미배선이라 insertLeak이 항상 null →
     // duplicate=false → 순수 send(data)와 동일(회귀 0). WKWebView에서 insertText 자모 유출만 폐기.
     applyIme({ kind: "onData", data: route.data, duplicate: insertLeak !== null && route.data === insertLeak }, source.takeHuman());
+  });
+  // DEFAULT mouse reports use onBinary; preserve the macOS subscription behavior.
+  if (/Windows/i.test(navigator.userAgent)) term.onBinary((data) => {
+    const route = routeOnData(data, true, term.buffer.active.type === "alternate");
+    if (route.action === "scroll") term.scrollLines(route.lines);
+    else if (route.action === "forward") sendRaw(route.data, true, true);
   });
 
   // ★F: 위 조합 상태 머신은 macOS WKWebView 전용 우회다. Windows WebView2 등 Chromium 계열은

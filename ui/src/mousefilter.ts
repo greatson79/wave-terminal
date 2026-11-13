@@ -4,7 +4,7 @@
 // Claude Code TUI가 마우스 트래킹(1003h/1006h)을 켜면 xterm.js는 마우스 이벤트마다
 // `ESC[<b;x;y M/m` 같은 보고를 onData로 발화해 PTY로 보낸다. macOS는 앱이 이를 정상 소비하지만,
 // Windows는 ConPTY 입력 계층이 시퀀스를 깨뜨려 선두 ESC가 소실된 `[555;98;34M...` 문자열이
-// Claude Code 입력창에 리터럴로 무한 타이핑된다. ∴ Windows에서는 보고를 PTY로 보내지 않는다.
+// Claude Code 입력창에 리터럴로 무한 타이핑된다. ∴ Windows 일반 버퍼에서는 보고를 PTY로 보내지 않는다.
 //
 // 이 모듈은 '판단'만 한다(플랫폼 판별·스크롤 실행은 호출측 main.ts). 순수 함수라 인코딩 변형·
 // 배칭·오탐 경계를 결정론으로 회귀 테스트할 수 있다(mousefilter.test.ts).
@@ -125,11 +125,12 @@ export type OnDataRoute =
 // ★macOS 계약: isWindows=false면 분류 함수를 호출조차 하지 않고 무조건 forward다.
 // macOS는 앱이 마우스 보고를 정상 소비하므로 필터가 개입할 이유가 없고, 개입하지 않음이
 // '회귀 0'의 근거다. 이 조기 반환을 없애면 macOS가 필터 오탐에 노출된다.
-export function routeOnData(data: string, isWindows: boolean): OnDataRoute {
+export function routeOnData(data: string, isWindows: boolean, alternate = false): OnDataRoute {
   if (!isWindows) return { action: "forward", data };
 
   const verdict = classifyMouseReport(data);
   if (verdict.kind === "wheel") {
+    if (alternate) return { action: "forward", data }; // Alt history belongs to the app, not xterm's buffer.
     // 방향키 시퀀스 주입은 금지다(의도된 결정) — Claude Code의 입력 히스토리를 오염시킨다.
     return { action: "scroll", lines: verdict.dir * WHEEL_LINES * verdict.count };
   }

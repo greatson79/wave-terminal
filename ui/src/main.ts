@@ -2842,11 +2842,10 @@ function buildTab(ws: Workspace): HTMLElement {
     sub.appendChild(txt);
   }
   tab.append(titleRow, sub);
-  const memberSids = spec?.memberSids ?? (!ws.pending && !ws.collapsed ? sids : []);
-  if (memberSids.length) {
+  if (spec?.memberSids.length) {
     const members = document.createElement("div");
     members.className = "ws-members";
-    const sorted = sortHqMembers(memberSids.map((sid) => ({ sid,
+    const sorted = sortHqMembers(spec.memberSids.map((sid) => ({ sid,
       title: surfaceTitles.get(paneKey(sid, ws.socket)) ?? "" })));
     for (const member of teamMemberRows(sorted.map(({ sid, title }) => ({ sid, title,
       role: nodeSig.get(`${ws.socket}#${sid}`)?.role ?? null })))) {

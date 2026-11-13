@@ -45,21 +45,28 @@ function sidebar(hierarchyEnabled: boolean, collapsed = false) {
   return { tab: render(ws) as Element, state, render, ws, key };
 }
 
+test("existing sidebar members show their own task status", () => {
+  const fixture = sidebar(true);
+  let rows = all(fixture.tab).filter((el) => el.className.startsWith("ws-member ") || el.className === "ws-member");
+  expect(rows).toHaveLength(2);
+  expect(text(rows[0])).toStartWith("작업 중 · ");
+  expect(text(rows[1])).toContain("대기 중");
+  expect(all(rows[0]).some((el) => el.className === "ws-dot working")).toBe(true);
+  expect(all(rows[1]).some((el) => el.className === "ws-dot idle")).toBe(true);
+  expect(text(fixture.tab)).toContain("CTX 80%");
+  fixture.state.set(fixture.key(4, fixture.ws.socket), { reported: null });
+  rows = all(fixture.render(fixture.ws)).filter((el) => el.className === "ws-member");
+  expect(text(rows[0])).toContain("대기 중");
+});
 for (const hierarchy of [true, false]) {
-  test(`sidebar gives each seat its own task status, hierarchy=${hierarchy}`, () => {
-    const fixture = sidebar(hierarchy);
-    let rows = all(fixture.tab).filter((el) => el.className.startsWith("ws-member ") || el.className === "ws-member");
-    expect(rows).toHaveLength(2);
-    expect(text(rows[0])).toStartWith("작업 중 · ");
-    expect(text(rows[1])).toContain("대기 중");
-    expect(all(rows[0]).some((el) => el.className === "ws-dot working")).toBe(true);
-    expect(all(rows[1]).some((el) => el.className === "ws-dot idle")).toBe(true);
-    expect(text(fixture.tab)).toContain("CTX 80%");
-    fixture.state.set(fixture.key(4, fixture.ws.socket), { reported: null });
-    rows = all(fixture.render(fixture.ws)).filter((el) => el.className === "ws-member");
-    expect(text(rows[0])).toContain("대기 중");
-  });
   test(`collapsed sidebar preserves member hiding, hierarchy=${hierarchy}`, () => {
     expect(all(sidebar(hierarchy, true).tab).filter((el) => el.className === "ws-member")).toHaveLength(0);
   });
 }
+
+test("expanded workspace without a hierarchy spec preserves v0.3.4 empty membership", () => {
+  const fixture = sidebar(false);
+  expect(all(fixture.tab).filter((el) => el.className === "ws-members")).toHaveLength(0);
+  expect(all(fixture.tab).filter((el) => el.className === "ws-member")).toHaveLength(0);
+  expect(text(fixture.tab)).toContain("CTX 80%");
+});

@@ -162,5 +162,7 @@ jobs:
         with:
           name: agy-live-${{ runner.os }}-${{ github.run_id }}
           path: agy-live-evidence/**
+          # Only owned fake profiles are under this root; retain the hidden fixtures in SHA256.json.
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 7

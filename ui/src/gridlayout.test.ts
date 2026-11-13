@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { gridLayout, keepManualTree, treeEquals, type GridSeat } from "./gridlayout";
+import * as layouts from "./gridlayout";
+import { treeSids } from "./treededupe";
 import type { LayoutNode } from "./treededupe";
 
 // 상수 근거(gridlayout.ts 와 동일): 13px 글꼴 기준 70열·12행이 최소 읽기 크기.
@@ -225,4 +227,88 @@ describe("columns layout", () => {
       expect(gridLayout(s, { w, h: H }, SPEC, "grid")).toEqual(gridLayout(s, { w, h: H }, SPEC));
     }
   });
+});
+
+// Independent geometry oracle: subtract each real 1px divider before splitting.
+function measured(node: LayoutNode, w: number, h = 900): { widths: number[]; area: number } {
+  if (node.type === "pane") return { widths: [w], area: w * h };
+  const r = node.ratio ?? 0.5;
+  const horizontal = node.dir === "row";
+  const a = measured(node.a, horizontal ? (w - 1) * r : w, horizontal ? h : (h - 1) * r);
+  const b = measured(node.b, horizontal ? (w - 1) * (1 - r) : w, horizontal ? h : (h - 1) * (1 - r));
+  return { widths: [...a.widths, ...b.widths], area: a.area + b.area + (horizontal ? h : w) };
+}
+function equal(tree: LayoutNode | null, width: number) {
+  expect(layouts).toHaveProperty("equalWidthLayout");
+  return layouts.equalWidthLayout(tree, width);
+}
+function structure(node: LayoutNode): unknown {
+  return node.type === "pane" ? node : { dir: node.dir, ...(node.dir === "col" ? { ratio: node.ratio } : {}), a: structure(node.a), b: structure(node.b) };
+}
+
+test("seven columns at 1512px remove the real 3906px old minimum and fill the panel", () => {
+  const old = gridLayout(seats(7), { w: 1512, h: 900 }, layouts.gridSpecFor(13), "columns");
+  expect(old.minWidth).toBe(3906);
+  const oldWidths = measured(old.tree!, old.minWidth).widths;
+  expect(oldWidths.every(w => w > 556 && w < 558)).toBe(true);
+  // Negative control: the new contract rejects the actual old layout result.
+  expect(() => expect(old.minWidth).toBe(0)).toThrow();
+  const result = equal(old.tree, 1512);
+  expect(result.minWidth).toBe(0);
+  expect(result.minHeight).toBe(0);
+  const geometry = measured(result.tree!, 1512);
+  for (const w of geometry.widths) expect(w).toBeCloseTo((1512 - 6) / 7, 9);
+  expect(geometry.area).toBeCloseTo(1512 * 900, 6);
+  expect(treeSids(result.tree)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+  console.log(`old minWidth=${old.minWidth}; equal minWidth=${result.minWidth}; widths=${geometry.widths.join(",")}`);
+});
+
+test("wide-panel head weighting is removed without changing seat order", () => {
+  const old = gridLayout(seats(7, { 3: { head: true } }), { w: 8000, h: 900 }, layouts.gridSpecFor(13), "columns");
+  const before = measured(old.tree!, 8000).widths;
+  expect(before[0]).toBeGreaterThan(before[1] * 1.4);
+  const result = equal(old.tree, 8000);
+  for (const w of measured(result.tree!, 8000).widths) expect(w).toBeCloseTo((8000 - 6) / 7, 9);
+  expect(treeSids(result.tree)).toEqual(treeSids(old.tree));
+});
+
+test("unbalanced comb keeps role stacks, absent col ratios, topology, input and idempotence", () => {
+  const tree: LayoutNode = { type: "split", dir: "row", ratio: .9,
+    a: { type: "split", dir: "col", ratio: .75, a: { type: "pane", sid: 1 }, b: { type: "pane", sid: 2 } },
+    b: { type: "split", dir: "row", ratio: .8, a: { type: "pane", sid: 3 },
+      b: { type: "split", dir: "col", a: { type: "pane", sid: 4 }, b: { type: "pane", sid: 5 } } } };
+  const before = JSON.stringify(tree);
+  const result = equal(tree, 1512);
+  expect(structure(result.tree!)).toEqual(structure(tree));
+  expect(JSON.stringify(tree)).toBe(before);
+  expect(treeSids(result.tree)).toEqual([1, 2, 3, 4, 5]);
+  for (const w of measured(result.tree!, 1512).widths) expect(w).toBeCloseTo(1510 / 3, 9);
+  expect(treeEquals(result.tree, equal(result.tree, 1512).tree)).toBe(true);
+});
+
+test("mixed stack means equal column units, not equal widths of incompatible rows", () => {
+  const tree: LayoutNode = { type: "split", dir: "col", ratio: .3, a: { type: "pane", sid: 1 },
+    b: { type: "split", dir: "row", ratio: .8, a: { type: "pane", sid: 2 }, b: { type: "pane", sid: 3 } } };
+  const result = equal(tree, 1512);
+  expect(structure(result.tree!)).toEqual(structure(tree));
+  expect(measured(result.tree!, 1512).widths).toEqual([1512, 755.5, 755.5]);
+});
+
+test("null, singleton and panels narrower than their dividers have no width floor", () => {
+  expect(equal(null, 0)).toEqual({ tree: null, minWidth: 0, minHeight: 0 });
+  const pane: LayoutNode = { type: "pane", sid: 1 };
+  expect(equal(pane, 1)).toEqual({ tree: pane, minWidth: 0, minHeight: 0 });
+  const tree = gridLayout(seats(7), { w: 1512, h: 900 }, layouts.gridSpecFor(13), "columns").tree;
+  for (const width of [0, 1, 6, 7, 60]) {
+    const result = equal(tree, width);
+    expect(result.minWidth).toBe(0);
+    function check(node: LayoutNode) {
+      if (node.type === "pane") return;
+      expect(Number.isFinite(node.ratio)).toBe(true);
+      expect(node.ratio!).toBeGreaterThan(0);
+      expect(node.ratio!).toBeLessThan(1);
+      check(node.a); check(node.b);
+    }
+    check(result.tree!);
+  }
 });

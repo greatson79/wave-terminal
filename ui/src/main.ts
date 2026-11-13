@@ -35,7 +35,7 @@ import { nextGhostStrike } from "./ghoststrike";
 import { transferTrees } from "./transfer";
 import { resolveEventSocket } from "./eventsocket";
 import { commitPaneRename } from "./panerename";
-import { gridLayout, gridSpecFor, keepManualTree, treeEquals, type GridResult } from "./gridlayout";
+import { equalWidthLayout, gridLayout, gridSpecFor, keepManualTree, treeEquals, type GridResult } from "./gridlayout";
 
 declare global {
   interface Window {
@@ -1413,11 +1413,6 @@ function applyZoom(delta: number | null) {
 
 // 터미널 폰트 선택(cys-font-face · 오너 요청 2026-07-12) — 선택 폰트를 기본 스택 앞에 합성
 // (composeFontFamily · CJK 폴백 보존), null=기본. 폰트 메트릭 변화 → 셀 재계산(applyZoom과 동일 패턴).
-// Capture before saveSettings adds arrange; only the upgrade start protects old geometry.
-const preserveSavedLayoutOnUpgrade = (() => {
-  try { return JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "null")?.layout?.arrange === undefined; }
-  catch { return true; }
-})();
 let settings = readSettings(localStorage.getItem(SETTINGS_KEY), localStorage.getItem("cys-bg-color"), localStorage.getItem("cys-font-face"));
 const autoRemoveExited = localStorage.getItem("cys-auto-remove-exited") !== "0";
 const preserveEmptyWorkspace = localStorage.getItem("cys-preserve-empty-ws") !== "0";
@@ -2609,21 +2604,19 @@ function startGroupDrag(e0: MouseEvent, srcId: number) {
   window.addEventListener("mouseup", up, true);
 }
 
-// ---------- 정렬: 반응형 격자 배치 ----------
-// 계산은 순수 모듈 gridlayout.ts 가 한다(열·줄 수 = 패널 실제 크기 ÷ 좌석 최소 크기).
-// 여기서는 좌석 정보(역할·본부장)를 모으고 결과를 화면에 건다.
-//   · 사람이 divider 를 끌거나 pane 을 옮기면 ws.manual — 자동 재배치가 그 크기를 덮지 않는다.
-//   · 「정렬」은 manual 을 내리고 자동으로 돌아간다.
-//   · 칸이 최소 크기에 못 미치게 좁은 창이면 줄이지 않고 패널을 스크롤로 보인다(gridlayout 의 minWidth·minHeight).
+// Equal widths preserve the current tree; explicit grid remains responsive.
+// Manual and restored layouts stay locked until an arrange action.
 const GRID_RESIZE_DEBOUNCE_MS = 150;
+const arrangeModes = new WeakMap<Workspace, "equal" | "grid">();
 
 function autoGrid(ws: Workspace, roleOf?: Map<number, string | null>, sids = collectSids(ws.tree)): GridResult | null {
   if (!sids.length || root.offsetWidth < 1 || root.offsetHeight < 1) return null; // 숨겨진 패널은 계산하지 않는다
+  if (arrangeModes.get(ws) !== "grid") return equalWidthLayout(ws.tree, root.offsetWidth);
   const seats = sids.map((sid) => {
     const key = paneKey(sid, ws.socket);
     return { sid, role: roleOf?.get(sid) ?? paneTitleState.get(key)?.role ?? null, head: isHqLeadName(surfaceTitles.get(key) ?? "") };
   });
-  return gridLayout(seats, { w: root.offsetWidth, h: root.offsetHeight }, gridSpecFor(fontSize), settings.layout.arrange);
+  return gridLayout(seats, { w: root.offsetWidth, h: root.offsetHeight }, gridSpecFor(fontSize), "grid");
 }
 
 function applyGridSize(grid: GridResult | null) {
@@ -2653,10 +2646,12 @@ new ResizeObserver(() => {
   gridResizeTimer = window.setTimeout(reflowGrid, GRID_RESIZE_DEBOUNCE_MS);
 }).observe(root);
 
-async function actionEqualize() {
+async function actionEqualize(mode: "equal" | "grid" = "equal") {
   const ws = current();
   if (!ws?.tree) return;
-  ws.manual = false; // 정렬 = 자동 배치로 복귀
+  arrangeModes.set(ws, mode);
+  ws.manual = false;
+  if (mode === "equal") { render(); return; }
   const live = collectSids(ws.tree).filter((sid) => panes.has(paneKey(sid, ws.socket))); // 죽은/placeholder 노드 제외 (F4 복합키)
   if (!live.length) return;
   // 역할은 데몬 surface.list에서 조회 (UI 생성 pane은 role=null → 가운데로)
@@ -4945,9 +4940,7 @@ async function start() {
       savedLayout = saved;
       renameRevision = typeof saved.renameRevision === "string" ? saved.renameRevision : undefined;
       workspaces = saved.workspaces;
-      if (preserveSavedLayoutOnUpgrade) {
-        for (const ws of workspaces) if (ws.tree) ws.manual = true; // 업그레이드 첫 실행만 저장 배치 보존
-      }
+      for (const ws of workspaces) if (ws.tree) ws.manual = true;
       groups = Array.isArray(saved.groups) ? saved.groups : []; // 06: 하위호환 — 옛 저장본엔 groups 없음
       activeWs = saved.active ?? 0;
       wsCounter = saved.counter ?? 1;
@@ -5194,11 +5187,11 @@ document.getElementById("btn-split-v")!.addEventListener("click", () => actionSp
 document.getElementById("btn-equalize")!.addEventListener("click", (event) => {
   const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
   showCtxMenu(rect.left, rect.bottom, [
-    { label: "세로 열(기본)", action: () => {
-      settings.layout.arrange = "columns"; saveSettings(); return actionEqualize();
+    { label: "너비균등배치", action: () => {
+      settings.layout.arrange = "equal"; saveSettings(); return actionEqualize("equal");
     } },
     { label: "격자", action: () => {
-      settings.layout.arrange = "grid"; saveSettings(); return actionEqualize();
+      settings.layout.arrange = "grid"; saveSettings(); return actionEqualize("grid");
     } },
     { label: "역할별 표준 배치", action: actionEqualize },
     { label: settings.layout.sidebarCollapsed ? "사이드바 펼치기" : "사이드바 접기", action: () => {

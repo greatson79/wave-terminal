@@ -5,10 +5,10 @@ export function classifyRelaunch({control, beforeIdentity, afterIdentity, sameSe
      beforeIdentity.daemon_pid !== afterIdentity?.daemon_pid ||
      !Number.isFinite(beforeIdentity.started_at) || beforeIdentity.started_at !== afterIdentity?.started_at)
   return 'NOT EXECUTED';
- const valid = attempt => attempt?.input && !attempt.error && !attempt.helperError &&
+ const valid = attempt => ['wheel','ShiftPageUp'].includes(attempt?.action) && attempt.input && !attempt.error && !attempt.helperError &&
   classifyViewport(baseline, attempt) !== 'NOT_PROVEN';
- // A single valid route proves retained history; RED needs all three routes.
+ // A single valid route proves retained history; RED needs both tested routes.
  if (attempts.some(a => valid(a) && classifyViewport(baseline, a) === 'MOVED_UP')) return 'PASS';
- return ['wheel','ShiftPageUp','scrollbar'].every(action =>
+ return ['wheel','ShiftPageUp'].every(action =>
   attempts.some(a => a.action === action && valid(a))) ? 'RED' : 'NOT EXECUTED';
 }

@@ -68,7 +68,7 @@ def rpc(endpoint, method, params=None, timeout=6):
 
 def events(case):
     counter = case["counter"]
-    return [json.loads(line) for line in counter.read_text(encoding="utf-8").splitlines()] if counter.exists() else []
+    return [json.loads(line) for line in counter.read_text(encoding="utf-8").splitlines()]
 
 
 def environment(directory, endpoint, fake, mode):
@@ -81,6 +81,7 @@ def environment(directory, endpoint, fake, mode):
         path.mkdir(parents=True, exist_ok=True)
     target = directory / "bin" / ("agy.exe" if os.name == "nt" else "agy")
     shutil.copy2(fake, target)
+    (directory / "calls.jsonl").touch(exist_ok=False)
     system_paths = [str(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32")] if os.name == "nt" else ["/usr/bin", "/bin"]
     env.update({
         "HOME": str(home), "USERPROFILE": str(home), "LOCALAPPDATA": str(home / "local"),
@@ -156,18 +157,29 @@ def configure_ready_case(case):
         case["config_method"] = "live-agy-metadata-seat"
     write_json(case["directory"] / "configuration.json", {"method": case["config_method"],
                "owned_surface_ids": case.get("surfaces", []), "duration_seconds": case["duration_seconds"],
+               "fake_executable": str(case["fake"]), "fake_sha256": sha256(case["fake"]),
+               "AGY_FAKE_COUNTER": str(case["counter"]),
                "windows_knownfolder_account_proof": "../windows-knownfolder-accounts-before.json" if case["windows"] else None})
 
 
 def process_evidence(process):
     if os.name == "nt":
-        command = f"Get-CimInstance Win32_Process -Filter 'ProcessId = {process.pid}' | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress"
+        command = f"Get-CimInstance Win32_Process -ErrorAction Stop -Filter 'ProcessId = {process.pid}' | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress"
         args = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command]
     else:
         args = ["/bin/ps", "-p", str(process.pid), "-o", "pid=,ppid=,command="]
     value = subprocess.run(args, capture_output=True, text=True, timeout=10)
     return {"pid": process.pid, "exit_code": process.poll(), "command": args,
             "observation_exit": value.returncode, "stdout": value.stdout, "stderr": value.stderr}
+
+
+
+def verify_stopped(process):
+    evidence = process_evidence(process)
+    allowed_exit = {0} if os.name == "nt" else {0, 1}
+    if evidence["exit_code"] is None or evidence["observation_exit"] not in allowed_exit or evidence["stdout"].strip() or evidence["stderr"].strip():
+        raise RuntimeError(f"owned daemon still present or process observation failed: {evidence}")
+    return evidence
 
 
 
@@ -252,6 +264,7 @@ def verdict(cases, elapsed):
             "normal_collected_timestamps": sorted(set(rates)), "failures": reasons,
             "controls": {"final percentages": current, "Claude statusline fixture": sorted(seen.get("claude", set())),
                          "Codex rollout fixture": sorted(seen.get("codex", set())),
+                         "real logged-in agy": "NOT_EXECUTED",
                          "real logged-in Claude/Codex CLIs": "NOT_EXECUTED", "rendered usage panel": "NOT_EXECUTED"}}
 
 
@@ -285,7 +298,8 @@ def run(args):
                 raise ValueError("use a short --out path so the Unix socket stays below platform limits")
             env, target = environment(directory, endpoint, fake, mode)
             case = {"name": name, "windows": os.name == "nt", "directory": directory,
-                    "duration_seconds": args.duration_secs, "endpoint": endpoint, "surfaces": []}
+                    "duration_seconds": args.duration_secs, "endpoint": endpoint, "surfaces": [],
+                    "fake": target, "counter": Path(env["AGY_FAKE_COUNTER"])}
             declare_account(case)
             log = (directory / "daemon.log").open("wb")
             try:
@@ -397,6 +411,7 @@ def run(args):
                         process.wait(timeout=5)
                         cleanup["forced_owned_child_kill"] = True
                 cleanup["after_exit_code"] = process.poll()
+                cleanup["process_after_stop"] = verify_stopped(process)
             except Exception as error:
                 cleanup["error"] = str(error)
                 result["result"] = "FAIL"

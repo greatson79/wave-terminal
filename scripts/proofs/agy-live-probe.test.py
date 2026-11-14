@@ -82,6 +82,12 @@ class ProofTests(unittest.TestCase):
                                "control_seen": {"claude": {17, 19}, "codex": {23, 29}},
                                "control_current": {"claude": 19, "codex": 29}}
             self.assertEqual(probe.verdict(cases, 660)["result"], "PASS")
+            self.assertEqual(probe.verdict(cases, 660)["controls"]["real logged-in agy"], "NOT_EXECUTED")
+            cases["L1"]["counter"].unlink()
+            with self.assertRaises(FileNotFoundError):
+                probe.verdict(cases, 660)
+            cases["L1"]["counter"].touch()
+            self.assertEqual(probe.verdict(cases, 660)["result"], "PASS")
             self.assertEqual(probe.verdict(cases, 659)["result"], "FAIL")
             for name, case in cases.items():
                 case.update(windows=True, config_method="no-agy-account-or-seat" if name == "L1" else "live-agy-metadata-seat")
@@ -98,6 +104,37 @@ class ProofTests(unittest.TestCase):
             calls = [{"time": t, "argv": probe.COLLECTOR_ARGS, "valid_args": True} for t in [0, 1, 2]]
             cases["L3"]["counter"].write_text("".join(json.dumps(c) + "\n" for c in calls))
             self.assertEqual(probe.verdict(cases, 660)["result"], "FAIL")
+
+    def test_l1_counter_must_exist_even_when_empty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            counter = Path(directory) / "calls.jsonl"
+            with self.assertRaises(FileNotFoundError):
+                probe.events({"counter": counter})
+            counter.touch()
+            self.assertEqual(probe.events({"counter": counter}), [])
+
+    def test_environment_arms_counter_before_launch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake = root / "fake"
+            fake.write_bytes(b"fixture-only; never execute")
+            env, target = probe.environment(root / "case", "fixture-only", fake, "normal")
+            counter = Path(env["AGY_FAKE_COUNTER"])
+            self.assertTrue(counter.is_file())
+            self.assertEqual(counter.read_bytes(), b"")
+            self.assertEqual(target.read_bytes(), fake.read_bytes())
+
+    def test_teardown_requires_wait_and_independent_process_absence(self):
+        process = unittest.mock.Mock()
+        process.poll.return_value = 0
+        absent = {"exit_code": 0, "observation_exit": 0, "stdout": "", "stderr": ""}
+        with patch.object(probe, "process_evidence", return_value=absent):
+            self.assertEqual(probe.verify_stopped(process), absent)
+        for evidence in [dict(absent, stdout="123 daemon"), dict(absent, observation_exit=2),
+                         dict(absent, exit_code=None), dict(absent, stderr="Get-CimInstance: Access is denied")]:
+            with patch.object(probe, "process_evidence", return_value=evidence):
+                with self.assertRaises(RuntimeError):
+                    probe.verify_stopped(process)
 
     def test_final_control_disappearance_or_reversion_is_failure(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -129,7 +166,9 @@ class ProofTests(unittest.TestCase):
                 folder = Path(directory) / name
                 folder.mkdir()
                 case = {"name": name, "windows": True, "directory": folder,
-                        "endpoint": "fixture-only", "duration_seconds": 960, "surfaces": []}
+                        "endpoint": "fixture-only", "duration_seconds": 960, "surfaces": [],
+                        "fake": folder / "fake", "counter": folder / "calls.jsonl"}
+                case["fake"].write_bytes(b"fixture-only")
                 probe.declare_account(case)
                 self.assertFalse((folder / "home/.cys/accounts.json").exists())
                 cases[name] = case

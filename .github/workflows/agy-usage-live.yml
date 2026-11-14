@@ -1,7 +1,7 @@
 name: agy usage installed-candidate live proof
 on:
   push:
-    branches: [proof/scroll-red-1113]
+    branches: [proof/agy-live-r2-1114]
     paths:
       - '.github/workflows/agy-usage-live.yml'
       - '.github/agy-live-inputs.json'
@@ -25,14 +25,14 @@ jobs:
       PROOF_OS: ${{ matrix.os }}
       CANDIDATE_SHA: c80e2dfb838f9823d5bb413f8cfb8db6dcaa5b53
     steps:
-      - name: Enforce the explicit 23:30 KST allow deadline
+      - name: Enforce the explicit 18:00 KST allow deadline
         shell: bash
         run: |
           python - <<'PY'
           from datetime import datetime, timedelta, timezone
-          deadline = datetime(2026, 11, 13, 14, 30, tzinfo=timezone.utc)
+          deadline = datetime(2026, 11, 14, 9, 0, tzinfo=timezone.utc)
           if datetime.now(timezone.utc) + timedelta(minutes=31) >= deadline:
-              raise SystemExit('Allow ends at 23:30 KST; insufficient time for the bounded 30-minute job')
+              raise SystemExit('Allow ends at 18:00 KST; insufficient time for the bounded 30-minute job')
           PY
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

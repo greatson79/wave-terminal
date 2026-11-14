@@ -4,6 +4,7 @@ import {readFileSync,writeFileSync,mkdirSync,existsSync,renameSync} from 'node:f
 import {resolve,join} from 'node:path';
 import {classifyViewport} from './scroll-contract.mjs';
 import {classifyRelaunch} from './scroll-relaunch-contract.mjs';
+import {launchGui} from './scroll-relaunch-launch.mjs';
 
 assert.equal(process.platform,'win32','Windows disposable runner only');
 assert.equal(process.env.GITHUB_ACTIONS,'true','never relaunch a real workstation app');
@@ -74,8 +75,8 @@ try {
  assert.equal(quit.pid,app.pid);assert.equal(quit.gone,true,'old GUI PID not proven gone');
  const survived=JSON.parse(cli(['identify']));save('relaunch-daemon-gui-closed.json',survived);
  assert.equal(survived.daemon_pid,identity.daemon_pid);assert.equal(survived.started_at,identity.started_at);
- const relaunched=JSON.parse(execFileSync(ps,['-NoProfile','-NonInteractive','-Command',
-  `$ErrorActionPreference='Stop';$p=Start-Process ${quote(app.path)} -PassThru -RedirectStandardOutput ${quote(join(out,'relaunch.stdout.log'))} -RedirectStandardError ${quote(join(out,'relaunch.stderr.log'))};@{pid=$p.Id;path=${quote(app.path)}}|ConvertTo-Json -Compress`],{encoding:'utf8',timeout:15000,windowsHide:true}));
+ // The GUI must not keep a captured launcher pipe open after its PID is issued.
+ const relaunched=await launchGui(app.path);
  assert.notEqual(relaunched.pid,app.pid);app.pid=relaunched.pid;save('relaunch-gui-start.json',relaunched);
  await wait(1500);
  const afterIdentity=JSON.parse(cli(['identify']));save('relaunch-daemon-after.json',afterIdentity);

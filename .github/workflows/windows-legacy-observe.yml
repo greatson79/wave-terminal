@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
   push:
     branches: ['rc/0.3.6']
-    paths: ['.github/workflows/windows-legacy-observe.yml']
+    paths: ['.github/workflows/windows-legacy-observe.yml', 'src-tauri/src/legacy_cleanup.rs']
 
 permissions:
   contents: read
@@ -37,3 +37,63 @@ jobs:
         with:
           name: legacy-cys-uninstall-observation
           path: ${{ runner.temp }}/observe
+
+  # C2/C7: run the PRODUCTION cleanup (legacy_cleanup::run_at_start, ignored test) against a REAL upstream install on the
+  # runner; the install must disappear and seeded user/department records must stay byte-identical.
+  cleanup-proof:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          key: legacy-cleanup-proof
+      - name: Install official upstream cys 0.14.56 (sha256 verified)
+        shell: pwsh
+        run: |
+          $want = 'cfe534b46c5eaaea946f58cd32f55ab0b5d102f97c8bf7c16075d37a1032a78e'
+          Invoke-WebRequest -Uri 'https://github.com/idoforgod/cys-terminal/releases/download/v0.14.56/cys_0.14.56_x64-setup.exe' -OutFile "$env:RUNNER_TEMP\cys-setup.exe"
+          if ((Get-FileHash -Algorithm SHA256 "$env:RUNNER_TEMP\cys-setup.exe").Hash.ToLower() -ne $want) { throw 'sha256 mismatch' }
+          $p = Start-Process -FilePath "$env:RUNNER_TEMP\cys-setup.exe" -ArgumentList '/S' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "setup exit $($p.ExitCode)" }
+          if (-not (Test-Path "$env:LOCALAPPDATA\cys\cys-app.exe")) { throw 'upstream install missing' }
+      - name: Seed records that must survive
+        shell: pwsh
+        run: |
+          $rec = @("$env:USERPROFILE\.cys\dept-a\record.json", "$env:USERPROFILE\.cys\sentinel.txt", "$env:USERPROFILE\.local\state\cys\meta", "$env:USERPROFILE\dept\board\state.yaml")
+          foreach ($f in $rec) { New-Item -ItemType Directory -Force (Split-Path $f) | Out-Null; [IO.File]::WriteAllText($f, "sentinel $f") }
+          $rec | Sort-Object | ForEach-Object { "$_ $((Get-FileHash -Algorithm SHA256 $_).Hash)" } | Set-Content "$env:RUNNER_TEMP\records-before.txt"
+          reg query 'HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\cys' | Set-Content "$env:RUNNER_TEMP\uninstall-key-before.txt"
+      - name: Run production cleanup (cargo test --ignored c7_windows_real_cleanup)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($bin in 'wave','waved','cys','cysd','cys-app') { $t = "src-tauri/binaries/$bin-x86_64-pc-windows-msvc.exe"; New-Item -ItemType Directory -Force (Split-Path $t) | Out-Null; [IO.File]::WriteAllBytes($t, [byte[]](0x4d,0x5a)) }
+          New-Item -ItemType Directory -Force src-tauri/resources, ui/dist | Out-Null
+          [IO.File]::WriteAllBytes('src-tauri/resources/pack.tar.gz', [byte[]](0x1f,0x8b)); Set-Content src-tauri/resources/pack-manifest.json '{}'; Set-Content ui/dist/index.html '<html></html>'
+          $env:C7_SETTINGS = "$env:RUNNER_TEMP\wavecfg\user-settings.json"
+          cargo test -p wave-app --bin wave-app c7_windows_real_cleanup -- --ignored --nocapture 2>&1 | Tee-Object "$env:RUNNER_TEMP\cleanup-run.txt"
+          if ($LASTEXITCODE -ne 0) { throw "cleanup test failed" }
+      - name: Assert removal + records identical
+        shell: pwsh
+        run: |
+          Start-Sleep 5   # the NSIS uninstaller finishes asynchronously after /S
+          $fail = @()
+          if (Test-Path "$env:LOCALAPPDATA\cys\cys-app.exe") { $fail += 'upstream cys-app.exe still installed' }
+          if (Test-Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\cys') { $fail += 'Uninstall key still present' }
+          $rec = @("$env:USERPROFILE\.cys\dept-a\record.json", "$env:USERPROFILE\.cys\sentinel.txt", "$env:USERPROFILE\.local\state\cys\meta", "$env:USERPROFILE\dept\board\state.yaml")
+          $now = $rec | Sort-Object | ForEach-Object { if (Test-Path $_) { "$_ $((Get-FileHash -Algorithm SHA256 $_).Hash)" } else { "$_ MISSING" } }
+          if ((($now) -join "`n") -ne ((Get-Content "$env:RUNNER_TEMP\records-before.txt") -join "`n")) { $fail += 'records changed' }
+          Get-Content "$env:RUNNER_TEMP\wavecfg\legacy-cleanup.log" -ErrorAction SilentlyContinue | Write-Host
+          Get-ChildItem "$env:LOCALAPPDATA" -Directory | Select-Object Name | Out-String | Write-Host
+          if ($fail.Count) { throw ("CLEANUP PROOF FAILED: " + ($fail -join '; ')) }
+          Write-Host 'OK: upstream cys removed via its own uninstaller; records byte-identical'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cleanup-proof
+          path: |
+            ${{ runner.temp }}/records-before.txt
+            ${{ runner.temp }}/uninstall-key-before.txt
+            ${{ runner.temp }}/cleanup-run.txt
+            ${{ runner.temp }}/wavecfg

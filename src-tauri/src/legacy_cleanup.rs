@@ -132,12 +132,18 @@ pub(crate) struct UninstallEntry {
 const LEGACY_DISPLAY_NAME: &str = "cys";
 const LEGACY_EXE: &str = "cys-app.exe";
 
-/// Values of the original product's install that were OBSERVED on a real Windows install (C7: official upstream cys
-/// 0.14.56 setup on the CI runner, `reg query` dump). Upstream `tauri.conf.json` (W-CYS_EVIDENCE/upstream-conf.json:3,5)
-/// only gives productName "cys" and identifier com.cysjavis.terminal — no publisher/manufacturer — so the real Publisher
-/// is unknown. Until observed, the Windows removal is DISABLED: `OBSERVED = None` => no-op + log-only lines.
+/// Values of the original product's install, OBSERVED on a real Windows runner (official upstream cys 0.14.56 setup,
+/// `reg query` dump, run 43880653708 on greatson79/wave-terminal-test; evidence `EVIDENCE/win_legacy_observe/`):
+/// Uninstall subkey `cys`, DisplayName `cys`, Publisher `cysjavis`, InstallLocation `"C:\Users\<u>\AppData\Local\cys"`
+/// (quoted), UninstallString `"<InstallLocation>\uninstall.exe"` (quoted), MainBinaryName `cys-app.exe`.
 pub(crate) struct Observed { pub publisher: &'static str }
-pub(crate) const OBSERVED: Option<Observed> = None;
+pub(crate) const OBSERVED: Option<Observed> = Some(Observed { publisher: "cysjavis" });
+
+/// `"C:\x\uninstall.exe"` (as stored in the registry) -> the bare path. Unquoted values are returned as-is.
+pub(crate) fn uninstaller_path(command: &str) -> PathBuf {
+    let c = command.trim();
+    match c.strip_prefix('"') { Some(rest) => PathBuf::from(rest.split('"').next().unwrap_or("")), None => PathBuf::from(c) }
+}
 
 /// Parse `reg query <Uninstall root> /s` output into entries (pure; tested on fixtures).
 pub(crate) fn parse_reg_query(text: &str) -> Vec<UninstallEntry> {
@@ -247,7 +253,7 @@ impl Ops for RealOps {
     }
     fn run_uninstaller(&mut self, command: &str) -> Result<(), String> {
         #[cfg(windows)] {
-            let out = std::process::Command::new("cmd").args(["/C", &format!("{command} /S")]).output().map_err(|e| e.to_string())?;
+            let out = std::process::Command::new(uninstaller_path(command)).arg("/S").output().map_err(|e| e.to_string())?;
             if out.status.success() { Ok(()) } else { Err(format!("종료 코드 {:?}", out.status.code())) }
         }
         #[cfg(not(windows))] { let _ = command; Ok(()) }
@@ -450,16 +456,44 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\Wave Termi
         Fake { running: vec![(3, PathBuf::from(r"C:\Users\u\AppData\Local\cys\cys-app.exe"))], ..Default::default() }
     }
 
+    /// The real values dumped from the official upstream 0.14.56 install on a Windows runner (quoted paths included).
+    const REAL: &str = r#"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\cys
+    MainBinaryName    REG_SZ    cys-app.exe
+    DisplayName    REG_SZ    cys
+    DisplayIcon    REG_SZ    "C:\Users\runneradmin\AppData\Local\cys\cys-app.exe"
+    DisplayVersion    REG_SZ    0.14.56
+    Publisher    REG_SZ    cysjavis
+    InstallLocation    REG_SZ    "C:\Users\runneradmin\AppData\Local\cys"
+    UninstallString    REG_SZ    "C:\Users\runneradmin\AppData\Local\cys\uninstall.exe"
+    NoModify    REG_DWORD    0x1
+"#;
+
     #[test]
-    fn windows_removal_is_disabled_until_real_values_are_observed() {
-        let entries = parse_reg_query(REG);
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].publisher, "Acme Pub");
+    fn real_observed_upstream_entry_matches_and_runs_its_own_uninstaller() {
+        let entries = parse_reg_query(REAL);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].publisher, "cysjavis");
+        assert_eq!(entries[0].install_location, r"C:\Users\runneradmin\AppData\Local\cys", "quotes stripped");
+        let mut ops = Fake { running: vec![(3, PathBuf::from(r"C:\Users\runneradmin\AppData\Local\cys\cys-app.exe"))], ..Default::default() };
+        let own = Path::new(r"C:\Users\runneradmin\AppData\Local\Wave Terminal");
+        let lines = clean_windows(&entries, own, OBSERVED.as_ref(), &mut ops);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(ops.events[0], "terminate 3");
+        assert_eq!(ops.events[1], r#"uninstall "C:\Users\runneradmin\AppData\Local\cys\uninstall.exe""#);
+        assert_eq!(uninstaller_path(r#""C:\x y\uninstall.exe""#), PathBuf::from(r"C:\x y\uninstall.exe"));
+        // our own install (different subkey/publisher/dir) never matches
+        let mut wave = entries[0].clone(); wave.key = wave.key.replace(r"Uninstall\cys", r"Uninstall\Wave Terminal");
+        wave.display_name = "Wave Terminal".into(); wave.install_location = own.display().to_string();
+        let mut ops = Fake::default();
+        assert!(clean_windows(&[wave], own, OBSERVED.as_ref(), &mut ops).is_empty() && ops.events.is_empty());
+    }
+
+    #[test]
+    fn windows_without_observed_values_is_log_only() {
         let mut ops = win_ops();
-        let lines = clean_windows(&entries, Path::new(OWN), OBSERVED.as_ref(), &mut ops);
-        assert!(OBSERVED.is_none(), "must stay disabled until C7 observation");
-        assert!(ops.events.is_empty(), "no-op");
-        assert!(lines.iter().all(|l| l.starts_with(LOG_ONLY)), "{lines:?}");
+        let lines = clean_windows(&parse_reg_query(REG), Path::new(OWN), None, &mut ops);
+        assert!(ops.events.is_empty());
+        assert!(!lines.is_empty() && lines.iter().all(|l| l.starts_with(LOG_ONLY)), "{lines:?}");
     }
 
     #[test]
@@ -536,5 +570,16 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\Wave Termi
             launch_agents: home.join("Library/LaunchAgents"), archive: PathBuf::from("/nonexistent"), own_bundle: None, stamp: "x".into() };
         for l in plan_macos(&paths) { println!("PLAN {l}"); }
         println!("PLAN_DONE");
+    }
+
+    /// C7 (Windows runner only, `--ignored`): runs the PRODUCTION entry on the real registry of a disposable runner
+    /// where the official upstream cys setup is installed. Compiled on Windows only so it can never touch a Mac.
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn c7_windows_real_cleanup() {
+        let settings = PathBuf::from(std::env::var("C7_SETTINGS").expect("C7_SETTINGS"));
+        run_at_start(&settings);
+        println!("NOTICE {:?}", take_notice());
     }
 }

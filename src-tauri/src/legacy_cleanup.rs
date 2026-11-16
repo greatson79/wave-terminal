@@ -44,8 +44,9 @@ fn plist_program(path: &Path) -> Option<PathBuf> {
     args.first()?.as_string().map(PathBuf::from)
 }
 
-pub(crate) fn clean_macos(p: &Paths, ops: &mut dyn Ops) -> Vec<String> {
-    let mut lines = Vec::new();
+/// Leftover original-cys bundles in `p.app_roots` (bundle id match only; symlinks/own bundle excluded). Read-only.
+fn find_legacy_apps(p: &Paths) -> Vec<(PathBuf, String, String)> {
+    let mut found = Vec::new();
     for root in &p.app_roots {
         let Ok(rd) = std::fs::read_dir(root) else { continue };
         let mut apps: Vec<PathBuf> = rd.flatten().map(|e| e.path())
@@ -58,33 +59,57 @@ pub(crate) fn clean_macos(p: &Paths, ops: &mut dyn Ops) -> Vec<String> {
             if id != LEGACY_BUNDLE_ID { continue; }
             if p.own_bundle.as_ref().is_some_and(|own| own.canonicalize().ok() == app.canonicalize().ok()) { continue; }
             let name = app.file_name().and_then(|n| n.to_str()).unwrap_or("cys.app").to_string();
-            let main = app.join("Contents/MacOS").join(&exe);
-            let procs = ops.processes_under(&app);
-            // A daemon from the leftover app may be serving seats: never stop it here (seats stay intact).
-            if procs.iter().any(|(_, e)| *e != main) {
-                lines.push(format!("남은 cys 앱({name})의 서비스가 실행 중이라 건드리지 않았습니다."));
+            found.push((app, name, exe));
+        }
+    }
+    found
+}
+
+fn legacy_plist(p: &Paths) -> PathBuf { p.launch_agents.join(format!("{LEGACY_JOB_LABEL}.plist")) }
+
+/// Read-only: what `clean_macos` would remove. Used for the real-shape scan (C6) — touches nothing.
+pub(crate) fn plan_macos(p: &Paths) -> Vec<String> {
+    let mut out = Vec::new();
+    for (app, _, _) in find_legacy_apps(p) {
+        out.push(format!("REMOVE app {}", app.display()));
+        let plist = legacy_plist(p);
+        if let Some(prog) = plist_program(&plist) {
+            if prog.starts_with(&app) { out.push(format!("REMOVE plist {}", plist.display())); }
+            else { out.push(format!("KEEP plist {} (program {} is not inside the leftover app)", plist.display(), prog.display())); }
+        }
+    }
+    out
+}
+
+pub(crate) fn clean_macos(p: &Paths, ops: &mut dyn Ops) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (app, name, exe) in find_legacy_apps(p) {
+        let main = app.join("Contents/MacOS").join(&exe);
+        let procs = ops.processes_under(&app);
+        // A daemon from the leftover app may be serving seats: never stop it here (seats stay intact).
+        if procs.iter().any(|(_, e)| *e != main) {
+            lines.push(format!("남은 cys 앱({name})의 서비스가 실행 중이라 건드리지 않았습니다."));
+            continue;
+        }
+        if let Some((pid, _)) = procs.first() {
+            if let Err(e) = ops.terminate(*pid) {
+                lines.push(format!("남은 cys 앱({name})을 종료하지 못해 그대로 둡니다: {e}"));
                 continue;
             }
-            if let Some((pid, _)) = procs.iter().find(|_| true) {
-                if let Err(e) = ops.terminate(*pid) {
-                    lines.push(format!("남은 cys 앱({name})을 종료하지 못해 그대로 둡니다: {e}"));
-                    continue;
-                }
+        }
+        let plist = legacy_plist(p);
+        if plist_program(&plist).is_some_and(|prog| prog.starts_with(&app)) {
+            let _ = ops.bootout(LEGACY_JOB_LABEL); // not loaded = fine; the file removal below is what matters
+            match std::fs::remove_file(&plist) {
+                Ok(()) => lines.push(format!("남은 cys 자동 시작 등록({LEGACY_JOB_LABEL})을 정리했습니다.")),
+                Err(e) => { lines.push(format!("cys 자동 시작 등록을 지우지 못해 앱도 그대로 둡니다: {e}")); continue; }
             }
-            let plist = p.launch_agents.join(format!("{LEGACY_JOB_LABEL}.plist"));
-            if plist_program(&plist).is_some_and(|prog| prog.starts_with(&app)) {
-                let _ = ops.bootout(LEGACY_JOB_LABEL); // not loaded = fine; the file removal below is what matters
-                match std::fs::remove_file(&plist) {
-                    Ok(()) => lines.push(format!("남은 cys 자동 시작 등록({LEGACY_JOB_LABEL})을 정리했습니다.")),
-                    Err(e) => { lines.push(format!("cys 자동 시작 등록을 지우지 못해 앱도 그대로 둡니다: {e}")); continue; }
-                }
-            }
-            let dest = p.archive.join(format!("{}-{name}", p.stamp));
-            let moved = std::fs::create_dir_all(&p.archive).and_then(|_| std::fs::rename(&app, &dest));
-            match moved {
-                Ok(()) => lines.push(format!("남은 cys 앱({name})을 보관 폴더로 옮겼습니다: {}", dest.display())),
-                Err(e) => lines.push(format!("남은 cys 앱({name})을 옮기지 못했습니다(권한 등). 그대로 둡니다: {e}")),
-            }
+        }
+        let dest = p.archive.join(format!("{}-{name}", p.stamp));
+        let moved = std::fs::create_dir_all(&p.archive).and_then(|_| std::fs::rename(&app, &dest));
+        match moved {
+            Ok(()) => lines.push(format!("남은 cys 앱({name})을 보관 폴더로 옮겼습니다: {}", dest.display())),
+            Err(e) => lines.push(format!("남은 cys 앱({name})을 옮기지 못했습니다(권한 등). 그대로 둡니다: {e}")),
         }
     }
     lines
@@ -409,5 +434,47 @@ mod tests {
         assert_eq!(main.matches("run_at_start(").count(), 0, "no second call site");
         let run_body = &rm[rm.find("pub(crate) async fn run(").unwrap()..];
         assert!(run_body.find("run_at_start").unwrap() < run_body.find("native::run").unwrap(), "before the migration");
+    }
+
+    /// C6 rig step (run by hand with RIG=<private /tmp tree>, `--ignored`): the 0.3.6 start sequence on a tree where
+    /// the original cys already overwrote the pack. Same functions the startup calls; bootout is a recorded no-op so
+    /// the real launchd is never touched.
+    struct RigOps { events: Vec<String> }
+    impl Ops for RigOps {
+        fn processes_under(&self, dir: &Path) -> Vec<(u32, PathBuf)> {
+            let mut sys = sysinfo::System::new();
+            sys.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true,
+                sysinfo::ProcessRefreshKind::nothing().with_exe(sysinfo::UpdateKind::Always));
+            sys.processes().iter().filter_map(|(pid, p)| p.exe().filter(|e| e.starts_with(dir)).map(|e| (pid.as_u32(), e.to_path_buf()))).collect()
+        }
+        fn terminate(&mut self, pid: u32) -> Result<(), String> { self.events.push(format!("terminate {pid}")); RealOpsTerminate::kill(pid) }
+        fn bootout(&mut self, label: &str) -> Result<(), String> { self.events.push(format!("bootout(NO-OP in rig) {label}")); Ok(()) }
+        fn run_uninstaller(&mut self, _: &str) -> Result<(), String> { Ok(()) }
+    }
+    struct RealOpsTerminate;
+    impl RealOpsTerminate { fn kill(pid: u32) -> Result<(), String> { RealOps.terminate(pid) } }
+
+    #[test]
+    #[ignore]
+    fn c6_rig_start_sequence() {
+        let tree = PathBuf::from(std::env::var("RIG").expect("RIG tree"));
+        assert!(tree.starts_with("/private/tmp"), "rig must be under /private/tmp");
+        let paths = Paths { app_roots: vec![tree.join("home/Applications")], launch_agents: tree.join("home/Library/LaunchAgents"),
+            archive: tree.join("cfg/removed-cys-apps"), own_bundle: None, stamp: "RIG".into() };
+        let mut ops = RigOps { events: vec![] };
+        let lines = clean_macos(&paths, &mut ops);
+        println!("CLEAN_LINES {lines:?}\nOPS {:?}", ops.events);
+        println!("HEAL {:?}", cys::pack::heal_foreign_pack());
+    }
+
+    /// C6 real-shape scan: READ-ONLY on this Mac's real roots. Only `plan_macos` (no mutation) is called.
+    #[test]
+    #[ignore]
+    fn c6_real_shape_scan_readonly() {
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        let paths = Paths { app_roots: vec![PathBuf::from("/Applications"), home.join("Applications")],
+            launch_agents: home.join("Library/LaunchAgents"), archive: PathBuf::from("/nonexistent"), own_bundle: None, stamp: "x".into() };
+        for l in plan_macos(&paths) { println!("PLAN {l}"); }
+        println!("PLAN_DONE");
     }
 }

@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Wave Terminal",
   "mainBinaryName": "wave-app",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "identifier": "com.waveainetworks.wave-terminal",
   "build": {
     "frontendDist": "../ui/dist",
@@ -50,7 +50,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXkgMDJCRTE3RUI2RUI4MDRBMQpSV1NoQkxodTZ4ZStBbnpkTGhPS1V1WHlaYjZGUGp1QlNXRzBzN1NQYWN5M3Y5bzRRdDhZOW1xSQo=",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQyNUYxRjg0MTU3RDdEQkYKUldTL2ZYMFZoQjlmUWtBS3Y2UUc4enF0WVVrRFRxbmFKRXQrOVhaKy9oQSt4K21PakM1SDdQV1IK",
       "endpoints": [
         "https://github.com/greatson79/wave-terminal/releases/latest/download/latest.json"
       ]

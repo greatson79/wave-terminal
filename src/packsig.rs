@@ -379,7 +379,7 @@ mod tests {
         let boot = kr
             .keys
             .iter()
-            .find(|k| k.key_id == "39E60A702949D6C3")
+            .find(|k| k.key_id == "425F1F84157D7DBF")
             .expect("부트스트랩 key_id 부재");
         assert!(!boot.pubkey.is_empty(), "build.rs가 tauri pubkey를 주입하지 않음");
         assert!(!boot.not_after.is_empty(), "not_after 부재(fail-closed 위반)");
@@ -967,5 +967,65 @@ mod tests {
         assert!(r.is_err(), "심링크가 fail-closed로 거부되지 않음");
         assert!(r.unwrap_err().contains("비정규"), "심링크 거부 사유 아님");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ── C1(0.3.6 열쇠 회전) ─────────────────────────────────────────────────────────
+    const NEW_KEY_ID: &str = "425F1F84157D7DBF";
+
+    /// minisign 키 ID = 키라인 바이트 [2..10] 의 little-endian 16진 대문자(서명 형식 정의).
+    fn minisign_key_id_of(pubkey: &str) -> String {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let text = String::from_utf8(b64.decode(pubkey.trim()).unwrap()).unwrap();
+        let line = text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with("untrusted comment:")).next_back().unwrap();
+        let raw = b64.decode(line).unwrap();
+        raw[2..10].iter().rev().map(|b| format!("{b:02X}")).collect()
+    }
+
+    #[test]
+    fn c1_embedded_keyring_is_new_key_by_computed_id() {
+        let kr = embedded_keyring().unwrap();
+        assert_eq!(kr.keys.len(), 1, "활성 키는 새 열쇠 하나");
+        let k = &kr.keys[0];
+        assert_eq!(k.key_id, NEW_KEY_ID);
+        assert_eq!(minisign_key_id_of(&k.pubkey), NEW_KEY_ID, "key_id 는 공개키 바이트에서 계산한 값과 같아야 한다");
+        for old in ["02BE17EB6EB804A1", "39E60A702949D6C3"] {
+            assert!(kr.revoked_key_ids.iter().any(|r| r == old), "{old} 폐기 누락");
+        }
+    }
+
+    // (a) 새 열쇠 형식 시험 열쇠 서명 = 수락 — 운영 키링의 항목 구조 그대로, pubkey 만 시험 열쇠로 교체.
+    #[test]
+    fn c1_new_format_test_key_signature_accepted() {
+        let (pk, sign) = gen_key_and_signer();
+        let mut kr = embedded_keyring().unwrap();
+        kr.keys[0].pubkey = pk;
+        let acc = tmp_accepted("c1a");
+        let _ = std::fs::remove_file(&acc);
+        let m = manifest_json(NEW_KEY_ID, "1.0.0", 1000, 2000);
+        verify_with_keyring(&m, sign(&m).as_bytes(), 1500, &acc, &kr).expect("새 key_id + 유효 서명 거부됨");
+        let _ = std::fs::remove_file(&acc);
+    }
+
+    // (b) 옛 열쇠 ID 서명 = 거부. 대조 위치: packsig.rs verify_with_keyring ⓑ(revoked, manifest.key_id) →
+    //     미지 key_id → ⓒ(키링 pubkey 로 서명 검증, 다른 열쇠 서명 = 거부). 세 길 모두 시험한다.
+    #[test]
+    fn c1_old_key_ids_rejected() {
+        let (_pk, sign) = gen_key_and_signer();
+        let kr = embedded_keyring().unwrap();
+        let acc = tmp_accepted("c1b");
+        let _ = std::fs::remove_file(&acc);
+        for old in ["02BE17EB6EB804A1", "39E60A702949D6C3"] {
+            let m = manifest_json(old, "1.0.0", 1000, 2000);
+            let e = verify_with_keyring(&m, sign(&m).as_bytes(), 1500, &acc, &kr).unwrap_err();
+            assert!(e.contains("폐기"), "{old}: {e}");
+        }
+        // 옛 열쇠가 새 key_id 라벨을 달아도(서명자 ≠ 키링 pubkey) 거부.
+        let m = manifest_json(NEW_KEY_ID, "1.0.0", 1000, 2000);
+        let e = verify_with_keyring(&m, sign(&m).as_bytes(), 1500, &acc, &kr).unwrap_err();
+        assert!(e.contains("서명 검증 실패"), "{e}");
+        // 운영 진입점도 동일.
+        assert!(verify_manifest(&m, sign(&m).as_bytes(), 1500, &acc).is_err());
+        let _ = std::fs::remove_file(&acc);
     }
 }

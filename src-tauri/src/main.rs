@@ -3300,6 +3300,22 @@ mod tests {
         assert!(!(rel("0.2.0").version > student), "같은 판이면 안 뜬다");
     }
 
+    // C1(c) 롤백 거부: 0.3.6 앱은 tauri-plugin-updater 규칙(`release.version > current`)상 ≤0.3.5 판을 받지 않는다.
+    #[test]
+    fn this_build_rejects_rollback_to_035_or_older_by_updater_rule() {
+        let rel = |v: &str| -> tauri_plugin_updater::RemoteRelease {
+            serde_json::from_value(json!({"version": v, "platforms": {
+                "darwin-aarch64": {"signature": "s", "url": "https://example.invalid/a.tar.gz"}}}))
+            .unwrap()
+        };
+        let me = rel(env!("CARGO_PKG_VERSION")).version;
+        assert_eq!(env!("CARGO_PKG_VERSION"), "0.3.6");
+        for old in ["0.3.5", "0.3.4", "0.3.0", "0.2.0"] {
+            assert!(!(rel(old).version > me), "{old} 롤백이 버튼에 뜬다");
+        }
+        assert!(rel("0.3.7").version > me);
+    }
+
     #[test]
     fn pack_manifest_404_is_no_update_but_other_errors_are_not() {
         assert!(is_http_404(b"curl: (56) The requested URL returned error: 404\n"));

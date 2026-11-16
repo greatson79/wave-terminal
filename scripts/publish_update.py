@@ -156,7 +156,7 @@ def dryrun(a):
     else:
         m = json.loads(pack[1].read_text())
         (ok if minisign_ok(pub.name, pack[1], pack[2].read_text()) else bad)("pack-manifest 서명(내장 공개키)")
-        (ok if m.get("key_id") == "39E60A702949D6C3" else bad)("key_id = 키링 이름 39E60A702949D6C3(trusted-keys.json)")
+        (ok if m.get("key_id") == "425F1F84157D7DBF" else bad)("key_id = 키링 이름 425F1F84157D7DBF(trusted-keys.json)")
         (ok if m.get("digest") == sha(pack[0]) else bad)("digest = sha256(pack.tar.gz)")
         mb = m.get("min_binary_version", "")
         (ok if not mb or semver(mb) and semver(mb) <= semver(V) else bad)(

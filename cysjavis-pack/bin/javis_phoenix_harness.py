@@ -80,13 +80,15 @@ _tracked_daemon = None  # subprocess.Popen of the isolated cysd we own
 
 def _resolve_cysd():
     """cysd 절대경로 결정 — PHOENIX_HARNESS_CYSD 오버라이드 우선(Phase3 신 바이너리 자격시험),
-    없으면 app 번들, 없으면 PATH."""
+    없으면 Wave app 번들, 없으면 PATH."""
     override = os.environ.get("PHOENIX_HARNESS_CYSD")
     if override and os.path.exists(override):
         return os.path.realpath(override)
-    cand = "/Applications/cys.app/Contents/MacOS/cysd"
-    if os.path.exists(cand):
-        return cand
+    # 0.3.6: Wave's own bundle first; the original cys.app is never preferred (it may be a leftover that is being removed).
+    for cand in ("/Applications/Wave Terminal.app/Contents/MacOS/waved",
+                 os.path.expanduser("~/Applications/Wave Terminal.app/Contents/MacOS/waved")):
+        if os.path.exists(cand):
+            return cand
     # 0.3.2: canonical daemon binary waved first; cysd (forwarder / older install) as fallback.
     for name in ("waved", "cysd"):
         p = shutil_which(name)

@@ -2789,4 +2789,13 @@ mod tests {
         assert_eq!(std::fs::read_to_string(pd.join(dir_rel)).unwrap(), edited, "실제 편집 보존");
         let _ = std::fs::remove_dir_all(&base);
     }
+
+    // 0.3.6 C3/C4: the shipped pack must not call this terminal "cys" nor prefer the original app bundle.
+    #[test]
+    fn shipped_pack_has_no_cys_terminal_declaration_and_no_cys_app_path() {
+        for (rel, body) in PACK_ALL {
+            assert!(!body.contains("이 터미널은 cys다"), "C3 {rel}");
+            assert!(!body.contains("/Applications/cys.app"), "C4 {rel}");
+        }
+    }
 }

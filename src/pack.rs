@@ -707,6 +707,40 @@ pub fn pack_current_for(binary_version: &str) -> bool {
     pack_current_in(&pack_dir(), binary_version)
 }
 
+/// 0.3.6 C5 — the original cys shares `~/.cys/pack` and its `init-pack`/update can overwrite Wave's pack (its higher
+/// `.pack-version` even makes `pack_current_for` say "current"). Our shipped pack never contains the original app path
+/// (release gate: `shipped_pack_has_no_cys_terminal_declaration_and_no_cys_app_path`), so finding it in the two system
+/// files below means a foreign overwrite. (The directive heading is NOT a fingerprint: Wave 0.3.5 shipped it too.)
+const FOREIGN_FINGERPRINT: &str = "/Applications/cys.app";
+const FOREIGN_PROBE_FILES: [&str; 2] = ["bin/javis_preflight.py", "bin/javis_phoenix_harness.py"];
+const DIRECTIVE_FILES: [&str; 4] = [
+    "directives/MASTER_DIRECTIVE.md", "directives/WORKER_DIRECTIVE.md",
+    "directives/CSO_DIRECTIVE.md", "directives/REVIEWER_DIRECTIVE.md",
+];
+
+pub fn foreign_pack_drift(dir: &Path) -> bool {
+    FOREIGN_PROBE_FILES.iter().any(|rel| std::fs::read_to_string(dir.join(rel)).is_ok_and(|t| t.contains(FOREIGN_FINGERPRINT)))
+}
+
+/// App-start self-heal: foreign overwrite detected -> force-install the shipped pack (system files: user-modified copies
+/// kept as `<rel>.user`), then restore the 4 role directives (user-owned, so `install` never overwrites them) the same
+/// way (`.user` first). Seed-once state and other user-owned files are untouched. `Ok(None)` = no drift.
+pub fn heal_foreign_pack() -> Result<Option<String>, String> {
+    let dir = pack_dir();
+    if !foreign_pack_drift(&dir) { return Ok(None); }
+    install(true)?;
+    for rel in DIRECTIVE_FILES {
+        let Some((_, shipped)) = PACK_ALL.iter().find(|(r, _)| *r == rel) else { continue };
+        let path = dir.join(rel);
+        let Ok(disk) = std::fs::read_to_string(&path) else { continue };
+        if disk == *shipped { continue; }
+        write_atomic(&dir.join(format!("{rel}.user")), disk.as_bytes()).map_err(|e| format!("{rel}.user 보관 실패: {e}"))?;
+        write_atomic(&path, shipped.as_bytes()).map_err(|e| format!("{rel} 복원 실패: {e}"))?;
+    }
+    install(false)?; // adopt the restored directives into the install manifest
+    Ok(Some("공유 지침 폴더가 원본 cys 의 지침으로 덮여 있어 Wave 지침으로 되돌렸습니다. 고쳐 둔 파일은 .user 로 보관했습니다.".to_string()))
+}
+
 /// 원자적 파일 쓰기(§7-⑤): 같은 디렉터리 temp 파일에 쓰고 fsync → rename으로 원자 교체 →
 /// 디렉터리 fsync(best-effort). 쓰는 도중 crash 시 부분 파일이 최종 경로에 남지 않는다
 /// (std::fs::write는 비원자라 부분 쓰기 노출). cysd governance의 write_json_atomic과 동형.
@@ -2797,5 +2831,38 @@ mod tests {
             assert!(!body.contains("이 터미널은 cys다"), "C3 {rel}");
             assert!(!body.contains("/Applications/cys.app"), "C4 {rel}");
         }
+    }
+
+    /// 0.3.6 C5: the original cys (`init-pack`) overwrote the shared pack -> self-heal to the shipped pack,
+    /// user-owned files untouched, user-edited system files kept as `.user`, idempotent.
+    #[test]
+    fn foreign_overwritten_pack_self_heals_once_and_preserves_user_files() {
+        let td = std::env::temp_dir().join(format!("cys-pack-heal-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&td);
+        let _dirs = override_dirs_for_thread(&td, td.join("cysclaude"));
+        install(false).expect("install");
+        let embed = env!("CARGO_PKG_VERSION");
+        // no drift on a clean shipped pack: nothing happens, nothing changes
+        assert_eq!(heal_foreign_pack().unwrap(), None);
+        // user data that must survive byte-identical
+        std::fs::write(td.join("soul.md"), "OWNER SOUL").unwrap();
+        // simulate the original cys overwrite
+        let foreign = "x = \"/Applications/cys.app/Contents/MacOS/cys\"\n";
+        std::fs::write(td.join("bin/javis_preflight.py"), foreign).unwrap();
+        std::fs::write(td.join("directives/MASTER_DIRECTIVE.md"), "## 환경 선언 — 이 터미널은 cys다\n").unwrap();
+        std::fs::write(td.join(PACK_VERSION_FILE), "0.14.56").unwrap();
+        let (_, shipped_pre) = PACK_ALL.iter().find(|(r, _)| *r == "bin/javis_preflight.py").unwrap();
+
+        let notice = heal_foreign_pack().unwrap().expect("drift must heal");
+        assert!(notice.contains("지침"), "{notice}");
+        assert_eq!(std::fs::read_to_string(td.join("bin/javis_preflight.py")).unwrap(), *shipped_pre);
+        assert_eq!(std::fs::read_to_string(td.join(PACK_VERSION_FILE)).unwrap().trim(), embed);
+        assert_eq!(std::fs::read_to_string(td.join("bin/javis_preflight.py.user")).unwrap(), foreign, "overwritten file kept");
+        let (_, shipped_dir) = PACK_ALL.iter().find(|(r, _)| *r == "directives/MASTER_DIRECTIVE.md").unwrap();
+        assert_eq!(std::fs::read_to_string(td.join("directives/MASTER_DIRECTIVE.md")).unwrap(), *shipped_dir, "directive restored");
+        assert!(std::fs::read_to_string(td.join("directives/MASTER_DIRECTIVE.md.user")).unwrap().contains("cys다"), "foreign directive kept");
+        assert_eq!(std::fs::read_to_string(td.join("soul.md")).unwrap(), "OWNER SOUL", "user-owned file untouched");
+        assert_eq!(heal_foreign_pack().unwrap(), None, "idempotent");
+        let _ = std::fs::remove_dir_all(&td);
     }
 }

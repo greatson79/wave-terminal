@@ -2880,7 +2880,12 @@ fn main() {
                     if let Ok(mut notice) = MIGRATION_NOTICE.lock() { *notice = Some(error.to_string()); }
                     eprintln!("[wave-app] migration refused, continuing on the running daemon: {error}");
                 }
-                if let Some(line) = legacy_cleanup::take_notice() {
+                // 0.3.6 C5: original cys may have overwritten the shared pack — restore the shipped one (fail-open).
+                let healed = match cys::pack::heal_foreign_pack() {
+                    Ok(line) => line,
+                    Err(error) => { eprintln!("[wave-app] pack self-heal failed, continuing: {error}"); None }
+                };
+                for line in legacy_cleanup::take_notice().into_iter().chain(healed) {
                     if let Ok(mut notice) = MIGRATION_NOTICE.lock() { *notice = Some(match notice.take() { Some(prev) => format!("{prev} · {line}"), None => line }); }
                 }
                 if !rename_migration::startup_continues(&migration) { return; }
@@ -3577,5 +3582,13 @@ ln -sf '/Applications/cys.app/Contents/MacOS/cysd' '/usr/local/bin/cysd'"
         assert!(!plan.osascript_arg.starts_with("do shell script '"));
         assert!(plan.osascript_arg.contains("'/usr/local/bin/cys'"));
         assert!(plan.osascript_arg.contains("ln -sf"));
+    }
+
+    #[test]
+    fn startup_runs_pack_self_heal_after_the_migration_and_before_the_daemon_boot() {
+        let src = include_str!("main.rs");
+        let heal = src.find("match cys::pack::heal_foreign_pack()").expect("C5 wired");
+        assert!(heal > src.find("let migration = rename_migration::run(settings_file)").unwrap());
+        assert!(heal < src.find("let needs_onboard = needs_gui_onboard(").unwrap());
     }
 }

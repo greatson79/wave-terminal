@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 mod native;
 
 pub(crate) async fn run(settings_file: std::path::PathBuf) -> Result<Outcome,String> {
+    crate::legacy_cleanup::run_at_start(&settings_file); // 0.3.6: leftover original cys app removal (fail-open, never errors)
     #[cfg(any(target_os="macos",windows))] { native::run(settings_file).await }
     #[cfg(not(any(target_os="macos",windows)))] { let _ = settings_file; Ok(Outcome::AlreadyReady) }
 }

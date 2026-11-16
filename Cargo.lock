@@ -5167,6 +5167,7 @@ dependencies = [
  "cys-terminal",
  "getrandom 0.2.17",
  "libc",
+ "plist",
  "serde",
  "serde_json",
  "sysinfo",

@@ -25,6 +25,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["net", "io-util", "time", "process"] }
 base64 = "0.22"
 sysinfo = "0.33"
+plist = "1"
 getrandom = "0.2"
 cys = { package = "cys-terminal", path = ".." }
 

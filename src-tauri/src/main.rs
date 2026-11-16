@@ -18,6 +18,7 @@ mod update_fleet_tests;
 
 mod user_settings;
 mod rename_migration;
+mod legacy_cleanup;
 mod dept_teardown;
 mod rename_checkpoint;
 mod rename_layout;
@@ -2878,6 +2879,9 @@ fn main() {
                     if let Ok(mut retained) = STARTUP_ERROR.lock() { *retained = Some(error.to_string()); }
                     if let Ok(mut notice) = MIGRATION_NOTICE.lock() { *notice = Some(error.to_string()); }
                     eprintln!("[wave-app] migration refused, continuing on the running daemon: {error}");
+                }
+                if let Some(line) = legacy_cleanup::take_notice() {
+                    if let Ok(mut notice) = MIGRATION_NOTICE.lock() { *notice = Some(match notice.take() { Some(prev) => format!("{prev} · {line}"), None => line }); }
                 }
                 if !rename_migration::startup_continues(&migration) { return; }
                 // ★온보딩 게이트(v4) — GUI 전용 완료 마커(.gui-onboarded) 기준. 팩 마커(.pack-version)

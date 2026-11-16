@@ -175,6 +175,16 @@ fn same_dir(a: &str, b: &Path) -> bool {
     norm(a) == norm(&b.display().to_string())
 }
 
+/// NSIS `uninstall.exe /S` copies itself to %TEMP% and returns at once (observed: run 43883087608 — success reported while
+/// `cys-app.exe` and the Uninstall key were still there 5 s later). Poll until `marker` is gone; false = still there.
+pub(crate) fn wait_gone(marker: &Path, max_secs: u64) -> bool {
+    for _ in 0..max_secs.max(1) {
+        if !marker.exists() { return true; }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    !marker.exists()
+}
+
 /// Lines starting with `LOG_ONLY` go to the log file but not to the user notice.
 pub(crate) const LOG_ONLY: &str = "[log-only] ";
 
@@ -253,8 +263,12 @@ impl Ops for RealOps {
     }
     fn run_uninstaller(&mut self, command: &str) -> Result<(), String> {
         #[cfg(windows)] {
-            let out = std::process::Command::new(uninstaller_path(command)).arg("/S").output().map_err(|e| e.to_string())?;
-            if out.status.success() { Ok(()) } else { Err(format!("종료 코드 {:?}", out.status.code())) }
+            let exe = uninstaller_path(command);
+            let out = std::process::Command::new(&exe).arg("/S").output().map_err(|e| e.to_string())?;
+            if !out.status.success() { return Err(format!("종료 코드 {:?}", out.status.code())); }
+            // The launcher returned; the real uninstall runs on in a temp copy. Success only once the app is gone.
+            let gone = exe.parent().map(|d| wait_gone(&d.join(LEGACY_EXE), 90)).unwrap_or(false);
+            if gone { Ok(()) } else { Err("제거 프로그램을 실행했지만 90초 안에 끝났는지 확인하지 못했습니다(진행 중일 수 있습니다)".to_string()) }
         }
         #[cfg(not(windows))] { let _ = command; Ok(()) }
     }
@@ -582,5 +596,21 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\Wave Termi
         let settings = PathBuf::from(std::env::var("C7_SETTINGS").expect("C7_SETTINGS"));
         run_at_start(&settings);
         println!("NOTICE {:?}", take_notice());
+    }
+
+    #[test]
+    fn wait_gone_returns_when_the_marker_disappears_and_false_when_it_stays() {
+        let d = std::env::temp_dir().join(format!("wave-wg-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("cys-app.exe");
+        std::fs::write(&f, "x").unwrap();
+        let f2 = f.clone();
+        let h = std::thread::spawn(move || { std::thread::sleep(std::time::Duration::from_millis(1500)); std::fs::remove_file(f2).unwrap(); });
+        assert!(wait_gone(&f, 10), "disappearing marker must be reported gone");
+        h.join().unwrap();
+        std::fs::write(&f, "x").unwrap();
+        assert!(!wait_gone(&f, 2), "a marker that stays must not be reported gone");
+        assert!(wait_gone(&d.join("never-existed.exe"), 1));
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

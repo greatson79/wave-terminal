@@ -77,7 +77,8 @@ jobs:
       - name: Assert removal + records identical
         shell: pwsh
         run: |
-          Start-Sleep 5   # the NSIS uninstaller finishes asynchronously after /S
+          # production now waits for the uninstaller (wait_gone, <=90 s); this poll is only a safety net
+          foreach ($i in 1..60) { if (-not (Test-Path "$env:LOCALAPPDATA\cys\cys-app.exe") -and -not (Test-Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\cys')) { break }; Start-Sleep 2 }
           $fail = @()
           if (Test-Path "$env:LOCALAPPDATA\cys\cys-app.exe") { $fail += 'upstream cys-app.exe still installed' }
           if (Test-Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\cys') { $fail += 'Uninstall key still present' }

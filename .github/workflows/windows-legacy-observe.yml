@@ -4,6 +4,9 @@ name: windows-legacy-observe
 # Installs ONLY on the disposable runner. Publishes nothing, needs no secrets.
 on:
   workflow_dispatch:
+  push:
+    branches: ['rc/0.3.6']
+    paths: ['.github/workflows/windows-legacy-observe.yml']
 
 permissions:
   contents: read

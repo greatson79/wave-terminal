@@ -7,7 +7,7 @@ name: windows-build (feasibility)
 
 on:
   push:
-    branches: ['feat/windows-x64-dist', 'fix/v024-first-boot', 'feat/v0.3.0-custom']
+    branches: ['feat/windows-x64-dist', 'fix/v024-first-boot', 'feat/v0.3.0-custom', 'rc/0.3.6']
   workflow_dispatch:
 
 permissions:
@@ -529,3 +529,89 @@ jobs:
           # ★Actions pwsh 래퍼는 스크립트 말미에 exit $LASTEXITCODE 를 붙인다 — 위 방어적 uninstall(스모크 finally 가
           #   이미 제거해 rc=1)이 그 값을 오염시켜 '스모크 성공인데 스텝 exit 1'(run 28738140283 실증). 판정은 $code 로 끝 — 명시 exit 0.
           exit 0
+
+  # 0.3.6 C7: every released 0.3.x Windows installer -> this build's setup.exe over a LIVE daemon + seat,
+  # with seeded user/department records that must stay byte-identical. Disposable runner only; nothing is published.
+  upgrade-paths:
+    needs: build
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        base: ['0.3.0', '0.3.1', '0.3.2', '0.3.3', '0.3.4', '0.3.5']
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: cys-windows-x64-nsis
+          path: new
+      - name: Install base ${{ matrix.base }}, seed records, start daemon + seat, upgrade, assert
+        shell: pwsh
+        timeout-minutes: 15
+        env:
+          BASE: ${{ matrix.base }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $log = Join-Path $env:RUNNER_TEMP "upgrade-$env:BASE"; New-Item -ItemType Directory -Force $log | Out-Null
+          function Bx($exe,$argv,$ms){
+            $o=[System.IO.Path]::GetTempFileName(); $e=[System.IO.Path]::GetTempFileName()
+            try {
+              $p=Start-Process -FilePath $exe -ArgumentList $argv -NoNewWindow -PassThru -RedirectStandardOutput $o -RedirectStandardError $e
+              if(-not $p.WaitForExit($ms)){ try{$p.Kill($true)}catch{}; return @{Code=-1;Out=''} }
+              return @{Code=$p.ExitCode;Out="$(Get-Content $o -Raw -ErrorAction SilentlyContinue)$(Get-Content $e -Raw -ErrorAction SilentlyContinue)"}
+            } finally { Remove-Item $o,$e -Force -ErrorAction SilentlyContinue }
+          }
+          # 1) official base installer (public read), sha256 recorded
+          $url = "https://github.com/greatson79/wave-terminal/releases/download/v$env:BASE/wave-terminal-$env:BASE-windows-x64-setup.exe"
+          $base = Join-Path $env:RUNNER_TEMP "base-setup.exe"
+          Invoke-WebRequest -Uri $url -OutFile $base
+          "base sha256: $((Get-FileHash -Algorithm SHA256 $base).Hash)" | Tee-Object "$log\base-sha.txt"
+          $p = Start-Process -FilePath $base -ArgumentList '/S' -Wait -PassThru
+          "base install exit: $($p.ExitCode)" | Tee-Object -Append "$log\steps.txt"
+          if ($p.ExitCode -ne 0) { throw "base install failed" }
+          # 2) locate the install dir by its GUI exe (name differs across 0.3.x)
+          $inst = Get-ChildItem -Path $env:LOCALAPPDATA -Directory | Where-Object { (Test-Path (Join-Path $_.FullName 'wave-app.exe')) -or (Test-Path (Join-Path $_.FullName 'cys-app.exe')) } | Select-Object -First 1
+          if (-not $inst) { throw "base install dir not found" }
+          $dir = $inst.FullName; "install dir: $dir" | Tee-Object -Append "$log\steps.txt"
+          $cli = if (Test-Path "$dir\wave.exe") { "$dir\wave.exe" } else { "$dir\cys.exe" }
+          $dmn = if (Test-Path "$dir\waved.exe") { "$dir\waved.exe" } else { "$dir\cysd.exe" }
+          # 3) seed records that must survive (user home, not the install dir)
+          $rec = @{ "$env:USERPROFILE\.cys\dept-a\record.json" = '{"seat":1}'; "$env:USERPROFILE\.cys\sentinel.txt" = 'x'; "$env:USERPROFILE\dept\board\state.yaml" = 'k: v' }
+          foreach ($k in $rec.Keys) { New-Item -ItemType Directory -Force (Split-Path $k) | Out-Null; [IO.File]::WriteAllText($k, $rec[$k]) }
+          function Hashes { $rec.Keys | Sort-Object | ForEach-Object { "$_ $((Get-FileHash -Algorithm SHA256 $_).Hash)" } }
+          Hashes | Set-Content "$log\records-before.txt"
+          # 4) live daemon + a master seat on the BASE version
+          Start-Process -FilePath $dmn -WindowStyle Hidden
+          $r=$null; foreach($i in 1..30){ Start-Sleep 1; $r = Bx $cli @('list') 15000; if($r.Code -eq 0){ break } }
+          if ($r.Code -ne 0) { throw "base daemon did not answer" }
+          (Bx $cli @('new-surface','--role','master') 30000).Out | Out-Host
+          $before = (Bx $cli @('list') 15000).Out; $before | Set-Content "$log\list-before.txt"
+          if ($before -notmatch 'role=master') { throw "seat not created on base: $before" }
+          $pidBefore = (Get-Process waved,cysd -ErrorAction SilentlyContinue | Select-Object -First 1).Id
+          # 5) upgrade: this build's setup over the live state
+          $setup = Get-ChildItem new\*-setup.exe | Select-Object -First 1
+          $u = Start-Process -FilePath $setup.FullName -ArgumentList '/S' -Wait -PassThru
+          "upgrade exit: $($u.ExitCode)" | Tee-Object -Append "$log\steps.txt"
+          Start-Sleep 3
+          # 6) asserts
+          $fail = @()
+          if ($u.ExitCode -ne 0) { $fail += "upgrade exit $($u.ExitCode)" }
+          $ver = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like 'Wave Terminal*' } | Select-Object DisplayName,DisplayVersion,Publisher,InstallLocation | Out-String)
+          $ver | Tee-Object "$log\uninstall-after.txt" | Write-Host
+          if ($ver -notmatch '0\.3\.6') { $fail += "installed version is not 0.3.6" }
+          Hashes | Set-Content "$log\records-after.txt"
+          if ((Get-Content "$log\records-before.txt" -Raw) -ne (Get-Content "$log\records-after.txt" -Raw)) { $fail += "records changed" }
+          $newCli = "$dir\wave.exe"; if (-not (Test-Path $newCli)) { $fail += "wave.exe missing after upgrade" }
+          $after = if (Test-Path $newCli) { (Bx $newCli @('list') 20000) } else { @{Code=-9;Out=''} }
+          $after.Out | Set-Content "$log\list-after.txt"
+          if (-not ($after.Code -eq 0 -and $after.Out -match 'role=master')) { $fail += "seat not listed after upgrade (code $($after.Code))" }
+          $alive = if ($pidBefore) { [bool](Get-Process -Id $pidBefore -ErrorAction SilentlyContinue) } else { $false }
+          "old daemon pid $pidBefore alive after upgrade: $alive" | Tee-Object -Append "$log\steps.txt"
+          Get-Process wave,waved,cys,cysd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          $fail | Set-Content "$log\failures.txt"
+          if ($fail.Count) { throw ("UPGRADE $env:BASE -> 0.3.6 FAILED: " + ($fail -join '; ')) }
+          Write-Host "OK: $env:BASE -> 0.3.6 (records identical, seat kept, version 0.3.6)"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: upgrade-${{ matrix.base }}
+          path: ${{ runner.temp }}/upgrade-${{ matrix.base }}

@@ -16,6 +16,7 @@ pub(crate) trait Ops {
     /// Live processes whose executable lives under `dir`.
     fn processes_under(&self, dir: &Path) -> Vec<(u32, PathBuf)>;
     fn terminate(&mut self, pid: u32) -> Result<(), String>;
+    fn file_exists(&self, path: &Path) -> bool { path.exists() }
     fn bootout(&mut self, label: &str) -> Result<(), String>;
     /// Windows: run the original product's own silent uninstaller.
     fn run_uninstaller(&mut self, command: &str) -> Result<(), String>;
@@ -120,6 +121,7 @@ pub(crate) fn clean_macos(p: &Paths, ops: &mut dyn Ops) -> Vec<String> {
 pub(crate) struct UninstallEntry {
     pub key: String,
     pub display_name: String,
+    pub publisher: String,
     pub install_location: String,
     pub uninstall_string: String,
 }
@@ -128,6 +130,14 @@ pub(crate) struct UninstallEntry {
 /// (upstream tauri.conf.json, W-CYS_EVIDENCE/upstream-conf.json). The real Windows registry values were NOT observed
 /// on a machine — see REPORT C9. Wave's own entry is "Wave Terminal".
 const LEGACY_DISPLAY_NAME: &str = "cys";
+const LEGACY_EXE: &str = "cys-app.exe";
+
+/// Values of the original product's install that were OBSERVED on a real Windows install (C7: official upstream cys
+/// 0.14.56 setup on the CI runner, `reg query` dump). Upstream `tauri.conf.json` (W-CYS_EVIDENCE/upstream-conf.json:3,5)
+/// only gives productName "cys" and identifier com.cysjavis.terminal — no publisher/manufacturer — so the real Publisher
+/// is unknown. Until observed, the Windows removal is DISABLED: `OBSERVED = None` => no-op + log-only lines.
+pub(crate) struct Observed { pub publisher: &'static str }
+pub(crate) const OBSERVED: Option<Observed> = None;
 
 /// Parse `reg query <Uninstall root> /s` output into entries (pure; tested on fixtures).
 pub(crate) fn parse_reg_query(text: &str) -> Vec<UninstallEntry> {
@@ -145,6 +155,7 @@ pub(crate) fn parse_reg_query(text: &str) -> Vec<UninstallEntry> {
         let value = rest[kind.len()..].trim().to_string();
         match name {
             "DisplayName" => cur.display_name = value,
+            "Publisher" => cur.publisher = value,
             "InstallLocation" => cur.install_location = value.trim_matches('"').to_string(),
             "UninstallString" => cur.uninstall_string = value,
             _ => {}
@@ -158,12 +169,24 @@ fn same_dir(a: &str, b: &Path) -> bool {
     norm(a) == norm(&b.display().to_string())
 }
 
-pub(crate) fn clean_windows(entries: &[UninstallEntry], own_dir: &Path, ops: &mut dyn Ops) -> Vec<String> {
+/// Lines starting with `LOG_ONLY` go to the log file but not to the user notice.
+pub(crate) const LOG_ONLY: &str = "[log-only] ";
+
+/// Windows removal needs ALL of: Uninstall subkey name "cys", DisplayName "cys", Publisher == the observed one,
+/// `cys-app.exe` inside InstallLocation, and InstallLocation != our own dir. With `observed == None` it only logs.
+pub(crate) fn clean_windows(entries: &[UninstallEntry], own_dir: &Path, observed: Option<&Observed>, ops: &mut dyn Ops) -> Vec<String> {
     let mut lines = Vec::new();
     for e in entries {
-        if e.display_name != LEGACY_DISPLAY_NAME || e.install_location.is_empty() || e.uninstall_string.is_empty() { continue; }
+        let key_name = e.key.rsplit(['\\', '/']).next().unwrap_or("");
+        if !key_name.eq_ignore_ascii_case(LEGACY_DISPLAY_NAME) || e.display_name != LEGACY_DISPLAY_NAME { continue; }
+        let Some(obs) = observed else {
+            lines.push(format!("{LOG_ONLY}Windows 제거 비활성(원본 설치값 미관측): 후보 {} / {}", e.key, e.install_location));
+            continue;
+        };
+        if e.publisher != obs.publisher || e.install_location.is_empty() || e.uninstall_string.is_empty() { continue; }
         if same_dir(&e.install_location, own_dir) { continue; }
         let dir = PathBuf::from(&e.install_location);
+        if !ops.file_exists(&dir.join(LEGACY_EXE)) { continue; }
         let procs = ops.processes_under(&dir);
         let is_gui = |p: &Path| { let s = p.display().to_string().to_lowercase(); s.ends_with("\\cys-app.exe") || s.ends_with("/cys-app.exe") };
         if procs.iter().any(|(_, exe)| !is_gui(exe)) {
@@ -255,12 +278,14 @@ pub(crate) fn run_at_start(settings_file: &Path) {
             }
         }
         let own = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)).unwrap_or_default();
-        lines = clean_windows(&parse_reg_query(&text), &own, &mut RealOps);
+        lines = clean_windows(&parse_reg_query(&text), &own, OBSERVED.as_ref(), &mut RealOps);
     }
     let _ = settings_file;
     if lines.is_empty() { return; }
     write_log(settings_file, &lines);
-    if let Ok(mut n) = NOTICE.lock() { *n = Some(lines.join(" · ")); }
+    let shown: Vec<&str> = lines.iter().filter(|l| !l.starts_with(LOG_ONLY)).map(String::as_str).collect();
+    if shown.is_empty() { return; }
+    if let Ok(mut n) = NOTICE.lock() { *n = Some(shown.join(" · ")); }
 }
 
 #[cfg(test)]
@@ -270,7 +295,7 @@ mod tests {
     use std::fs;
 
     #[derive(Default)]
-    struct Fake { running: Vec<(u32, PathBuf)>, events: Vec<String>, terminate_fail: bool, plist: Option<PathBuf> }
+    struct Fake { running: Vec<(u32, PathBuf)>, events: Vec<String>, terminate_fail: bool, plist: Option<PathBuf>, no_files: bool }
     impl Ops for Fake {
         fn processes_under(&self, dir: &Path) -> Vec<(u32, PathBuf)> {
             self.running.iter().filter(|(_, e)| e.display().to_string().starts_with(&dir.display().to_string())).cloned().collect()
@@ -279,6 +304,7 @@ mod tests {
             self.events.push(format!("terminate {pid}"));
             if self.terminate_fail { Err("거부".into()) } else { Ok(()) }
         }
+        fn file_exists(&self, _: &Path) -> bool { !self.no_files }
         fn run_uninstaller(&mut self, command: &str) -> Result<(), String> { self.events.push(format!("uninstall {command}")); Ok(()) }
         fn bootout(&mut self, label: &str) -> Result<(), String> {
             let present = self.plist.as_ref().is_some_and(|p| p.exists());
@@ -407,23 +433,57 @@ mod tests {
         let _ = fs::remove_dir_all(&t);
     }
 
+    const REG: &str = r#"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\cys
+    DisplayName    REG_SZ    cys
+    Publisher    REG_SZ    Acme Pub
+    InstallLocation    REG_SZ    C:\Users\u\AppData\Local\cys
+    UninstallString    REG_SZ    "C:\Users\u\AppData\Local\cys\uninstall.exe"
+
+HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\Wave Terminal
+    DisplayName    REG_SZ    Wave Terminal
+    Publisher    REG_SZ    Acme Pub
+    InstallLocation    REG_SZ    C:\Users\u\AppData\Local\Wave Terminal
+    UninstallString    REG_SZ    x
+"#;
+    const OWN: &str = r"C:\Users\u\AppData\Local\Wave Terminal";
+    fn win_ops() -> Fake {
+        Fake { running: vec![(3, PathBuf::from(r"C:\Users\u\AppData\Local\cys\cys-app.exe"))], ..Default::default() }
+    }
+
     #[test]
-    fn windows_entry_match_is_exact_name_and_never_our_own_install() {
-        let reg = "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\cys\n    DisplayName    REG_SZ    cys\n    InstallLocation    REG_SZ    C:\\Users\\u\\AppData\\Local\\cys\n    UninstallString    REG_SZ    \"C:\\Users\\u\\AppData\\Local\\cys\\uninstall.exe\"\n\nHKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Wave Terminal\n    DisplayName    REG_SZ    Wave Terminal\n    InstallLocation    REG_SZ    C:\\Users\\u\\AppData\\Local\\Wave Terminal\n    UninstallString    REG_SZ    \"C:\\Users\\u\\AppData\\Local\\Wave Terminal\\uninstall.exe\"\n\nHKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\other\n    DisplayName    REG_SZ    cys-notes\n    InstallLocation    REG_SZ    D:\\x\n    UninstallString    REG_SZ    D:\\x\\u.exe\n";
-        let entries = parse_reg_query(reg);
-        assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0].install_location, "C:\\Users\\u\\AppData\\Local\\cys");
-        let own = Path::new("C:\\Users\\u\\AppData\\Local\\Wave Terminal");
-        let mut ops = Fake { running: vec![(3, PathBuf::from("C:\\Users\\u\\AppData\\Local\\cys\\cys-app.exe"))], ..Default::default() };
-        let lines = clean_windows(&entries, own, &mut ops);
+    fn windows_removal_is_disabled_until_real_values_are_observed() {
+        let entries = parse_reg_query(REG);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].publisher, "Acme Pub");
+        let mut ops = win_ops();
+        let lines = clean_windows(&entries, Path::new(OWN), OBSERVED.as_ref(), &mut ops);
+        assert!(OBSERVED.is_none(), "must stay disabled until C7 observation");
+        assert!(ops.events.is_empty(), "no-op");
+        assert!(lines.iter().all(|l| l.starts_with(LOG_ONLY)), "{lines:?}");
+    }
+
+    #[test]
+    fn windows_match_needs_every_condition() {
+        let obs = Observed { publisher: "Acme Pub" };
+        let entries = parse_reg_query(REG);
+        let mut ops = win_ops();
+        // all conditions hold (cys-app.exe present per fake file_exists) -> terminate GUI then uninstall
+        let lines = clean_windows(&entries, Path::new(OWN), Some(&obs), &mut ops);
         assert_eq!(lines.len(), 1, "{lines:?}");
-        assert_eq!(ops.events.len(), 2);
         assert_eq!(ops.events[0], "terminate 3");
-        assert!(ops.events[1].starts_with("uninstall \"C:\\Users\\u\\AppData\\Local\\cys\\uninstall.exe\""), "{:?}", ops.events);
-        // an entry that points at our own install dir is never uninstalled, even if it is named "cys"
-        let mut own_named = entries[0].clone(); own_named.install_location = own.display().to_string();
-        let mut ops = Fake::default();
-        assert!(clean_windows(&[own_named], own, &mut ops).is_empty() && ops.events.is_empty());
+        assert!(ops.events[1].starts_with("uninstall "), "{:?}", ops.events);
+        // each missing/wrong condition = nothing happens
+        let wrong_pub = Observed { publisher: "Someone Else" };
+        let mut ops = win_ops();
+        assert!(clean_windows(&entries, Path::new(OWN), Some(&wrong_pub), &mut ops).is_empty() && ops.events.is_empty());
+        let mut renamed = entries[0].clone(); renamed.key = renamed.key.replace(r"Uninstall\cys", r"Uninstall\cys-notes");
+        let mut ops = win_ops();
+        assert!(clean_windows(&[renamed], Path::new(OWN), Some(&obs), &mut ops).is_empty() && ops.events.is_empty());
+        let mut own = entries[0].clone(); own.install_location = OWN.to_string();
+        let mut ops = win_ops();
+        assert!(clean_windows(&[own], Path::new(OWN), Some(&obs), &mut ops).is_empty() && ops.events.is_empty());
+        let mut ops = win_ops(); ops.no_files = true;
+        assert!(clean_windows(&entries, Path::new(OWN), Some(&obs), &mut ops).is_empty() && ops.events.is_empty(), "exe must exist");
     }
 
     #[test]

@@ -262,7 +262,7 @@ impl Ops for RealOps {
 
 /// App-start entry (called once, from `rename_migration::run`). Fail-open: never returns an error, never blocks startup.
 pub(crate) fn run_at_start(settings_file: &Path) {
-    #[allow(unused_mut)]
+    #[allow(unused_mut, unused_assignments)]
     let mut lines: Vec<String> = Vec::new();
     #[cfg(target_os = "macos")] {
         let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
@@ -412,6 +412,7 @@ mod tests {
         let _ = fs::remove_dir_all(&t);
     }
 
+    #[cfg(unix)]
     #[test]
     fn terminate_failure_symlink_and_unreadable_roots_are_fail_open() {
         let (t, mut p) = rig("failopen");

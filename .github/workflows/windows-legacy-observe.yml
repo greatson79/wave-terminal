@@ -60,7 +60,7 @@ jobs:
       - name: Seed records that must survive
         shell: pwsh
         run: |
-          $rec = @("$env:USERPROFILE\.cys\dept-a\record.json", "$env:USERPROFILE\.cys\sentinel.txt", "$env:USERPROFILE\.local\state\cys\meta", "$env:USERPROFILE\dept\board\state.yaml")
+          $rec = @("$env:USERPROFILE\.cys\dept-a\record.json", "$env:USERPROFILE\.cys\depts.json", "$env:USERPROFILE\.cys\pack\soul.md", "$env:USERPROFILE\.cys\sentinel.txt", "$env:USERPROFILE\.local\state\cys\meta", "$env:USERPROFILE\dept\board\state.yaml", "$env:APPDATA\com.waveainetworks.wave-terminal\user-settings.json", "$env:LOCALAPPDATA\Wave Terminal\own-install-sentinel.txt")
           foreach ($f in $rec) { New-Item -ItemType Directory -Force (Split-Path $f) | Out-Null; [IO.File]::WriteAllText($f, "sentinel $f") }
           $rec | Sort-Object | ForEach-Object { "$_ $((Get-FileHash -Algorithm SHA256 $_).Hash)" } | Set-Content "$env:RUNNER_TEMP\records-before.txt"
           reg query 'HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\cys' | Set-Content "$env:RUNNER_TEMP\uninstall-key-before.txt"
@@ -71,7 +71,7 @@ jobs:
           foreach ($bin in 'wave','waved','cys','cysd','cys-app') { $t = "src-tauri/binaries/$bin-x86_64-pc-windows-msvc.exe"; New-Item -ItemType Directory -Force (Split-Path $t) | Out-Null; [IO.File]::WriteAllBytes($t, [byte[]](0x4d,0x5a)) }
           New-Item -ItemType Directory -Force src-tauri/resources, ui/dist | Out-Null
           [IO.File]::WriteAllBytes('src-tauri/resources/pack.tar.gz', [byte[]](0x1f,0x8b)); Set-Content src-tauri/resources/pack-manifest.json '{}'; Set-Content ui/dist/index.html '<html></html>'
-          $env:C7_SETTINGS = "$env:RUNNER_TEMP\wavecfg\user-settings.json"
+          $env:C7_SETTINGS = "$env:APPDATA\com.waveainetworks.wave-terminal\user-settings.json"  # the seeded settings file; the log lands next to it
           cargo test -p wave-app --bin wave-app c7_windows_real_cleanup -- --ignored --nocapture 2>&1 | Tee-Object "$env:RUNNER_TEMP\cleanup-run.txt"
           if ($LASTEXITCODE -ne 0) { throw "cleanup test failed" }
       - name: Assert removal + records identical
@@ -81,10 +81,10 @@ jobs:
           $fail = @()
           if (Test-Path "$env:LOCALAPPDATA\cys\cys-app.exe") { $fail += 'upstream cys-app.exe still installed' }
           if (Test-Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\cys') { $fail += 'Uninstall key still present' }
-          $rec = @("$env:USERPROFILE\.cys\dept-a\record.json", "$env:USERPROFILE\.cys\sentinel.txt", "$env:USERPROFILE\.local\state\cys\meta", "$env:USERPROFILE\dept\board\state.yaml")
+          $rec = @("$env:USERPROFILE\.cys\dept-a\record.json", "$env:USERPROFILE\.cys\depts.json", "$env:USERPROFILE\.cys\pack\soul.md", "$env:USERPROFILE\.cys\sentinel.txt", "$env:USERPROFILE\.local\state\cys\meta", "$env:USERPROFILE\dept\board\state.yaml", "$env:APPDATA\com.waveainetworks.wave-terminal\user-settings.json", "$env:LOCALAPPDATA\Wave Terminal\own-install-sentinel.txt")
           $now = $rec | Sort-Object | ForEach-Object { if (Test-Path $_) { "$_ $((Get-FileHash -Algorithm SHA256 $_).Hash)" } else { "$_ MISSING" } }
           if ((($now) -join "`n") -ne ((Get-Content "$env:RUNNER_TEMP\records-before.txt") -join "`n")) { $fail += 'records changed' }
-          Get-Content "$env:RUNNER_TEMP\wavecfg\legacy-cleanup.log" -ErrorAction SilentlyContinue | Write-Host
+          Get-Content "$env:APPDATA\com.waveainetworks.wave-terminal\legacy-cleanup.log" -ErrorAction SilentlyContinue | Write-Host
           Get-ChildItem "$env:LOCALAPPDATA" -Directory | Select-Object Name | Out-String | Write-Host
           if ($fail.Count) { throw ("CLEANUP PROOF FAILED: " + ($fail -join '; ')) }
           Write-Host 'OK: upstream cys removed via its own uninstaller; records byte-identical'
@@ -96,4 +96,3 @@ jobs:
             ${{ runner.temp }}/records-before.txt
             ${{ runner.temp }}/uninstall-key-before.txt
             ${{ runner.temp }}/cleanup-run.txt
-            ${{ runner.temp }}/wavecfg

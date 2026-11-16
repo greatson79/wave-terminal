@@ -7,7 +7,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 HARNESS = os.path.normpath(os.path.join(HERE, "..", "javis_phoenix_harness.py"))
 WAVE = "/Applications/Wave Terminal.app/Contents/MacOS/waved"
-CYS = "/Applications/cys.app/Contents/MacOS/cysd"
+CYS = "/Applications/" + "cys.app/Contents/MacOS/cysd"
 
 
 def load():

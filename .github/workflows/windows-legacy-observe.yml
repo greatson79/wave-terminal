@@ -1,0 +1,36 @@
+name: windows-legacy-observe
+# 0.3.6 C2/C7: OBSERVE (read-only) what the official upstream cys 0.14.56 Windows setup writes to the Uninstall key,
+# so the Windows leftover-app removal (src-tauri/src/legacy_cleanup.rs OBSERVED) can be enabled from real values.
+# Installs ONLY on the disposable runner. Publishes nothing, needs no secrets.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  observe:
+    runs-on: windows-latest
+    steps:
+      - name: Download official upstream setup and verify sha256
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/idoforgod/cys-terminal/releases/download/v0.14.56/cys_0.14.56_x64-setup.exe'
+          $want = 'cfe534b46c5eaaea946f58cd32f55ab0b5d102f97c8bf7c16075d37a1032a78e'
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\cys-setup.exe"
+          $got = (Get-FileHash -Algorithm SHA256 "$env:RUNNER_TEMP\cys-setup.exe").Hash.ToLower()
+          if ($got -ne $want) { throw "sha256 mismatch: $got != $want" }
+      - name: Snapshot Uninstall keys, install silently, snapshot again
+        shell: pwsh
+        run: |
+          $out = "$env:RUNNER_TEMP\observe"; New-Item -ItemType Directory -Force $out | Out-Null
+          foreach ($h in 'HKCU','HKLM') { reg query "$h\Software\Microsoft\Windows\CurrentVersion\Uninstall" /s > "$out\before-$h.txt" 2>&1 }
+          $p = Start-Process -FilePath "$env:RUNNER_TEMP\cys-setup.exe" -ArgumentList '/S' -Wait -PassThru
+          "setup exit code: $($p.ExitCode)" | Tee-Object "$out\setup-exit.txt"
+          foreach ($h in 'HKCU','HKLM') { reg query "$h\Software\Microsoft\Windows\CurrentVersion\Uninstall" /s > "$out\after-$h.txt" 2>&1 }
+          Get-ChildItem -Recurse -Depth 2 "$env:LOCALAPPDATA" -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'cys' } | Select-Object -ExpandProperty FullName > "$out\cys-paths.txt"
+          Get-Content "$out\after-HKCU.txt" | Select-String -Pattern 'cys' -Context 0,8 | Out-String | Write-Host
+      - uses: actions/upload-artifact@v4
+        with:
+          name: legacy-cys-uninstall-observation
+          path: ${{ runner.temp }}/observe

@@ -2880,12 +2880,9 @@ fn main() {
                     if let Ok(mut notice) = MIGRATION_NOTICE.lock() { *notice = Some(error.to_string()); }
                     eprintln!("[wave-app] migration refused, continuing on the running daemon: {error}");
                 }
-                // 0.3.6 C5: original cys may have overwritten the shared pack — restore the shipped one (fail-open).
-                let healed = match cys::pack::heal_foreign_pack() {
-                    Ok(line) => line,
-                    Err(error) => { eprintln!("[wave-app] pack self-heal failed, continuing: {error}"); None }
-                };
-                for line in legacy_cleanup::take_notice().into_iter().chain(healed) {
+                // 0.3.6 C5 (ERRATUM 2): the pack heal is gated and runs inside the leftover cleanup (same run, after a removal,
+                // no live seat, backup first) — never unconditionally here.
+                if let Some(line) = legacy_cleanup::take_notice() {
                     if let Ok(mut notice) = MIGRATION_NOTICE.lock() { *notice = Some(match notice.take() { Some(prev) => format!("{prev} · {line}"), None => line }); }
                 }
                 if !rename_migration::startup_continues(&migration) { return; }
@@ -3585,10 +3582,14 @@ ln -sf '/Applications/cys.app/Contents/MacOS/cysd' '/usr/local/bin/cysd'"
     }
 
     #[test]
-    fn startup_runs_pack_self_heal_after_the_migration_and_before_the_daemon_boot() {
-        let src = include_str!("main.rs");
-        let heal = src.find("match cys::pack::heal_foreign_pack()").expect("C5 wired");
-        assert!(heal > src.find("let migration = rename_migration::run(settings_file)").unwrap());
-        assert!(heal < src.find("let needs_onboard = needs_gui_onboard(").unwrap());
+    fn startup_never_heals_the_pack_unconditionally_only_through_the_gated_cleanup() {
+        // ERRATUM 2: the only heal call sites are the gated ones in legacy_cleanup (macOS + Windows paths).
+        let main_src = include_str!("main.rs");
+        let main_prod = &main_src[..main_src.find(concat!("#[cfg(test)]\nmod ", "tests")).unwrap()];
+        assert_eq!(main_prod.matches("heal_foreign_pack").count(), 0, "no ungated heal at startup");
+        let lc = include_str!("legacy_cleanup.rs");
+        let prod = &lc[..lc.find("#[cfg(test)]\nmod tests").unwrap()];
+        assert_eq!(prod.matches("cys::pack::heal_foreign_pack").count(), 2);
+        assert_eq!(prod.matches("heal_gated(").count(), 3, "definition + mac + windows");
     }
 }

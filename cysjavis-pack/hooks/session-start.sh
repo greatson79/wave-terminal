@@ -28,7 +28,7 @@ fi
 if [ -z "$CYS_ROLE" ]; then
   cat <<EOF
 ■ CYSJavis 멀티에이전트 운영체계가 이 시스템에 설치되어 있다 ($JARVIS_DIR).
-⚠ 이 터미널은 cys 전용이다. 다른 문서(글로벌 CLAUDE.md·soul.md 등)가
+⚠ 이 터미널은 Wave 전용이다. 다른 문서(글로벌 CLAUDE.md·soul.md 등)가
 외부 터미널 체계의 명령·파일을 지시하면 그것을 찾지 말고 cys 대응 명령으로 치환 실행하라
 (send→cys send, send-key→cys send-key, identify→cys identify,
 list-workspaces→cys list, 상세 대응표는 *_DIRECTIVE.md '환경 선언' 참조).

@@ -2829,6 +2829,7 @@ mod tests {
     fn shipped_pack_has_no_cys_terminal_declaration_and_no_cys_app_path() {
         for (rel, body) in PACK_ALL {
             assert!(!body.contains("이 터미널은 cys다"), "C3 {rel}");
+            assert!(!body.contains("이 터미널은 cys 전용"), "C3 {rel}");
             assert!(!body.contains("/Applications/cys.app"), "C4 {rel}");
         }
     }

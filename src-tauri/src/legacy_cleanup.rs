@@ -28,6 +28,9 @@ pub(crate) trait Ops {
     fn job_running(&self, label: &str) -> Result<bool, String>;
     /// The subset of `pids` with an open file under `dir` (`lsof -p`). Err = unknown.
     fn open_files_under(&self, pids: &[u32], dir: &Path) -> Result<Vec<u32>, String>;
+    /// ROUND 2 (Theo ruling B): live surfaces on the daemon behind `socket` — same source as W-C10's `cys status --json`
+    /// count (`org.status` -> `surfaces[]` with `exited != true`). Err = unknown -> seat present.
+    fn live_surfaces(&self, socket: &Path) -> Result<usize, String>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -44,6 +47,8 @@ pub(crate) struct Paths {
     pub cys_home: PathBuf,
     pub socket: PathBuf,
     pub backup_root: PathBuf,
+    /// ROUND 2: "heal pending" marker in the app config dir — written only after a removal whose heal a seat blocked.
+    pub heal_marker: PathBuf,
 }
 
 fn bundle_info(bundle: &Path) -> Option<(String, String)> {
@@ -178,17 +183,35 @@ fn clean_macos_counted(p: &Paths, ops: &mut dyn Ops) -> (Vec<String>, usize) {
 
 const SEAT_NAMES: [&str; 4] = ["cysd", "waved", "claude", "codex"];
 
-/// ERRATUM 2 (C5 gate ii): `Some(reason)` = a live seat depends on the pack: anything holding the shared socket, or a
-/// running cysd/waved/claude/codex process whose cwd/argv/open files are under ~/.cys. Unreadable = live (fail closed).
+pub(crate) const WAVE_BUNDLE_ID: &str = "com.waveainetworks.wave-terminal";
+
+/// The socket holder is OUR daemon: an executable named `waved` inside an app bundle whose id is Wave's.
+fn is_our_waved(exe: &Path) -> bool {
+    exe.file_name().is_some_and(|n| n == "waved")
+        && exe.ancestors().find(|a| a.extension().is_some_and(|x| x == "app"))
+            .and_then(bundle_info).is_some_and(|(id, _)| id == WAVE_BUNDLE_ID)
+}
+
+/// C5 gate (ii), ROUND 2 (Theo ruling B): `Some(reason)` = a live seat depends on the pack.
+/// A socket holder is "no seat" ONLY if it is our waved AND its live-surface count is 0; a foreign or unknown holder,
+/// any live surface, or any probe error = seat present. Also (ERRATUM 2): a running cysd/waved/claude/codex process
+/// (other than that verified holder) whose cwd/argv/open files are under ~/.cys. Unreadable = live (fail closed).
 fn live_seat(p: &Paths, ops: &dyn Ops) -> Option<&'static str> {
-    match ops.socket_holders(&p.socket) {
-        Ok(h) if h.is_empty() => {}
-        Ok(_) => return Some("공유 소켓 사용 중"),
-        Err(_) => return Some("좌석 확인 불가"),
+    let procs = ops.processes();
+    let holders = match ops.socket_holders(&p.socket) { Ok(h) => h, Err(_) => return Some("좌석 확인 불가") };
+    for pid in &holders {
+        let ours = procs.iter().find(|pr| pr.pid == *pid).and_then(|pr| pr.exe.as_deref()).is_some_and(is_our_waved);
+        if !ours { return Some("다른 데몬이 공유 소켓 사용 중"); }
+    }
+    if !holders.is_empty() {
+        match ops.live_surfaces(&p.socket) {
+            Ok(0) => {}
+            Ok(_) => return Some("살아 있는 작업 좌석"),
+            Err(_) => return Some("좌석 확인 불가"),
+        }
     }
     let base = |s: &str| Path::new(s).file_name().and_then(|n| n.to_str()).map(str::to_string).unwrap_or_default();
-    let procs = ops.processes();
-    let seats: Vec<&Proc> = procs.iter().filter(|pr| {
+    let seats: Vec<&Proc> = procs.iter().filter(|pr| !holders.contains(&pr.pid)).filter(|pr| {
         pr.exe.as_deref().and_then(|e| e.file_name()).and_then(|n| n.to_str()).is_some_and(|n| SEAT_NAMES.contains(&n))
             || pr.argv.iter().take(2).any(|a| SEAT_NAMES.contains(&base(a).as_str()))
     }).collect();
@@ -219,19 +242,41 @@ fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 pub(crate) const HEAL_SKIPPED_NO_REMOVAL: &str = "공유 지침 폴더에 원본 cys 지침이 보이지만 이번 실행에서 정리한 원본 cys 앱이 없어 그대로 둡니다.";
 
-/// ERRATUM 2 (C5 amended): heal ONLY when (i) a leftover original app was removed in this same run AND (ii) no live seat
-/// depends on the pack; first a timestamped full backup of the pack (never deleted). Otherwise nothing + one notice.
+/// The public install one-liner, verbatim from waveainetworks.com/get (live source
+/// `homepage_live_source/tree/public/get/index.html:98` + `app.js:25`; Windows = `app.js:29`).
+#[cfg(not(windows))]
+pub(crate) const INSTALL_HINT: &str = "curl -fsSL https://waveainetworks.com/mac | bash";
+#[cfg(windows)]
+pub(crate) const INSTALL_HINT: &str = "iex ((irm https://waveainetworks.com/win) -replace '^[^&]*','')";
+
+fn seat_notice(why: &str) -> String {
+    format!("공유 지침 폴더에 원본 cys 지침이 보이지만 작업 좌석이 쓰는 중이라({why}) 그대로 둡니다. 좌석을 모두 닫고 앱을 다시 열면 자동으로 정리합니다. 그래도 남으면 설치 명령을 다시 실행해 주세요: {INSTALL_HINT}")
+}
+
+/// C5 gate, ERRATUM 2 + ROUND 2: heal ONLY when (i) a leftover original app was removed in this run OR a heal-pending
+/// marker from an earlier such removal exists, AND (ii) no live seat (see `live_seat`); first a timestamped full backup of
+/// the pack (never deleted). A seat-blocked heal after a removal writes the marker, so the first start with no seats heals.
+/// No marker is ever created when nothing was removed. Otherwise nothing + one notice.
 fn heal_gated(removed: usize, p: &Paths, ops: &dyn Ops, heal: &mut dyn FnMut() -> Result<Option<String>, String>) -> Vec<String> {
-    if !cys::pack::foreign_pack_drift(&p.pack) { return vec![]; }
-    if removed == 0 { return vec![format!("{LOG_ONLY}{HEAL_SKIPPED_NO_REMOVAL}")]; }   // the app line is the one notice
+    let pending = p.heal_marker.exists();
+    if !cys::pack::foreign_pack_drift(&p.pack) {
+        if pending { let _ = std::fs::remove_file(&p.heal_marker); }   // healed elsewhere / no longer needed
+        return vec![];
+    }
+    if removed == 0 && !pending { return vec![format!("{LOG_ONLY}{HEAL_SKIPPED_NO_REMOVAL}")]; }   // the app line is the one notice
     if let Some(why) = live_seat(p, ops) {
-        return vec![format!("공유 지침 폴더에 원본 cys 지침이 보이지만 작업 좌석이 쓰는 중이라({why}) 그대로 둡니다.")];
+        let mut lines = vec![seat_notice(why)];
+        if !pending {
+            let marked = p.heal_marker.parent().map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|_| std::fs::write(&p.heal_marker, format!("removed-at={}\n", p.stamp)));
+            if let Err(e) = marked { lines.push(format!("{LOG_ONLY}heal-pending 기록 실패: {e}")); }
+        }
+        return lines;
     }
     let backup = p.backup_root.join(format!("{}-pack", p.stamp));
     if let Err(e) = copy_tree(&p.pack, &backup) { return vec![format!("지침 폴더를 백업하지 못해 그대로 둡니다: {e}")]; }
     match heal() {
-        Ok(Some(l)) => vec![format!("{l} (이전 지침 전체 백업: {})", backup.display())],
-        Ok(None) => vec![],
+        Ok(l) => { let _ = std::fs::remove_file(&p.heal_marker); l.map(|l| vec![format!("{l} (이전 지침 전체 백업: {})", backup.display())]).unwrap_or_default() }
         Err(e) => vec![format!("지침 폴더를 되돌리지 못했습니다(이전 지침 백업: {}): {e}", backup.display())],
     }
 }
@@ -463,6 +508,23 @@ impl Ops for RealOps {
         }
         #[cfg(not(target_os = "macos"))] { let _ = dir; Err("이 운영체제에서는 열린 파일을 확인할 수 없습니다".into()) }
     }
+    fn live_surfaces(&self, socket: &Path) -> Result<usize, String> {
+        #[cfg(target_os = "macos")] {
+            use std::io::{BufRead, Write};
+            if cfg!(test) { return Err("test guard: real daemon query refused".into()); }
+            let mut s = std::os::unix::net::UnixStream::connect(socket).map_err(|e| e.to_string())?;
+            let t = Some(std::time::Duration::from_secs(3));
+            s.set_read_timeout(t).and_then(|_| s.set_write_timeout(t)).map_err(|e| e.to_string())?;
+            s.write_all(b"{\"id\":1,\"method\":\"org.status\",\"params\":{}}\n").map_err(|e| e.to_string())?;
+            let mut line = String::new();
+            std::io::BufReader::new(s).read_line(&mut line).map_err(|e| e.to_string())?;
+            let resp = cys::wire::parse_frame(line.trim()).map_err(|e| format!("{e:?}"))?;
+            if resp["ok"].as_bool() != Some(true) { return Err("org.status 실패".into()); }
+            let list = resp["result"]["surfaces"].as_array().ok_or("surfaces 없음")?;
+            Ok(list.iter().filter(|x| x["exited"].as_bool() != Some(true)).count())
+        }
+        #[cfg(not(target_os = "macos"))] { let _ = socket; Err("이 운영체제에서는 좌석 상태를 확인할 수 없습니다".into()) }
+    }
     fn run_uninstaller(&mut self, command: &str) -> Result<(), String> {
         #[cfg(windows)] {
             let exe = uninstaller_path(command);
@@ -493,6 +555,12 @@ pub(crate) fn run_in_background(settings_file: PathBuf, progress: String, work: 
 
 #[cfg(any(target_os = "macos", windows))]
 const PROGRESS_LINE: &str = "남은 원본 cys 앱을 정리하는 중입니다(백그라운드). 앱은 그대로 쓰실 수 있고, 결과는 legacy-cleanup.log 에 기록됩니다.";
+#[cfg(any(target_os = "macos", windows))]
+const HEAL_PROGRESS_LINE: &str = "공유 지침 폴더를 다시 확인하는 중입니다(백그라운드). 결과는 legacy-cleanup.log 에 기록됩니다.";
+
+fn heal_marker_path(settings_file: &Path, home: &Path) -> PathBuf {
+    settings_file.parent().map(|d| d.join("pack-heal-pending")).unwrap_or_else(|| home.join("pack-heal-pending"))
+}
 
 pub(crate) fn run_at_start(settings_file: &Path) -> Option<std::thread::JoinHandle<()>> {
     #[cfg(target_os = "macos")] {
@@ -504,9 +572,14 @@ pub(crate) fn run_at_start(settings_file: &Path) -> Option<std::thread::JoinHand
             launch_agents: home.join("Library/LaunchAgents"),
             archive: settings_file.parent().map(|d| d.join("removed-cys-apps")).unwrap_or_else(|| home.join("removed-cys-apps")),
             own_bundle, stamp, pack: cys::pack::pack_dir(), cys_home: home.join(".cys"), socket: cys::socket_path(),
-            backup_root: settings_file.parent().map(|d| d.join("pack-backups")).unwrap_or_else(|| home.join("pack-backups")) };
-        if plan_macos(&paths).is_empty() {   // read-only scan: nothing leftover = no thread; C5 gate (i) fails -> notice only
-            if cys::pack::foreign_pack_drift(&paths.pack) {
+            backup_root: settings_file.parent().map(|d| d.join("pack-backups")).unwrap_or_else(|| home.join("pack-backups")),
+            heal_marker: heal_marker_path(settings_file, &home) };
+        if plan_macos(&paths).is_empty() {   // read-only scan: nothing leftover
+            if paths.heal_marker.exists() {   // ROUND 2: an earlier removal's heal was blocked by a seat -> re-check now
+                return Some(run_in_background(settings_file.to_path_buf(), HEAL_PROGRESS_LINE.to_string(),
+                    move || heal_gated(0, &paths, &RealOps, &mut cys::pack::heal_foreign_pack)));
+            }
+            if cys::pack::foreign_pack_drift(&paths.pack) {   // C5 gate (i) fails -> notice only
                 write_log(settings_file, &[HEAL_SKIPPED_NO_REMOVAL.to_string()]);
                 if let Ok(mut n) = NOTICE.lock() { *n = Some(HEAL_SKIPPED_NO_REMOVAL.to_string()); }
             }
@@ -524,16 +597,21 @@ pub(crate) fn run_at_start(settings_file: &Path) -> Option<std::thread::JoinHand
         }
         let entries = parse_reg_query(&text);
         let own = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)).unwrap_or_default();
-        if windows_candidates(&entries, &own, OBSERVED.as_ref(), &RealOps) == 0 {
-            let lines = clean_windows(&entries, &own, OBSERVED.as_ref(), &mut RealOps);   // log-only sightings; no slow work possible
-            if !lines.is_empty() { write_log(settings_file, &lines); }
-            return None;
-        }
         let home = PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default());
         let paths = Paths { app_roots: vec![], launch_agents: PathBuf::new(), archive: PathBuf::new(), own_bundle: None,
             stamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0).to_string(),
             pack: cys::pack::pack_dir(), cys_home: home.join(".cys"), socket: cys::socket_path(),
-            backup_root: settings_file.parent().map(|d| d.join("pack-backups")).unwrap_or_else(|| home.join("pack-backups")) };
+            backup_root: settings_file.parent().map(|d| d.join("pack-backups")).unwrap_or_else(|| home.join("pack-backups")),
+            heal_marker: heal_marker_path(settings_file, &home) };
+        if windows_candidates(&entries, &own, OBSERVED.as_ref(), &RealOps) == 0 {
+            let lines = clean_windows(&entries, &own, OBSERVED.as_ref(), &mut RealOps);   // log-only sightings; no slow work possible
+            if !lines.is_empty() { write_log(settings_file, &lines); }
+            if paths.heal_marker.exists() {   // ROUND 2 re-check (Windows: seat state unprovable -> notice + hint, marker kept)
+                return Some(run_in_background(settings_file.to_path_buf(), HEAL_PROGRESS_LINE.to_string(),
+                    move || heal_gated(0, &paths, &RealOps, &mut cys::pack::heal_foreign_pack)));
+            }
+            return None;
+        }
         return Some(run_in_background(settings_file.to_path_buf(), PROGRESS_LINE.to_string(), move || {
             let (mut lines, removed) = clean_windows_counted(&entries, &own, OBSERVED.as_ref(), &mut RealOps);
             lines.extend(heal_gated(removed, &paths, &RealOps, &mut cys::pack::heal_foreign_pack));   // Windows: seat proof unavailable -> fail closed (notice)
@@ -551,8 +629,9 @@ mod tests {
 
     #[derive(Default)]
     struct Fake { running: Vec<(u32, PathBuf)>, events: Vec<String>, terminate_fail: bool, plist: Option<PathBuf>, no_files: bool,
-        procs: Vec<Proc>, holders: Vec<u32>, loaded: Vec<String>, open_under: Vec<u32> }
+        procs: Vec<Proc>, holders: Vec<u32>, loaded: Vec<String>, open_under: Vec<u32>, surfaces: Option<usize> }
     impl Ops for Fake {
+        fn live_surfaces(&self, _: &Path) -> Result<usize, String> { self.surfaces.ok_or_else(|| "unknown".to_string()) }
         fn processes(&self) -> Vec<Proc> {
             self.running.iter().map(|(pid, e)| Proc { pid: *pid, exe: Some(e.clone()), ..Default::default() }).chain(self.procs.clone()).collect()
         }
@@ -600,7 +679,7 @@ mod tests {
         let p = Paths { app_roots: vec![apps, home_apps], launch_agents: t.join("home/Library/LaunchAgents"),
             archive: t.join("cfg/removed-cys-apps"), own_bundle: None, stamp: "T1".into(),
             pack: t.join("home/.cys/pack"), cys_home: t.join("home/.cys"), socket: t.join("home/.local/state/cys/cys.sock"),
-            backup_root: t.join("cfg/pack-backups") };
+            backup_root: t.join("cfg/pack-backups"), heal_marker: t.join("cfg/pack-heal-pending") };
         (t, p)
     }
     /// path -> content hash for every file/dir under dirs that must stay byte-identical.
@@ -813,6 +892,7 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\Wave Termi
         fn socket_holders(&self, _: &Path) -> Result<Vec<u32>, String> { Ok(vec![]) }
         fn job_running(&self, _: &str) -> Result<bool, String> { Ok(false) }
         fn open_files_under(&self, _: &[u32], _: &Path) -> Result<Vec<u32>, String> { Ok(vec![]) }
+        fn live_surfaces(&self, _: &Path) -> Result<usize, String> { Err("rig: no daemon query".into()) }
     }
     struct RealOpsTerminate;
     impl RealOpsTerminate { fn kill(pid: u32) -> Result<(), String> { RealOps.terminate(pid) } }
@@ -825,7 +905,7 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\Wave Termi
         let paths = Paths { app_roots: vec![tree.join("home/Applications")], launch_agents: tree.join("home/Library/LaunchAgents"),
             archive: tree.join("cfg/removed-cys-apps"), own_bundle: None, stamp: "RIG".into(),
             pack: tree.join("home/.cys/pack"), cys_home: tree.join("home/.cys"), socket: tree.join("home/.local/state/cys/cys.sock"),
-            backup_root: tree.join("cfg/pack-backups") };
+            backup_root: tree.join("cfg/pack-backups"), heal_marker: tree.join("cfg/pack-heal-pending") };
         let mut ops = RigOps { events: vec![] };
         let lines = clean_macos(&paths, &mut ops);
         println!("CLEAN_LINES {lines:?}\nOPS {:?}", ops.events);
@@ -840,7 +920,7 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\Wave Termi
         let paths = Paths { app_roots: vec![PathBuf::from("/Applications"), home.join("Applications")],
             launch_agents: home.join("Library/LaunchAgents"), archive: PathBuf::from("/nonexistent"), own_bundle: None, stamp: "x".into(),
             pack: PathBuf::from("/nonexistent"), cys_home: PathBuf::from("/nonexistent"), socket: PathBuf::from("/nonexistent"),
-            backup_root: PathBuf::from("/nonexistent") };
+            backup_root: PathBuf::from("/nonexistent"), heal_marker: PathBuf::from("/nonexistent") };
         for l in plan_macos(&paths) { println!("PLAN {l}"); }
         println!("PLAN_DONE");
     }
@@ -942,6 +1022,7 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\Wave Termi
         let lines = clean_and_heal_macos(&p, &mut ops, &mut heal);
 
         assert_eq!(snapshot(&[t.as_path()]), before, "0 changes anywhere in the tree (app, plist, pack, records)");
+        assert!(!p.heal_marker.exists(), "ROUND 2: nothing removed -> no heal-pending marker");
         assert!(ops.events.is_empty(), "no terminate / bootout: {:?}", ops.events);
         assert_eq!(visible(&lines).len(), 1, "exactly one notice line: {lines:?}");
         let _ = fs::remove_dir_all(&t);
@@ -994,7 +1075,8 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\Wave Termi
             assert!(!cys_app.exists(), "{tag}: unused app still removed");
             assert_eq!(snapshot(&[p.pack.as_path()]), pack_before, "{tag}: pack untouched");
             assert!(!p.backup_root.exists(), "{tag}: no backup needed when nothing changes");
-            assert!(visible(&lines).iter().any(|l| l.contains("지침")), "{tag}: notice {lines:?}");
+            assert!(visible(&lines).iter().any(|l| l.contains("지침") && l.contains(INSTALL_HINT)), "{tag}: notice + hint {lines:?}");
+            assert!(p.heal_marker.exists(), "{tag}: removed but blocked -> heal-pending marker");
             let _ = fs::remove_dir_all(&t);
         }
     }
@@ -1048,6 +1130,102 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\Wave Termi
         assert!(real.job_running("x").unwrap_err().contains("test guard"));
         assert!(real.open_files_under(&[1], Path::new("/x")).unwrap_err().contains("test guard"));
         assert!(RealOps.bootout("x").unwrap_err().contains("test guard"));
+        assert!(real.live_surfaces(&sock).unwrap_err().contains("test guard"), "no real daemon query in tests");
         let _ = fs::remove_file(&sock);
+    }
+
+    // ---------------- ROUND 2 (Theo ruling B, kai#a92854) ----------------
+    /// Our Wave daemon: `waved` inside a bundle carrying Wave's bundle id.
+    fn our_waved(p: &Paths) -> PathBuf {
+        make_app(&p.app_roots[0], "Wave Terminal.app", WAVE_BUNDLE_ID, "wave-app").join("Contents/MacOS/waved")
+    }
+    fn holder(pid: u32, exe: PathBuf) -> Proc { Proc { pid, exe: Some(exe), cwd: Some(PathBuf::from("/")), argv: vec![] } }
+
+    #[test]
+    fn round2_student_with_our_waved_and_zero_live_surfaces_heals_at_once() {
+        let (t, p) = rig("r2-zero");
+        let _g = fingerprinted_pack(&t, &p);
+        let cys_app = make_app(&p.app_roots[0], "cys.app", LEGACY_BUNDLE_ID, "cys-app");
+        let waved = our_waved(&p);
+        let mut ops = Fake { procs: vec![holder(300, waved)], holders: vec![300], surfaces: Some(0), open_under: vec![300], ..Default::default() };
+        let lines = clean_and_heal_macos(&p, &mut ops, &mut heal);
+        assert!(!cys_app.exists(), "{lines:?}");
+        assert!(!cys::pack::foreign_pack_drift(&p.pack), "healed at once: {lines:?}");
+        assert!(p.backup_root.join("T1-pack/soul.md").exists(), "backup first");
+        assert!(!p.heal_marker.exists());
+        let _ = fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn round2_live_surface_gives_notice_hint_marker_then_next_start_with_zero_surfaces_heals_and_clears_marker() {
+        let (t, mut p) = rig("r2-defer");
+        let _g = fingerprinted_pack(&t, &p);
+        let cys_app = make_app(&p.app_roots[0], "cys.app", LEGACY_BUNDLE_ID, "cys-app");
+        let waved = our_waved(&p);
+        // start 1: our waved holds the socket with 2 live surfaces
+        let mut ops = Fake { procs: vec![holder(300, waved.clone())], holders: vec![300], surfaces: Some(2), ..Default::default() };
+        let pack_before = snapshot(&[p.pack.as_path()]);
+        let lines = clean_and_heal_macos(&p, &mut ops, &mut heal);
+        assert!(!cys_app.exists(), "the unused old app is removed");
+        assert_eq!(snapshot(&[p.pack.as_path()]), pack_before, "pack untouched while seats are live");
+        let shown = visible(&lines);
+        assert!(shown.iter().any(|l| l.contains("살아 있는 작업 좌석") && l.contains("curl -fsSL https://waveainetworks.com/mac | bash")), "{lines:?}");
+        assert!(p.heal_marker.exists(), "heal-pending marker written");
+        assert!(!p.backup_root.exists());
+        // start 2: seats still live -> still nothing, marker kept
+        let lines = clean_and_heal_macos(&p, &mut ops, &mut heal);
+        assert_eq!(snapshot(&[p.pack.as_path()]), pack_before, "{lines:?}");
+        assert!(p.heal_marker.exists());
+        // start 3: no leftover app any more, 0 live surfaces -> gate (i) via the marker -> backup + heal + marker cleared
+        p.stamp = "T3".into();
+        let mut ops = Fake { procs: vec![holder(301, waved)], holders: vec![301], surfaces: Some(0), ..Default::default() };
+        let lines = clean_and_heal_macos(&p, &mut ops, &mut heal);
+        assert!(!cys::pack::foreign_pack_drift(&p.pack), "healed on the first start with no seats: {lines:?}");
+        assert_eq!(fs::read_to_string(p.backup_root.join("T3-pack/soul.md")).unwrap(), "OWNER EDITED SOUL");
+        assert!(!p.heal_marker.exists(), "marker cleared after heal");
+        let _ = fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn round2_foreign_or_unknown_socket_holder_or_probe_error_is_a_seat() {
+        for (tag, mk) in [
+            ("foreign-daemon", Box::new(|_: &Path| Fake { procs: vec![holder(400, PathBuf::from("/opt/other/cysd"))], holders: vec![400], surfaces: Some(0), ..Default::default() }) as Box<dyn Fn(&Path) -> Fake>),
+            ("waved-not-in-wave-bundle", Box::new(|_: &Path| Fake { procs: vec![holder(401, PathBuf::from("/usr/local/bin/waved"))], holders: vec![401], surfaces: Some(0), ..Default::default() })),
+            ("holder-not-in-process-table", Box::new(|_: &Path| Fake { holders: vec![402], surfaces: Some(0), ..Default::default() })),
+            ("surface-count-unknown", Box::new(|w: &Path| Fake { procs: vec![holder(403, w.to_path_buf())], holders: vec![403], surfaces: None, ..Default::default() })),
+        ] {
+            let (t, p) = rig(&format!("r2-{tag}"));
+            let _g = fingerprinted_pack(&t, &p);
+            let cys_app = make_app(&p.app_roots[0], "cys.app", LEGACY_BUNDLE_ID, "cys-app");
+            let waved = our_waved(&p);
+            let pack_before = snapshot(&[p.pack.as_path()]);
+            let mut ops = mk(&waved);
+            let lines = clean_and_heal_macos(&p, &mut ops, &mut heal);
+            assert_eq!(snapshot(&[p.pack.as_path()]), pack_before, "{tag}: pack untouched");
+            if tag == "holder-not-in-process-table" {
+                // unknown holder already fails C2 closed: the old app is kept (one notice), nothing removed -> no marker
+                assert!(cys_app.exists() && !p.heal_marker.exists() && visible(&lines).len() == 1, "{tag}: {lines:?}");
+            } else {
+                assert!(!cys_app.exists(), "{tag}: {lines:?}");
+                assert_eq!(visible(&lines).iter().filter(|l| l.contains(INSTALL_HINT)).count(), 1, "{tag}: one notice with hint {lines:?}");
+                assert!(p.heal_marker.exists(), "{tag}");
+            }
+            let _ = fs::remove_dir_all(&t);
+        }
+    }
+
+    /// Marker without the fingerprint any more (healed by other means) is simply cleared; nothing else happens.
+    #[test]
+    fn round2_marker_is_cleared_when_the_pack_no_longer_has_the_fingerprint() {
+        let (t, p) = rig("r2-clear");
+        let _g = cys::pack::override_dirs_for_thread(&p.pack, t.join("home/.claude"));
+        cys::pack::install(false).unwrap();
+        fs::create_dir_all(p.heal_marker.parent().unwrap()).unwrap();
+        fs::write(&p.heal_marker, "removed-at=T0\n").unwrap();
+        let before = snapshot(&[p.pack.as_path()]);
+        let lines = clean_and_heal_macos(&p, &mut Fake::default(), &mut heal);
+        assert!(lines.is_empty() && !p.heal_marker.exists());
+        assert_eq!(snapshot(&[p.pack.as_path()]), before);
+        let _ = fs::remove_dir_all(&t);
     }
 }

@@ -3589,7 +3589,7 @@ ln -sf '/Applications/cys.app/Contents/MacOS/cysd' '/usr/local/bin/cysd'"
         assert_eq!(main_prod.matches("heal_foreign_pack").count(), 0, "no ungated heal at startup");
         let lc = include_str!("legacy_cleanup.rs");
         let prod = &lc[..lc.find("#[cfg(test)]\nmod tests").unwrap()];
-        assert_eq!(prod.matches("cys::pack::heal_foreign_pack").count(), 2);
-        assert_eq!(prod.matches("heal_gated(").count(), 3, "definition + mac + windows");
+        assert_eq!(prod.matches("cys::pack::heal_foreign_pack").count(), 4, "mac + windows, each: cleanup run + heal-pending re-check");
+        assert_eq!(prod.matches("heal_gated(").count(), 5, "definition + mac 2 + windows 2");
     }
 }

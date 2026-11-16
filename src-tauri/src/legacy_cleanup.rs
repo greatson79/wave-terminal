@@ -185,6 +185,20 @@ pub(crate) fn wait_gone(marker: &Path, max_secs: u64) -> bool {
     !marker.exists()
 }
 
+/// Static (cheap, read-only) part of the Windows match: everything except "is a process running / terminate / uninstall".
+fn is_windows_candidate(e: &UninstallEntry, own_dir: &Path, obs: &Observed, ops: &dyn Ops) -> bool {
+    let key_name = e.key.rsplit(['\\', '/']).next().unwrap_or("");
+    key_name.eq_ignore_ascii_case(LEGACY_DISPLAY_NAME) && e.display_name == LEGACY_DISPLAY_NAME
+        && e.publisher == obs.publisher && !e.install_location.is_empty() && !e.uninstall_string.is_empty()
+        && !same_dir(&e.install_location, own_dir)
+        && ops.file_exists(&PathBuf::from(&e.install_location).join(LEGACY_EXE))
+}
+
+/// How many entries `clean_windows` would act on (used to decide whether a background cleanup is needed at all).
+pub(crate) fn windows_candidates(entries: &[UninstallEntry], own_dir: &Path, observed: Option<&Observed>, ops: &dyn Ops) -> usize {
+    observed.map_or(0, |obs| entries.iter().filter(|e| is_windows_candidate(e, own_dir, obs, ops)).count())
+}
+
 /// Lines starting with `LOG_ONLY` go to the log file but not to the user notice.
 pub(crate) const LOG_ONLY: &str = "[log-only] ";
 
@@ -199,10 +213,8 @@ pub(crate) fn clean_windows(entries: &[UninstallEntry], own_dir: &Path, observed
             lines.push(format!("{LOG_ONLY}Windows 제거 비활성(원본 설치값 미관측): 후보 {} / {}", e.key, e.install_location));
             continue;
         };
-        if e.publisher != obs.publisher || e.install_location.is_empty() || e.uninstall_string.is_empty() { continue; }
-        if same_dir(&e.install_location, own_dir) { continue; }
+        if !is_windows_candidate(e, own_dir, obs, ops) { continue; }
         let dir = PathBuf::from(&e.install_location);
-        if !ops.file_exists(&dir.join(LEGACY_EXE)) { continue; }
         let procs = ops.processes_under(&dir);
         let is_gui = |p: &Path| { let s = p.display().to_string().to_lowercase(); s.ends_with("\\cys-app.exe") || s.ends_with("/cys-app.exe") };
         if procs.iter().any(|(_, exe)| !is_gui(exe)) {
@@ -275,20 +287,35 @@ impl Ops for RealOps {
 }
 
 /// App-start entry (called once, from `rename_migration::run`). Fail-open: never returns an error, never blocks startup.
-pub(crate) fn run_at_start(settings_file: &Path) {
-    #[allow(unused_mut, unused_assignments)]
-    let mut lines: Vec<String> = Vec::new();
+/// Theo ruling 11/16: the leftover cleanup must NOT block app start (the Windows uninstaller wait alone can take 90 s).
+/// Sets a one-line progress notice at once, runs `work` on a background thread, then writes the TRUTHFUL result lines
+/// (including "could not confirm") to the log file and, if the UI asks later, to the notice.
+pub(crate) fn run_in_background(settings_file: PathBuf, progress: String, work: impl FnOnce() -> Vec<String> + Send + 'static) -> std::thread::JoinHandle<()> {
+    if let Ok(mut n) = NOTICE.lock() { *n = Some(progress); }
+    std::thread::spawn(move || {
+        let lines = work();
+        if lines.is_empty() { return; }
+        write_log(&settings_file, &lines);
+        let shown: Vec<&str> = lines.iter().filter(|l| !l.starts_with(LOG_ONLY)).map(String::as_str).collect();
+        if !shown.is_empty() { if let Ok(mut n) = NOTICE.lock() { *n = Some(shown.join(" · ")); } }
+    })
+}
+
+#[cfg(any(target_os = "macos", windows))]
+const PROGRESS_LINE: &str = "남은 원본 cys 앱을 정리하는 중입니다(백그라운드). 앱은 그대로 쓰실 수 있고, 결과는 legacy-cleanup.log 에 기록됩니다.";
+
+pub(crate) fn run_at_start(settings_file: &Path) -> Option<std::thread::JoinHandle<()>> {
     #[cfg(target_os = "macos")] {
         let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-        if !home.as_os_str().is_empty() {
-            let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0).to_string();
-            let own_bundle = std::env::current_exe().ok().and_then(|e| e.ancestors().find(|a| a.extension().is_some_and(|x| x == "app")).map(Path::to_path_buf));
-            let paths = Paths { app_roots: vec![PathBuf::from("/Applications"), home.join("Applications")],
-                launch_agents: home.join("Library/LaunchAgents"),
-                archive: settings_file.parent().map(|d| d.join("removed-cys-apps")).unwrap_or_else(|| home.join("removed-cys-apps")),
-                own_bundle, stamp };
-            lines = clean_macos(&paths, &mut RealOps);
-        }
+        if home.as_os_str().is_empty() { return None; }
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0).to_string();
+        let own_bundle = std::env::current_exe().ok().and_then(|e| e.ancestors().find(|a| a.extension().is_some_and(|x| x == "app")).map(Path::to_path_buf));
+        let paths = Paths { app_roots: vec![PathBuf::from("/Applications"), home.join("Applications")],
+            launch_agents: home.join("Library/LaunchAgents"),
+            archive: settings_file.parent().map(|d| d.join("removed-cys-apps")).unwrap_or_else(|| home.join("removed-cys-apps")),
+            own_bundle, stamp };
+        if plan_macos(&paths).is_empty() { return None; }   // read-only scan: nothing leftover = no thread, no notice
+        return Some(run_in_background(settings_file.to_path_buf(), PROGRESS_LINE.to_string(), move || clean_macos(&paths, &mut RealOps)));
     }
     #[cfg(windows)] {
         let mut text = String::new();
@@ -297,15 +324,17 @@ pub(crate) fn run_at_start(settings_file: &Path) {
                 text.push_str(&String::from_utf8_lossy(&o.stdout)); text.push('\n');
             }
         }
+        let entries = parse_reg_query(&text);
         let own = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)).unwrap_or_default();
-        lines = clean_windows(&parse_reg_query(&text), &own, OBSERVED.as_ref(), &mut RealOps);
+        if windows_candidates(&entries, &own, OBSERVED.as_ref(), &RealOps) == 0 {
+            let lines = clean_windows(&entries, &own, OBSERVED.as_ref(), &mut RealOps);   // log-only sightings; no slow work possible
+            if !lines.is_empty() { write_log(settings_file, &lines); }
+            return None;
+        }
+        return Some(run_in_background(settings_file.to_path_buf(), PROGRESS_LINE.to_string(),
+            move || clean_windows(&entries, &own, OBSERVED.as_ref(), &mut RealOps)));
     }
-    let _ = settings_file;
-    if lines.is_empty() { return; }
-    write_log(settings_file, &lines);
-    let shown: Vec<&str> = lines.iter().filter(|l| !l.starts_with(LOG_ONLY)).map(String::as_str).collect();
-    if shown.is_empty() { return; }
-    if let Ok(mut n) = NOTICE.lock() { *n = Some(shown.join(" · ")); }
+    #[allow(unreachable_code)] { let _ = settings_file; None }
 }
 
 #[cfg(test)]
@@ -594,7 +623,7 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\Wave Termi
     #[ignore]
     fn c7_windows_real_cleanup() {
         let settings = PathBuf::from(std::env::var("C7_SETTINGS").expect("C7_SETTINGS"));
-        run_at_start(&settings);
+        if let Some(h) = run_at_start(&settings) { h.join().unwrap(); }   // wait for the background cleanup before the test process exits
         println!("NOTICE {:?}", take_notice());
     }
 
@@ -612,5 +641,37 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\Wave Termi
         assert!(!wait_gone(&f, 2), "a marker that stays must not be reported gone");
         assert!(wait_gone(&d.join("never-existed.exe"), 1));
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn background_cleanup_never_blocks_the_caller_and_logs_the_truthful_result() {
+        let d = std::env::temp_dir().join(format!("wave-bg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let settings = d.join("user-settings.json");
+        let t0 = std::time::Instant::now();
+        let h = run_in_background(settings.clone(), "진행 중".to_string(), || {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            vec!["남은 cys 앱을 제거하지 못해 그대로 둡니다(권한 등): 확인하지 못했습니다".to_string()]
+        });
+        assert!(t0.elapsed() < std::time::Duration::from_millis(500), "caller blocked for {:?}", t0.elapsed());
+        assert_eq!(take_notice().as_deref(), Some("진행 중"), "one-line status visible at once");
+        h.join().unwrap();
+        let log = std::fs::read_to_string(d.join("legacy-cleanup.log")).unwrap();
+        assert!(log.contains("확인하지 못했습니다"), "truthful result is logged: {log}");
+        assert!(take_notice().unwrap().contains("확인하지 못했습니다"), "later notice carries the truthful outcome");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn windows_candidates_counts_only_real_matches() {
+        let entries = parse_reg_query(REAL);
+        let own = Path::new(r"C:\Users\runneradmin\AppData\Local\Wave Terminal");
+        let ops = Fake::default();
+        assert_eq!(windows_candidates(&entries, own, OBSERVED.as_ref(), &ops), 1);
+        assert_eq!(windows_candidates(&entries, own, None, &ops), 0, "disabled = no candidates");
+        let mut gone = Fake::default(); gone.no_files = true;
+        assert_eq!(windows_candidates(&entries, own, OBSERVED.as_ref(), &gone), 0, "exe missing");
+        let mut e2 = entries.clone(); e2[0].publisher = "someone".into();
+        assert_eq!(windows_candidates(&e2, own, OBSERVED.as_ref(), &ops), 0);
     }
 }

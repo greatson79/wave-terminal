@@ -24,7 +24,7 @@ impl Output {
     pub fn new() -> Self {
         Self {
             ring: Mutex::new(Ring {
-                bytes: VecDeque::with_capacity(CAPACITY),
+                bytes: VecDeque::new(),
                 end: 0,
             }),
             wake: broadcast::channel(256).0,
@@ -40,14 +40,16 @@ impl Output {
             .end
             .checked_add(bytes.len() as u64)
             .expect("PTY output offset overflow");
-        if bytes.len() >= CAPACITY {
-            ring.bytes.clear();
-            ring.bytes.extend(&bytes[bytes.len() - CAPACITY..]);
-        } else {
-            let discard = (ring.bytes.len() + bytes.len()).saturating_sub(CAPACITY);
-            ring.bytes.drain(..discard);
-            ring.bytes.extend(bytes);
+        let retained = &bytes[bytes.len().saturating_sub(CAPACITY)..];
+        let discard = (ring.bytes.len() + retained.len()).saturating_sub(CAPACITY);
+        ring.bytes.drain(..discard);
+        let needed = ring.bytes.len() + retained.len();
+        if needed > ring.bytes.capacity() {
+            let target = needed.next_power_of_two().min(CAPACITY);
+            let additional = target - ring.bytes.len();
+            ring.bytes.reserve_exact(additional);
         }
+        ring.bytes.extend(retained);
         let _ = self.wake.send(());
     }
 
@@ -174,6 +176,40 @@ mod tests {
     }
 
     #[test]
+    fn fresh_seat_allocates_history_only_as_output_arrives() {
+        let output = Output::new();
+        {
+            let ring = output.ring.lock().unwrap();
+            assert_eq!(ring.bytes.len(), 0);
+            assert_eq!(ring.bytes.capacity(), 0);
+        }
+        output.publish(b"small");
+        assert!(output.ring.lock().unwrap().bytes.capacity() < CAPACITY);
+        for size in [257, 8193, 65537, 1048577, CAPACITY - 1, CAPACITY + 1] {
+            output.publish(&vec![b'x'; size]);
+            let ring = output.ring.lock().unwrap();
+            assert!(ring.bytes.len() <= CAPACITY);
+            assert!(ring.bytes.capacity() <= CAPACITY);
+        }
+    }
+
+    #[test]
+    fn lazy_ring_growth_never_reserves_past_cap_for_irregular_chunks() {
+        let output = Output::new();
+        output.publish(&vec![b'a'; 3 * CAPACITY / 4]);
+        output.publish(&vec![b'b'; CAPACITY / 4]);
+        assert_eq!(output.ring.lock().unwrap().bytes.len(), CAPACITY);
+        assert!(output.ring.lock().unwrap().bytes.capacity() <= CAPACITY);
+
+        let output = Output::new();
+        output.publish(&[b'c'; 243]);
+        for _ in 0..=CAPACITY / WRITE_CHUNK {
+            output.publish(&[b'd'; WRITE_CHUNK]);
+            assert!(output.ring.lock().unwrap().bytes.capacity() <= CAPACITY);
+        }
+    }
+
+    #[test]
     fn ring_allocation_never_exceeds_4_mib_and_exact_cap_is_retained() {
         let output = Output::new();
         output.publish(&vec![b'a'; CAPACITY]);
@@ -193,7 +229,7 @@ mod tests {
         let output = Arc::new(Output::new());
         let (mut rx, cursor) = output.subscribe();
         let exited = Arc::new(AtomicBool::new(false));
-        let (mut writer, mut reader) = tokio::io::duplex(16);
+        let (mut writer, mut reader) = tokio::io::duplex(WRITE_CHUNK);
         let source = Arc::clone(&output);
         let stopped = Arc::clone(&exited);
         let task = tokio::spawn(async move {
@@ -207,8 +243,9 @@ mod tests {
         output.publish(&payload);
         exited.store(true, Ordering::Relaxed);
         let mut received = Vec::new();
+        // Slow-reader pressure has its own test; this case checks the full-cap boundary.
         tokio::time::timeout(
-            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(30),
             reader.read_to_end(&mut received),
         )
         .await

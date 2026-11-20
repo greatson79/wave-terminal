@@ -26,16 +26,25 @@ jobs:
         working-directory: scripts/probes/scroll-history
         run: bun install --frozen-lockfile
       - name: Focused client self-check
-        run: node scripts/probes/scroll-history/attach-selftest.cjs
+        run: |
+          node scripts/probes/scroll-history/attach-compare-selftest.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Marker comparison self-check failed' }
+          node scripts/probes/scroll-history/attach-selftest.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Attach client self-check failed' }
       - name: Build the unmodified application daemon
         run: cargo build --locked --bin waved
-      - name: Isolated real seat, narrow fit, mid-stream resize and one reattach
+      - name: FAST and SLOW real seats, narrow fit, resize and one reattach each
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $daemon = (Get-Item target/debug/waved.exe).FullName
-          node scripts/probes/scroll-history/attach-repro.cjs $daemon evidence-attach
-          if ($LASTEXITCODE -ne 0) { throw 'Attach probe incomplete; do not interpret as retention evidence' }
+          New-Item -ItemType Directory -Path evidence-attach | Out-Null
+          $failed = $false
+          foreach ($variant in 'FAST','SLOW') {
+            node scripts/probes/scroll-history/attach-repro.cjs $daemon "evidence-attach/$variant" $variant
+            if ($LASTEXITCODE -ne 0) { $failed = $true }
+          }
+          if ($failed) { throw 'At least one variant incomplete; do not interpret incomplete output as retention evidence' }
       - uses: actions/upload-artifact@v4
         if: always()
         with:

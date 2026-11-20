@@ -1,0 +1,11 @@
+[package]
+name = "scroll-history-conpty"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+portable-pty = { path = "../../../vendor/portable-pty" }

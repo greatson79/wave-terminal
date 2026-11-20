@@ -1,0 +1,142 @@
+name: scroll-history-repro
+
+on:
+  push:
+    branches: ['repro/0.3.7-scroll-history']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scroll-history-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  claude-byte-replay:
+    # Branch push registers the workflow only; approved manual dispatch runs the experiment.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: V1
+            engine: inbox
+            flags: 7
+          - variant: V2
+            engine: sideloaded
+            flags: 7
+          - variant: V3
+            engine: inbox
+            flags: 6
+          - variant: V4
+            engine: sideloaded
+            flags: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: oven-sh/setup-bun@v2
+        id: bun
+        continue-on-error: true
+      - uses: oven-sh/setup-bun@v2
+        if: steps.bun.outcome == 'failure'
+      - name: Headless xterm dependency (same 5.5.0 as UI)
+        working-directory: scripts/probes/scroll-history
+        run: bun install --frozen-lockfile
+      - name: Judge self-test and raw Mac baseline
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path evidence | Out-Null
+          bun scripts/probes/scroll-history/judge.cjs --self-test
+          if ($LASTEXITCODE -ne 0) { throw 'Judge self-test failed' }
+          bun scripts/probes/scroll-history/judge.cjs scripts/probes/scroll-history/fixtures/claude_scroll100.bin evidence/raw-mac.json
+          if ($LASTEXITCODE -ne 0) { throw 'Raw baseline failed' }
+          Get-FileHash scripts/probes/scroll-history/fixtures/*.bin | Format-Table | Out-String | Set-Content evidence/fixture-sha256.txt
+      - name: Prepare isolated variant; application vendor stays untouched
+        shell: pwsh
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python scripts/probes/scroll-history/build_variant.py $env:VARIANT "scripts/probes/scroll-history/variant-builds/$env:VARIANT"
+          if ($LASTEXITCODE -ne 0) { throw 'Variant preparation failed' }
+          Copy-Item "scripts/probes/scroll-history/variant-builds/$env:VARIANT/vendor.diff" evidence/vendor.diff
+          Copy-Item "scripts/probes/scroll-history/variant-builds/$env:VARIANT/variant.json" evidence/variant.json
+      - name: Build isolated vendored portable-pty replay host
+        shell: pwsh
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          $manifest = "scripts/probes/scroll-history/variant-builds/$env:VARIANT/host/Cargo.toml"
+          $target = "scripts/probes/scroll-history/variant-builds/$env:VARIANT/target"
+          cargo test --locked --manifest-path $manifest --target-dir $target
+          if ($LASTEXITCODE -ne 0) { throw 'Replay host tests failed' }
+          cargo build --locked --manifest-path $manifest --target-dir $target
+          if ($LASTEXITCODE -ne 0) { throw 'Replay host build failed' }
+      - name: Pin exact inbox or Microsoft NuGet ConPTY engine
+        shell: pwsh
+        env:
+          ENGINE: ${{ matrix.engine }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = Join-Path $PWD "scripts/probes/scroll-history/variant-builds/$env:VARIANT/target/debug"
+          if ($env:ENGINE -eq 'sideloaded') {
+            $url = 'https://api.nuget.org/v3-flatcontainer/microsoft.windows.console.conpty/1.25.261109001/microsoft.windows.console.conpty.1.25.261109001.nupkg'
+            Invoke-WebRequest -Uri $url -OutFile engine.zip
+            $sha = (Get-FileHash -Algorithm SHA256 engine.zip).Hash
+            if ($sha -ne '3d77f535df848e44225c2a8912ac844fecb23f3057732b639f3034b587496f09') { throw 'NuGet SHA mismatch' }
+            Expand-Archive -LiteralPath engine.zip -DestinationPath engine
+            Copy-Item engine/runtimes/win-x64/native/conpty.dll $bin
+            Copy-Item engine/build/native/runtimes/x64/OpenConsole.exe $bin
+            $dll = Join-Path $bin conpty.dll
+            $server = Join-Path $bin OpenConsole.exe
+          } else {
+            $dll = Join-Path $env:WINDIR 'System32/kernel32.dll'
+            $server = Join-Path $env:WINDIR 'System32/conhost.exe'
+          }
+          if (-not (Test-Path -LiteralPath $dll) -or -not (Test-Path -LiteralPath $server)) { throw 'Engine binaries missing' }
+          @{ engine = $env:ENGINE; variant = $env:VARIANT; dll = $dll; dll_sha256 = (Get-FileHash -Algorithm SHA256 $dll).Hash; dll_version = (Get-Item $dll).VersionInfo.FileVersion; server = $server; server_sha256 = (Get-FileHash -Algorithm SHA256 $server).Hash; server_version = (Get-Item $server).VersionInfo.FileVersion } | ConvertTo-Json | Set-Content evidence/engine.json
+          "SCROLL_CONPTY_DLL=$dll" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: PowerShell 5.1 stdout through selected ConPTY and flags
+        shell: pwsh
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $fixture = Get-Item scripts/probes/scroll-history/fixtures/claude_scroll100.bin
+          $fixtureHash = (Get-FileHash -Algorithm SHA256 $fixture.FullName).Hash
+          foreach ($mode in 'burst','paced') {
+            & "scripts/probes/scroll-history/variant-builds/$env:VARIANT/target/debug/scroll-history-conpty.exe" $fixture.FullName "evidence/conpty-$mode.bin" $mode
+            if ($LASTEXITCODE -ne 0) { throw "ConPTY replay failed: $mode" }
+            $meta = Get-Content -Raw "evidence/conpty-$mode.bin.metadata.json" | ConvertFrom-Json
+            if ($meta.payload_write_completed -ne $true -or $meta.payload_bytes -ne $fixture.Length -or $meta.payload_sha256 -ne $fixtureHash) { throw 'INDETERMINATE: replay payload incomplete or mismatched' }
+            if ($meta.codepage_after -ne 65001 -or $meta.ps -notlike '5.1.*' -or $meta.window_cols -ne 120 -or $meta.window_rows -ne 35) { throw "Unexpected child environment: $($meta | ConvertTo-Json -Compress)" }
+            bun scripts/probes/scroll-history/judge.cjs "evidence/conpty-$mode.bin" "evidence/conpty-$mode.json"
+            if ($LASTEXITCODE -ne 0) { throw "Headless judge failed: $mode" }
+          }
+      - name: Compare retained history and received sequence shape (measurement only)
+        shell: pwsh
+        env:
+          VARIANT: ${{ matrix.variant }}
+          FLAGS: ${{ matrix.flags }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $raw = Get-Content -Raw evidence/raw-mac.json | ConvertFrom-Json
+          if ($raw.active.labelCount -ne 100) { throw 'Raw Mac baseline must retain all 100 labels' }
+          $config = Get-Content -Raw evidence/variant.json | ConvertFrom-Json
+          if ($config.flags -ne [int]$env:FLAGS) { throw 'Variant flag mismatch' }
+          foreach ($mode in 'burst','paced') {
+            $seen = Get-Content -Raw "evidence/conpty-$mode.json" | ConvertFrom-Json
+            @{ variant = $env:VARIANT; flags = [int]$env:FLAGS; mode = $mode; raw_labels = $raw.active.labelCount; conpty_labels = $seen.active.labelCount; missing = $seen.active.missingScrollLabels; baseY = $seen.normal.baseY; active = $seen.activeType; received_shape = $seen.shape } | ConvertTo-Json -Depth 8 | Set-Content "evidence/comparison-$mode.json"
+            "variant=$env:VARIANT flags=$env:FLAGS mode=$mode raw=$($raw.active.labelCount) conpty=$($seen.active.labelCount) baseY=$($seen.normal.baseY) 2J=$($seen.shape.eraseDisplay2) 3J=$($seen.shape.eraseScrollback3) H=$($seen.shape.home) CUP=$($seen.shape.cursorPosition) regions=$($seen.shape.scrollRegion)" | Tee-Object -Append evidence/comparison.txt
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scroll-history-${{ matrix.variant }}
+          path: evidence/
+          if-no-files-found: error

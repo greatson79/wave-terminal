@@ -1,0 +1,2 @@
+# Terminal replay fixtures must survive checkout byte-for-byte on Windows.
+fixtures/*.bin -text -diff

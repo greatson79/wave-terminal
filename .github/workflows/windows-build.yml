@@ -173,6 +173,13 @@ jobs:
           [ ${#SETUP[@]} -eq 1 ] && [ -f "${SETUP[0]}" ] || { echo "setup.exe 후보 이상: ${SETUP[*]}" >&2; exit 1; }
           python scripts/verify_win_crt.py --setup "${SETUP[0]}"
 
+      - name: Record expected build version
+        shell: pwsh
+        run: |
+          $version = (Get-Content -LiteralPath 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json).version
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid build version' }
+          Set-Content -LiteralPath 'target/release/bundle/nsis/expected-version.txt' -Value $version -Encoding utf8
+
       - name: Upload NSIS installer artifact
         if: success()
         uses: actions/upload-artifact@v4
@@ -180,6 +187,7 @@ jobs:
           name: cys-windows-x64-nsis
           path: |
             target/release/bundle/nsis/*.exe
+            target/release/bundle/nsis/expected-version.txt
           if-no-files-found: error
 
       - name: 자기완결 검증 (silent install → 동봉 bash·python3 실행)
@@ -538,7 +546,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        base: ['0.3.0', '0.3.1', '0.3.2', '0.3.3', '0.3.4', '0.3.5']
+        base: ['0.3.0', '0.3.1', '0.3.2', '0.3.3', '0.3.4', '0.3.5', '0.3.6']
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -551,6 +559,8 @@ jobs:
           BASE: ${{ matrix.base }}
         run: |
           $ErrorActionPreference = 'Stop'
+          $expectedVersion = (Get-Content -LiteralPath 'new/expected-version.txt' -Raw).Trim()
+          if ($expectedVersion -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid expected build version' }
           $log = Join-Path $env:RUNNER_TEMP "upgrade-$env:BASE"; New-Item -ItemType Directory -Force $log | Out-Null
           function Bx($exe,$argv,$ms){
             $o=[System.IO.Path]::GetTempFileName(); $e=[System.IO.Path]::GetTempFileName()
@@ -595,9 +605,9 @@ jobs:
           # 6) asserts
           $fail = @()
           if ($u.ExitCode -ne 0) { $fail += "upgrade exit $($u.ExitCode)" }
-          $ver = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like 'Wave Terminal*' } | Select-Object DisplayName,DisplayVersion,Publisher,InstallLocation | Out-String)
-          $ver | Tee-Object "$log\uninstall-after.txt" | Write-Host
-          if ($ver -notmatch '0\.3\.6') { $fail += "installed version is not 0.3.6" }
+          $installed = @(Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like 'Wave Terminal*' -and $_.InstallLocation.TrimEnd('\') -eq $dir.TrimEnd('\') })
+          $installed | Select-Object DisplayName,DisplayVersion,Publisher,InstallLocation | Out-String | Tee-Object "$log\uninstall-after.txt" | Write-Host
+          if ($installed.Count -ne 1 -or $installed[0].DisplayVersion -ne $expectedVersion) { $fail += "installed version is not $expectedVersion" }
           Hashes | Set-Content "$log\records-after.txt"
           if ((Get-Content "$log\records-before.txt" -Raw) -ne (Get-Content "$log\records-after.txt" -Raw)) { $fail += "records changed" }
           $newCli = "$dir\wave.exe"; if (-not (Test-Path $newCli)) { $fail += "wave.exe missing after upgrade" }
@@ -608,8 +618,8 @@ jobs:
           "old daemon pid $pidBefore alive after upgrade: $alive" | Tee-Object -Append "$log\steps.txt"
           Get-Process wave,waved,cys,cysd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
           $fail | Set-Content "$log\failures.txt"
-          if ($fail.Count) { throw ("UPGRADE $env:BASE -> 0.3.6 FAILED: " + ($fail -join '; ')) }
-          Write-Host "OK: $env:BASE -> 0.3.6 (records identical, seat kept, version 0.3.6)"
+          if ($fail.Count) { throw ("UPGRADE $env:BASE -> $expectedVersion FAILED: " + ($fail -join '; ')) }
+          Write-Host "OK: $env:BASE -> $expectedVersion (records identical, seat kept, version $expectedVersion)"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

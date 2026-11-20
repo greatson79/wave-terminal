@@ -1122,6 +1122,19 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                 Ok(v) => v,
                 Err(e) => return Reply::Single(err_response(&id, "acl_denied", &e)),
             };
+            let binary = params.get("binary").and_then(Value::as_bool).unwrap_or(false);
+            let bytes = if binary {
+                if ["queued", "clear_first"].iter().any(|key| params.get(*key).and_then(Value::as_bool).unwrap_or(false)) {
+                    return Reply::Single(err_response(&id, "invalid_params", "binary input requires direct delivery without clear_first"));
+                }
+                // xterm onBinary carries one byte per code point, not UTF-8 text.
+                match text.chars().map(|c| u8::try_from(u32::from(c))).collect::<Result<Vec<_>, _>>() {
+                    Ok(bytes) => bytes,
+                    Err(_) => return Reply::Single(err_response(&id, "invalid_params", "binary input contains a code point above U+00FF")),
+                }
+            } else {
+                text.as_bytes().to_vec()
+            };
             if human && !is_terminal_query_reply(&text) {
                 let now = std::time::Instant::now();
                 *surface.last_human_input.lock().unwrap() = Some(now);
@@ -1234,7 +1247,7 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                     clear_first: true,
                 }
             } else {
-                crate::state::WriteReq::Data(text.as_bytes().to_vec())
+                crate::state::WriteReq::Data(bytes)
             };
             if let Some(err) = try_write(&surface, write_req, &id) {
                 return Reply::Single(err);
@@ -3768,6 +3781,46 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn send_text_binary_preserves_high_column_mouse_bytes() {
+        let _g = ACL_ENV_LOCK.lock().unwrap();
+        let (daemon, dir, _dirs) = daemon_with_acl("binary-mouse", r#"{"default":"allow","rules":[]}"#);
+        let surface = daemon.create_surface(None,
+            Some("/bin/stty raw -echo; printf 'READY\\r\\n'; /usr/bin/od -An -tx1 -N 6".into()),
+            None, None, 24, 120).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !surface.parser.lock().unwrap().screen().contents().contains("READY") {
+            assert!(std::time::Instant::now() < deadline, "test byte reader not ready");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        for invalid in [
+            json!({"surface_id": surface.id, "text": "한", "binary": true, "human": true}),
+            json!({"surface_id": surface.id, "text": "x", "binary": true, "queued": true}),
+            json!({"surface_id": surface.id, "text": "x", "binary": true, "clear_first": true}),
+        ] {
+            let Reply::Single(reply) = dispatch(&daemon, Request {
+                id: json!(0), method: "surface.send_text".into(), params: invalid,
+            }, None) else { panic!("single reply expected") };
+            assert_eq!(reply["error"]["code"], "invalid_params", "{reply}");
+            assert!(surface.pending_queue.lock().unwrap().is_empty());
+            assert!(surface.last_human_input.lock().unwrap().is_none());
+        }
+        let Reply::Single(reply) = dispatch(&daemon, Request {
+            id: json!(1), method: "surface.send_text".into(),
+            params: json!({"surface_id": surface.id, "text": "\u{1b}[M`\u{80}+", "binary": true, "human": true}),
+        }, None) else { panic!("single reply expected") };
+        assert_eq!(reply["ok"], true, "{reply}");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let output = surface.parser.lock().unwrap().screen().contents();
+            if output.split_whitespace().collect::<Vec<_>>().windows(6).any(|bytes| bytes == ["1b", "5b", "4d", "60", "80", "2b"]) { break; }
+            assert!(std::time::Instant::now() < deadline, "binary bytes changed: {output:?}");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn learn_checkpoint_merges_round_and_writes_ledger() {

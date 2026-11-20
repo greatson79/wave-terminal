@@ -72,6 +72,8 @@ fn main() -> Result<()> {
         Ok(total)
     });
     let mut cmd = CommandBuilder::new("powershell.exe");
+    // Windows CommandBuilder otherwise defaults to USERPROFILE, not the evidence cwd.
+    cmd.cwd(std::env::current_dir()?);
     let replay_script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("replay.ps1");
     cmd.args([
         "-NoLogo",

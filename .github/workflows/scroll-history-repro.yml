@@ -36,6 +36,9 @@ jobs:
             flags: 15
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: dtolnay/rust-toolchain@stable
       - uses: oven-sh/setup-bun@v2
         id: bun
@@ -61,6 +64,9 @@ jobs:
           VARIANT: ${{ matrix.variant }}
         run: |
           $ErrorActionPreference = 'Stop'
+          $env:SCROLL_PREP_PROOF_DIR = Join-Path $env:RUNNER_TEMP "prep-proof-$env:VARIANT"
+          python scripts/probes/scroll-history/tests/test_prepare_windows.py *> evidence/prep-proof.log
+          if ($LASTEXITCODE -ne 0) { throw 'Windows-shaped prep regressions failed' }
           python scripts/probes/scroll-history/build_variant.py $env:VARIANT "scripts/probes/scroll-history/variant-builds/$env:VARIANT"
           if ($LASTEXITCODE -ne 0) { throw 'Variant preparation failed' }
           Copy-Item "scripts/probes/scroll-history/variant-builds/$env:VARIANT/vendor.diff" evidence/vendor.diff

@@ -25,11 +25,11 @@ def prepare(variant, output):
     shutil.copytree(host / 'src', generated / 'src')
     for name in ['Cargo.lock', 'replay.ps1']:
         shutil.copy2(host / name, generated / name)
-    manifest = (host / 'Cargo.toml').read_text().replace(
+    manifest = (host / 'Cargo.toml').read_text(encoding='utf-8').replace(
         'path = "../../../vendor/portable-pty"',
         'path = ' + json.dumps(vendor.resolve().as_posix(), ensure_ascii=False))
     assert str(vendor.resolve().as_posix()) in manifest
-    (generated / 'Cargo.toml').write_text(manifest)
+    (generated / 'Cargo.toml').write_text(manifest, encoding='utf-8')
     path = vendor / 'src/win/psuedocon.rs'
     original_bytes = path.read_bytes()
     before = original_bytes.decode().replace("\r\n", "\n")
@@ -46,17 +46,17 @@ def prepare(variant, output):
         after = after.replace(flags, flags + '\n                    | PSEUDOCONSOLE_PASSTHROUGH_MODE')
     generated_bytes = after.replace("\n", "\r\n").encode() if b"\r\n" in original_bytes else after.encode()
     path.write_bytes(generated_bytes)
-    changes = [str(p.relative_to(original)) for p in original.rglob('*') if p.is_file()
+    changes = [p.relative_to(original).as_posix() for p in original.rglob('*') if p.is_file()
                and p.read_bytes() != (vendor / p.relative_to(original)).read_bytes()]
     assert changes == ['src/win/psuedocon.rs']
     (output / 'vendor.diff').write_text(''.join(difflib.unified_diff(
-        before.splitlines(True), after.splitlines(True), fromfile='original', tofile=variant)))
+        before.splitlines(True), after.splitlines(True), fromfile='original', tofile=variant)), encoding='utf-8')
     (output / 'variant.json').write_text(json.dumps({
         'variant': variant, 'flags': FLAGS[variant], 'changed_copy_files': changes,
         'original_sha256': hashlib.sha256(original_bytes).hexdigest(),
         'generated_sha256': hashlib.sha256(generated_bytes).hexdigest(),
         'runtime_library': 'absolute SCROLL_CONPTY_DLL; failure never falls back',
-    }, indent=2) + '\n')
+    }, indent=2) + '\n', encoding='utf-8')
     return generated
 
 

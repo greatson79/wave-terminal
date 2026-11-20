@@ -1,0 +1,28 @@
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const path=require('node:path');
+const {streamEndAction,reattachAfterEnd}=require('./attach-policy.cjs');
+(async()=>{
+  const source=fs.readFileSync(path.resolve(__dirname,'../../../src-tauri/src/main.rs'),'utf8');
+  assert.match(source,/const REATTACH_MAX:\s*u32\s*=\s*5;/);
+  assert.match(source,/const REATTACH_DELAY_MS:\s*u64\s*=\s*500;/);
+  assert.equal(streamEndAction(1,1,{exited:false},0),'reattach');
+  assert.equal(streamEndAction(1,2,{exited:false},0),'daemon-restarted');
+  assert.equal(streamEndAction(1,null,null,0),'wait');
+  assert.equal(streamEndAction(1,null,null,5),'daemon-restarted');
+  assert.equal(streamEndAction(1,1,{exited:false},5),'exited');
+  assert.equal(streamEndAction(null,1,{exited:false},0),'exited');
+  const delays=[],checks=[],client={ack:true};
+  let attempts=0;
+  const result=await reattachAfterEnd(7,async()=>({pid:7,surface:{exited:false}}),async()=>{attempts++;if(attempts<3)throw Error('not ready');return client;},async ms=>delays.push(ms),event=>checks.push(event));
+  assert.equal(result,client);assert.equal(attempts,3);assert.deepEqual(delays,[500,500,500]);
+  let attaches=0;
+  await assert.rejects(reattachAfterEnd(7,async()=>({pid:null,surface:null}),async()=>{attaches++;},async()=>{},()=>{}),/daemon-restarted/);
+  assert.equal(attaches,0);
+  let failedAttempts=0;
+  const exhaustedDelays=[];
+  await assert.rejects(reattachAfterEnd(7,async()=>({pid:7,surface:{exited:false}}),async()=>{failedAttempts++;throw Error('failure');},async ms=>exhaustedDelays.push(ms),()=>{}),/exited/);
+  assert.equal(failedAttempts,5);assert.deepEqual(exhaustedDelays,[500,500,500,500,500]);
+  await assert.rejects(reattachAfterEnd(7,async()=>({pid:8,surface:{exited:false}}),async()=>{throw Error('must not attach');},async()=>{},()=>{}),/daemon-restarted/);
+  console.log('PASS exact5x500ms wire policy: same daemon/alive seat, retry budget, wait without attach, changed daemon rejection');
+})().catch(error=>{console.error(error);process.exitCode=1;});

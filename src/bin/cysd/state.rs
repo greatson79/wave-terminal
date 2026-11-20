@@ -11,7 +11,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tokio::sync::broadcast;
 
 const SCROLLBACK_LINES: usize = 10_000;
 pub const DEFAULT_ROWS: u16 = 35;
@@ -121,7 +120,7 @@ pub struct Surface {
     pub parser: Mutex<vt100::Parser>,
     pub scrollback: Mutex<VecDeque<String>>,
     ingest: Mutex<IngestState>,
-    pub out_tx: broadcast::Sender<Vec<u8>>,
+    pub output: crate::output::Output,
     pub last_output: Mutex<Instant>,
     pub idle_notified: AtomicBool,
     /// recall 영속용 직전 라인 (연속 중복 스킵 — TUI 리드로우 노이즈 억제)
@@ -1714,7 +1713,6 @@ impl Daemon {
             .take_writer()
             .map_err(|e| format!("take writer failed: {e}"))?;
 
-        let (out_tx, _) = broadcast::channel(256);
 
         // PTY writer 전용 스레드: 유한 채널 수신 루프가 단독으로 writer를 소유한다.
         // 모든 senders가 drop되거나(서피스 제거) write 실패 시 스스로 종료한다.
@@ -1751,7 +1749,7 @@ impl Daemon {
                 pending_cr: false,
                 partial: String::new(),
             }),
-            out_tx,
+            output: crate::output::Output::new(),
             last_output: Mutex::new(Instant::now()),
             idle_notified: AtomicBool::new(false),
             last_recall_line: Mutex::new(String::new()),
@@ -1889,23 +1887,13 @@ impl Daemon {
                         let mut probe = dsr_tail.clone();
                         probe.extend_from_slice(chunk);
                         let needs_dsr = probe.windows(4).any(|w| w == b"\x1b[6n");
-                        // attach 브로드캐스트 페이로드는 락 '밖'에서 복사한다 — send 자체는 아래
-                        // 불변식상 parser 락 안이어야 하지만, chunk 복사(최대 16KB)까지 락 안에서
-                        // 하면 대량출력 시 락 보유 시간이 memcpy만큼 늘어 read-screen·status·attach의
-                        // .screen() 접근을 불필요하게 블록한다. 복사를 앞당겨 락 임계영역은 send만 남긴다.
-                        let attach_payload = chunk.to_vec();
-                        // 파서 반영(process)과 attach 브로드캐스트(out_tx.send)를 같은 parser 락
-                        // 임계영역에 묶는다 — run_attach가 parser 락 아래에서 구독+스냅샷을 뜨므로,
-                        // 이 둘이 분리되면(과거 버그) process 이후·send 이전에 구독한 attach가
-                        // 같은 청크를 스냅샷과 live로 중복 수신한다. 락이 process↔send를 직렬화해야
-                        // run_attach 주석의 불변식(중복 배달 창 봉쇄)이 실제로 성립한다.
-                        // DSR 커서 위치도 같은 락 아래에서 읽어(재진입 락 회피) 일관성을 유지한다.
+                        // Parser state, retained bytes and wakeups share the snapshot lock.
                         let dsr_resp = {
                             // poison된 락도 복구 — 단일 패닉이 데몬 전체를 마비시키지 않게 한다.
                             let mut parser = surf.parser.lock().unwrap_or_else(|e| e.into_inner());
                             // (W4) vt100 내부 인덱스 패닉을 격리한다:
                             // 패닉 시 그 청크 파싱만 포기하고 파서를 fresh로 재초기화(rows/cols 보존)한다.
-                            // reader 스레드는 죽지 않고, 아래 out_tx.send(원시 바이트 broadcast)와
+                            // reader 스레드는 죽지 않고, 아래 output.publish(원시 바이트 보존)와
                             // 후속 ingest 경로는 계속 태워 PTY 배수를 절대 멈추지 않는다.
                             let (resp, panicked) =
                                 process_chunk_isolated(&mut parser, chunk, needs_dsr);
@@ -1921,9 +1909,9 @@ impl Daemon {
                                     chunk.len()
                                 );
                             }
-                            // 원시 바이트 broadcast는 파서 반영·패닉 여부와 무관하게 항상 수행한다.
-                            // (파서 락 임계영역 내 send — run_attach 구독/스냅샷과의 직렬화 불변식 유지.)
-                            let _ = surf.out_tx.send(attach_payload);
+                            // Raw output is retained even when parser recovery was needed.
+                            // Keep publication atomic with run_attach subscription/snapshot.
+                            surf.output.publish(chunk);
                             resp
                         };
                         if let Some(resp) = dsr_resp {

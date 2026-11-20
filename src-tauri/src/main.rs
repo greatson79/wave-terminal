@@ -3346,11 +3346,11 @@ mod tests {
             .unwrap()
         };
         let me = rel(env!("CARGO_PKG_VERSION")).version;
-        assert_eq!(env!("CARGO_PKG_VERSION"), "0.3.6");
-        for old in ["0.3.5", "0.3.4", "0.3.0", "0.2.0"] {
+        assert_eq!(env!("CARGO_PKG_VERSION"), "0.3.7");
+        for old in ["0.3.6", "0.3.5", "0.3.4", "0.3.0", "0.2.0"] {
             assert!(!(rel(old).version > me), "{old} 롤백이 버튼에 뜬다");
         }
-        assert!(rel("0.3.7").version > me);
+        assert!(rel("0.3.8").version > me);
     }
 
     #[test]

@@ -1,0 +1,44 @@
+name: scroll-attach-repro
+on:
+  push:
+    branches: ['repro/0.3.7-scroll-attach']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: scroll-attach-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  real-waved-attach:
+    # An approved branch push registers only; only a separately approved dispatch runs the probe.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: oven-sh/setup-bun@v2
+        id: bun
+        continue-on-error: true
+      - uses: oven-sh/setup-bun@v2
+        if: steps.bun.outcome == 'failure'
+      - name: Install existing xterm 5.5.0 judge dependency
+        working-directory: scripts/probes/scroll-history
+        run: bun install --frozen-lockfile
+      - name: Focused client self-check
+        run: node scripts/probes/scroll-history/attach-selftest.cjs
+      - name: Build the unmodified application daemon
+        run: cargo build --locked --bin waved
+      - name: Isolated real seat, narrow fit, mid-stream resize and one reattach
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $daemon = (Get-Item target/debug/waved.exe).FullName
+          node scripts/probes/scroll-history/attach-repro.cjs $daemon evidence-attach
+          if ($LASTEXITCODE -ne 0) { throw 'Attach probe incomplete; do not interpret as retention evidence' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scroll-real-waved-attach
+          path: evidence-attach/
+          if-no-files-found: error

@@ -1032,6 +1032,9 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                     };
                     json!({
                         "surface_id": s.id,
+                        "attach_lagged_chunks": s.output.lagged_chunks.load(Ordering::Relaxed),
+                        "attach_gap_events": s.output.gap_events.load(Ordering::Relaxed),
+                        "attach_gap_bytes": s.output.gap_bytes.load(Ordering::Relaxed),
                         "surface_ref": surface_ref(s.id),
                         "title": s.title.lock().unwrap().clone(),
                         "label": s.label.lock().unwrap().clone(),
@@ -2935,6 +2938,9 @@ pub fn dispatch(daemon: &Arc<Daemon>, req: Request, caller_pid: Option<u32>) -> 
                     };
                     json!({
                         "surface_id": s.id,
+                        "attach_lagged_chunks": s.output.lagged_chunks.load(Ordering::Relaxed),
+                        "attach_gap_events": s.output.gap_events.load(Ordering::Relaxed),
+                        "attach_gap_bytes": s.output.gap_bytes.load(Ordering::Relaxed),
                         "surface_ref": surface_ref(s.id),
                         "role": s.role.lock().unwrap().clone(),
                         "title": s.title.lock().unwrap().clone(),
@@ -6326,6 +6332,23 @@ mod tests {
             .iter()
             .find(|v| v["surface_id"].as_u64() == Some(sid))
             .expect("surface entry present")
+    }
+
+    #[test]
+    fn attach_counters_are_exposed_by_existing_list_and_status() {
+        let daemon = isolated_daemon();
+        let surface = daemon.create_surface(None, Some("exit 0".into()), None, None, 24, 80).unwrap();
+        surface.output.lagged_chunks.store(344, Ordering::Relaxed);
+        surface.output.gap_events.store(2, Ordering::Relaxed);
+        surface.output.gap_bytes.store(123, Ordering::Relaxed);
+        for method in ["surface.list", "org.status"] {
+            let Reply::Single(reply) = dispatch(&daemon, Request {id:json!(1),method:method.into(),params:json!({})},None) else {panic!("expected single reply")};
+            assert_eq!(reply["ok"],json!(true));
+            let entry=surface_entry(&reply,"surfaces",surface.id);
+            assert_eq!(entry["attach_lagged_chunks"],json!(344));
+            assert_eq!(entry["attach_gap_events"],json!(2));
+            assert_eq!(entry["attach_gap_bytes"],json!(123));
+        }
     }
 
     #[test]

@@ -1,0 +1,57 @@
+name: scroll-attach-repro
+on:
+  push:
+    branches: ['fix/0.3.8-scroll-history']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: scroll-attach-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  real-waved-attach:
+    # An approved branch push registers only; only a separately approved dispatch runs the probe.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: oven-sh/setup-bun@v2
+        id: bun
+        continue-on-error: true
+      - uses: oven-sh/setup-bun@v2
+        if: steps.bun.outcome == 'failure'
+      - name: Install existing xterm 5.5.0 judge dependency
+        working-directory: scripts/probes/scroll-history
+        run: bun install --frozen-lockfile
+      - name: Focused client self-check
+        run: |
+          node scripts/probes/scroll-history/attach-compare-selftest.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Marker comparison self-check failed' }
+          node scripts/probes/scroll-history/attach-selftest.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Attach client self-check failed' }
+          node scripts/probes/scroll-history/attach-policy-selftest.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Reattach policy self-check failed' }
+      - name: Shared attach pump, notification lag and ring-bound regressions
+        run: cargo test --locked --bin waved output::tests -- --nocapture
+      - name: Build application daemon with Fix C
+        run: cargo build --locked --bin waved
+      - name: FAST, within-cap SLOW, and cap-exceeded automatic recovery
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $daemon = (Get-Item target/debug/waved.exe).FullName
+          New-Item -ItemType Directory -Path evidence-attach | Out-Null
+          $failed = $false
+          foreach ($variant in 'FAST','SLOW','CAP') {
+            node scripts/probes/scroll-history/attach-repro.cjs $daemon "evidence-attach/$variant" $variant
+            if ($LASTEXITCODE -ne 0) { $failed = $true }
+          }
+          if ($failed) { throw 'At least one variant incomplete; do not interpret incomplete output as retention evidence' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scroll-real-waved-attach
+          path: evidence-attach/
+          if-no-files-found: error

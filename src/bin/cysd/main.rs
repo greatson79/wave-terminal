@@ -19,6 +19,7 @@ mod events;
 mod governance;
 mod handlers;
 mod hwmon;
+mod output;
 mod recall;
 mod schedule;
 mod skillrun;
@@ -1941,10 +1942,10 @@ async fn run_attach<W: AsyncWrite + Unpin>(
     };
     // parser 락 아래에서 구독+스냅샷 — 그 사이 도착한 청크가 스냅샷과 live 양쪽에
     // 중복 배달되는 창을 닫는다 (reader 스레드는 parser 락에서 직렬화됨)
-    let (mut rx, snapshot) = {
+    let (mut rx, cursor, snapshot) = {
         let parser = surface.parser.lock().unwrap_or_else(|e| e.into_inner());
-        let rx = surface.out_tx.subscribe();
-        (rx, parser.screen().contents_formatted())
+        let (rx, cursor) = surface.output.subscribe();
+        (rx, cursor, parser.screen().contents_formatted())
     };
     if write_line(w, &ack).await.is_err() {
         return;
@@ -1953,26 +1954,7 @@ async fn run_attach<W: AsyncWrite + Unpin>(
     if !snapshot.is_empty() && w.write_all(&snapshot).await.is_err() {
         return;
     }
-    loop {
-        // out_tx Sender는 Surface 구조체가 소유라 자력 종료(셸 exit) 후에도 채널이 닫히지
-        // 않는다 — exited 플래그를 주기 점검해 스트림을 끝내야 클라이언트가 EOF를 받는다.
-        tokio::select! {
-            r = rx.recv() => match r {
-                Ok(chunk) => {
-                    if w.write_all(&chunk).await.is_err() || w.flush().await.is_err() {
-                        return;
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(_) => return,
-            },
-            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
-                if surface.exited.load(std::sync::atomic::Ordering::Relaxed) {
-                    return;
-                }
-            }
-        }
-    }
+    output::pump(w, &mut rx, &surface.output, cursor, surface_id, &surface.exited).await;
 }
 
 #[cfg(test)]
@@ -2036,13 +2018,13 @@ mod attach_race_tests {
     use std::sync::Arc;
 
     /// ★회귀 박제 (state.rs reader thread ↔ main.rs run_attach 불변식):
-    /// run_attach는 parser 락 아래에서 `out_tx.subscribe()`+화면 스냅샷을 원자적으로 뜬다
+    /// run_attach는 parser 락 아래에서 `output.subscribe()`+화면 스냅샷을 원자적으로 뜬다
     /// (main.rs:538-542). 그 불변식이 성립하려면 reader 스레드도 `parser.process(chunk)`와
-    /// `out_tx.send(chunk)`를 같은 parser 락 임계영역에 묶어야 한다. 둘이 분리되면
+    /// `output.publish(chunk)`를 같은 parser 락 임계영역에 묶어야 한다. 둘이 분리되면
     /// (과거 버그) 다음 인터리빙이 같은 청크를 스냅샷·live 양쪽에 중복 배달한다:
     ///   ① reader: process(C) 후 락 해제
     ///   ② attach: 락 획득→subscribe(rx)→스냅샷(C 반영됨)→락 해제
-    ///   ③ reader: out_tx.send(C) → ②의 rx가 C를 live로 수신  ⇒ C가 스냅샷+live 중복
+    ///   ③ reader: output.publish(C) → ②의 rx가 C를 live로 수신  ⇒ C가 스냅샷+live 중복
     ///
     /// 이 테스트는 run_attach가 하는 일(락 아래 subscribe+스냅샷)을 그대로 모사하는 관측자를
     /// 실제 Surface reader 스레드와 동시에 돌려, "스냅샷 시점에 파서에 이미 반영된 마지막
@@ -2091,11 +2073,11 @@ mod attach_race_tests {
                         break;
                     }
                     // ── run_attach와 동일: parser 락 아래 subscribe + 스냅샷 ──
-                    let (mut rx, snapshot_markers) = {
+                    let (mut rx, mut cursor, snapshot_markers) = {
                         let parser = surf.parser.lock().unwrap_or_else(|e| e.into_inner());
-                        let rx = surf.out_tx.subscribe();
+                        let (rx, cursor) = surf.output.subscribe();
                         let snap = parser.screen().contents();
-                        (rx, parse_markers(snap.as_bytes()))
+                        (rx, cursor, parse_markers(snap.as_bytes()))
                     };
                     // 스냅샷에 마지막으로 보인(=파서에 이미 반영된) 마커. 이 마커는
                     // 결합(수정) 시 '이미 send 완료'라 새 rx로는 절대 오면 안 된다.
@@ -2108,7 +2090,12 @@ mod attach_race_tests {
                         std::time::Instant::now() + std::time::Duration::from_micros(500);
                     while std::time::Instant::now() < deadline {
                         match rx.try_recv() {
-                            Ok(bytes) => live.extend(parse_markers(&bytes)),
+                            Ok(()) => loop {
+                                let bytes = surf.output.read(cursor).expect("race observer within retention");
+                                if bytes.is_empty() { break; }
+                                cursor += bytes.len() as u64;
+                                live.extend(parse_markers(&bytes));
+                            },
                             Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
                                 std::thread::yield_now()
                             }
@@ -2142,7 +2129,7 @@ mod attach_race_tests {
         assert!(
             dup_incidents.is_empty(),
             "process↔send가 parser 락에서 분리되어 청크 중복 배달 발생: {} 건 (예: {:?}). \
-             reader 스레드는 process(chunk)와 out_tx.send(chunk)를 같은 parser 락 \
+             reader 스레드는 process(chunk)와 output.publish(chunk)를 같은 parser 락 \
              임계영역에 묶어야 한다.",
             dup_incidents.len(),
             &dup_incidents[..dup_incidents.len().min(8)]
